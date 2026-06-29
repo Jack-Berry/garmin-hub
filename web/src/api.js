@@ -32,4 +32,13 @@ export const api = {
   weekly: () => get('/api/summary/weekly'),
   raceOverride: (scheduleId, override) =>
     post(`/api/planned/${scheduleId}/race-override`, { override }),
+  profile: () => get('/api/profile'),
+  saveProfile: (fields) => post('/api/profile', fields),
+  personalRecords: () => get('/api/personal-records'),
+  racePredictions: () => get('/api/race-predictions'),
+  chat: (messages) => post('/api/coach/chat', { messages }),
+  contextDump: () => get('/api/coach/context-dump'),
+  coachNotes: (params = {}) => get(`/api/coach/notes${qs(params)}`),
+  generateDaily: () => post('/api/coach/daily', {}),
+  refreshIngest: () => post('/api/ingest/refresh'),
 };

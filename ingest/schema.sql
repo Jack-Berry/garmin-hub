@@ -228,3 +228,51 @@ CREATE TABLE IF NOT EXISTS coach_notes (
   date_range_start             TEXT,
   date_range_end               TEXT
 );
+
+-- =========================================================================
+-- profile — single-row coaching settings (id pinned to 1), injected into
+-- AI-coach prompts. Edited via the settings modal (GET/POST /api/profile).
+-- Shoes/races/injuries are growable lists, stored as JSON. Paces are NOT
+-- stored — the coach infers them from actual run data.
+-- =========================================================================
+CREATE TABLE IF NOT EXISTS profile (
+  id                           INTEGER PRIMARY KEY CHECK (id = 1),
+  shoes_json                   TEXT,    -- JSON array of {name, purpose}
+  races_json                   TEXT,    -- JSON array of {name, date, goal_time}
+  injuries_json                TEXT,    -- JSON array of constraint strings
+  general_notes                TEXT,    -- anything else for the coach
+  updated_at                   TEXT     -- ISO 8601, set on each write
+);
+-- Seed the single empty row so callers always find one (idempotent).
+INSERT OR IGNORE INTO profile (id) VALUES (1);
+
+-- =========================================================================
+-- personal_records — Garmin-sourced running PRs. One row per record type.
+-- Read-only / ingest-owned (the user does NOT edit these). Kept separate from
+-- the user-edited profile table so re-ingest can overwrite a beaten PR without
+-- ever clobbering user edits (same isolation rationale as is_race_override).
+-- =========================================================================
+CREATE TABLE IF NOT EXISTS personal_records (
+  type_id                      INTEGER PRIMARY KEY,  -- Garmin PR typeId (running: 1,2,3,4,5,7)
+  label                        TEXT,                 -- human label ("5K", "Longest Run"…)
+  value                        REAL,                 -- raw value: seconds (time) or metres (distance)
+  value_kind                   TEXT,                 -- 'time' | 'distance'
+  activity_id                  INTEGER,              -- source activity (NULL if not run-tied)
+  record_date                  TEXT,                 -- ISO date the record was set
+  raw_json                     TEXT
+);
+
+-- =========================================================================
+-- race_predictions — Garmin's current predicted race times (all in seconds).
+-- One row per prediction date (PK). Ingest-owned, read-only; callers read the
+-- most recent row for "current" predictions.
+-- =========================================================================
+CREATE TABLE IF NOT EXISTS race_predictions (
+  calendar_date                TEXT PRIMARY KEY,  -- Garmin's prediction date
+  time_5k_s                    INTEGER,
+  time_10k_s                   INTEGER,
+  time_half_s                  INTEGER,
+  time_marathon_s              INTEGER,
+  fetched_at                   TEXT,              -- ISO date this prediction was ingested
+  raw_json                     TEXT
+);

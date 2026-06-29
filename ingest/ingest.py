@@ -38,6 +38,20 @@ RECOVERY_WINDOW = 30         # days back from today to fetch recovery data
 RECOVERY_REFETCH = 3         # always re-fetch the most recent N days (fill in late)
 RECOVERY_DELAY_S = 0.5       # pause between per-date fetches (rate-limit courtesy)
 
+# Garmin personal-record typeIds we surface — running only. Garmin sends no
+# human label (prTypeLabelKey is null), so the typeId -> (label, value_kind) map
+# is hardcoded here. value_kind tells callers how to read `value`: time PRs are
+# seconds, Longest Run is metres. Non-running typeIds (step records 12-16 etc.)
+# are intentionally filtered out.
+PR_TYPES = {
+    1: ("1 km", "time"),
+    2: ("1 mile", "time"),
+    3: ("5K", "time"),
+    4: ("10K", "time"),
+    5: ("Half Marathon", "time"),
+    7: ("Longest Run", "distance"),
+}
+
 INGEST_DIR = Path(__file__).resolve().parent
 REPO_ROOT = INGEST_DIR.parent
 DB_PATH = REPO_ROOT / "data" / "garmin.db"
@@ -521,6 +535,70 @@ def ingest_recovery(g, conn, summary):
 
 
 # =========================================================================
+# Pull 4 — Personal records (Garmin-sourced running bests)
+# =========================================================================
+def ingest_personal_records(g, conn, summary):
+    try:
+        records = g.get_personal_record()
+    except Exception as e:
+        summary["errors"].append(f"personal_records: {e}")
+        return
+    if not isinstance(records, list):
+        records = []
+
+    for rec in records:
+        type_id = rec.get("typeId")
+        if type_id not in PR_TYPES:   # running PRs only; skip step records etc.
+            continue
+        label, value_kind = PR_TYPES[type_id]
+        # Record date: prefer the source activity's local start, fall back to
+        # the PR set-time fields; keep just the ISO date (drop the time part).
+        stamp = pick(rec, "activityStartDateTimeLocalFormatted",
+                     "prStartTimeLocalFormatted",
+                     "actStartDateTimeInGMTFormatted",
+                     "prStartTimeGmtFormatted")
+        record_date = stamp[:10] if stamp else None
+        activity_id = pick(rec, "activityId")
+        row = {
+            "type_id": type_id,
+            "label": label,
+            "value": pick(rec, "value"),
+            "value_kind": value_kind,
+            "activity_id": activity_id or None,   # Garmin sends 0 when not run-tied
+            "record_date": record_date,
+            "raw_json": dumps(rec),
+        }
+        # Upsert on type_id: one row per record type, so a beaten PR overwrites.
+        result = upsert(conn, "personal_records", ["type_id"], row)
+        summary["personal_records"][result] += 1
+
+
+# =========================================================================
+# Pull 5 — Race predictions (Garmin's current predicted race times)
+# =========================================================================
+def ingest_race_predictions(g, conn, summary):
+    try:
+        rp = g.get_race_predictions()
+    except Exception as e:
+        summary["errors"].append(f"race_predictions: {e}")
+        return
+    if not isinstance(rp, dict) or not rp:
+        return
+
+    row = {
+        "calendar_date": pick(rp, "calendarDate") or str(date.today()),
+        "time_5k_s": pick(rp, "time5K"),
+        "time_10k_s": pick(rp, "time10K"),
+        "time_half_s": pick(rp, "timeHalfMarathon"),
+        "time_marathon_s": pick(rp, "timeMarathon"),
+        "fetched_at": str(date.today()),
+        "raw_json": dumps(rp),
+    }
+    result = upsert(conn, "race_predictions", ["calendar_date"], row)
+    summary["race_predictions"][result] += 1
+
+
+# =========================================================================
 # Main
 # =========================================================================
 def main():
@@ -531,6 +609,8 @@ def main():
         "laps": {"inserted": 0, "updated": 0},
         "planned": {"inserted": 0, "updated": 0},
         "recovery": {"inserted": 0, "updated": 0},
+        "personal_records": {"inserted": 0, "updated": 0},
+        "race_predictions": {"inserted": 0, "updated": 0},
         "errors": [],
     }
 
@@ -541,7 +621,9 @@ def main():
 
     for label, fn in (("activities", ingest_activities),
                       ("planned", ingest_planned),
-                      ("recovery", ingest_recovery)):
+                      ("recovery", ingest_recovery),
+                      ("personal_records", ingest_personal_records),
+                      ("race_predictions", ingest_race_predictions)):
         try:
             fn(g, conn, summary)
             conn.commit()
@@ -552,7 +634,8 @@ def main():
 
     # --- Summary -----------------------------------------------------------
     print("\n=== Ingest summary ===")
-    for t in ("activities", "laps", "planned", "recovery"):
+    for t in ("activities", "laps", "planned", "recovery",
+              "personal_records", "race_predictions"):
         s = summary[t]
         print(f"{t:12s} inserted={s['inserted']:4d}  updated={s['updated']:4d}")
     if summary["errors"]:

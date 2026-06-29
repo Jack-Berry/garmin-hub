@@ -70,6 +70,60 @@ export function PageMore({ visible, total, base, step, set }) {
   );
 }
 
+// Minimal markdown renderer for AI-coach output (chat replies + daily insight).
+// The coach emits short prose with **bold**, ## headers, blank-line paragraphs,
+// and simple - / * bullet lists — that's all this handles, deliberately. Not a
+// full parser.
+const renderInline = (text) =>
+  // Split on **bold** spans; odd indices are the emphasised segments.
+  text.split(/\*\*(.+?)\*\*/g).map((seg, i) =>
+    i % 2 ? <strong key={i}>{seg}</strong> : seg
+  );
+
+export function Markdown({ children, className = '' }) {
+  const blocks = (children || '').trim().split(/\n{2,}/); // blank line = new block
+  return (
+    <div className={`space-y-2 ${className}`}>
+      {blocks.map((block, bi) => {
+        const lines = block.split('\n');
+        // ## / ### header (single line). Slightly larger, weighted, with space above.
+        const heading = block.match(/^#{2,3}\s+(.+)$/);
+        if (heading && lines.length === 1) {
+          return (
+            <h3
+              key={bi}
+              className="pt-2 text-[13px] font-semibold uppercase tracking-wide text-slate-500 first:pt-0 dark:text-slate-400"
+            >
+              {renderInline(heading[1])}
+            </h3>
+          );
+        }
+        const isList = lines.every((l) => /^\s*[-*]\s+/.test(l));
+        if (isList) {
+          return (
+            <ul key={bi} className="list-disc space-y-1 pl-5">
+              {lines.map((l, li) => (
+                <li key={li}>{renderInline(l.replace(/^\s*[-*]\s+/, ''))}</li>
+              ))}
+            </ul>
+          );
+        }
+        // Paragraph: keep single newlines as soft line breaks.
+        return (
+          <p key={bi}>
+            {lines.map((l, li) => (
+              <span key={li}>
+                {renderInline(l)}
+                {li < lines.length - 1 && <br />}
+              </span>
+            ))}
+          </p>
+        );
+      })}
+    </div>
+  );
+}
+
 export function Badge({ children, tone = 'slate' }) {
   const tones = {
     slate: 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300',

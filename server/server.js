@@ -1,8 +1,13 @@
 // Garmin Hub — read-only Express API over data/garmin.db.
-const express = require('express');
 const path = require('path');
+// Load server/.env (holds ANTHROPIC_API_KEY) before requiring the coach client.
+require('dotenv').config({ path: path.resolve(__dirname, '.env') });
+const { spawn } = require('child_process');
+const express = require('express');
 const Database = require('better-sqlite3');
 const db = require('./db');
+const { buildContext, renderContextDump } = require('./context');
+const { generateDailyInsight, chatReply } = require('./coach');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -36,6 +41,15 @@ const LAP_COLS = cols('laps');
 const handler = (fn) => (req, res) => {
   try {
     fn(req, res);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// Async variant for handlers that await (e.g. the Claude call).
+const asyncHandler = (fn) => async (req, res) => {
+  try {
+    await fn(req, res);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -132,6 +146,52 @@ app.get('/api/summary/weekly', handler((req, res) => {
   res.json(rows);
 }));
 
+// seconds -> "M:SS" or "H:MM:SS" (for PR / prediction times).
+const fmtDuration = (s) => {
+  s = Math.round(s);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  return h
+    ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
+    : `${m}:${String(sec).padStart(2, '0')}`;
+};
+
+// Garmin-sourced personal records (read-only), one per record type, with a
+// display string (time formatted, or distance in km) for the frontend.
+app.get('/api/personal-records', handler((req, res) => {
+  const rows = db.prepare(
+    `SELECT type_id, label, value, value_kind, activity_id, record_date
+     FROM personal_records ORDER BY type_id`
+  ).all();
+  res.json(rows.map((r) => ({
+    ...r,
+    value_display: r.value_kind === 'distance'
+      ? `${(r.value / 1000).toFixed(2)} km`
+      : fmtDuration(r.value),
+  })));
+}));
+
+// Current (most recent) Garmin race predictions, times formatted.
+app.get('/api/race-predictions', handler((req, res) => {
+  const row = db.prepare(
+    `SELECT calendar_date, time_5k_s, time_10k_s, time_half_s, time_marathon_s, fetched_at
+     FROM race_predictions ORDER BY calendar_date DESC LIMIT 1`
+  ).get();
+  if (!row) return res.json(null);
+  const pred = (label, seconds) => ({ label, seconds, display: fmtDuration(seconds) });
+  res.json({
+    calendar_date: row.calendar_date,
+    fetched_at: row.fetched_at,
+    predictions: [
+      pred('5K', row.time_5k_s),
+      pred('10K', row.time_10k_s),
+      pred('Half Marathon', row.time_half_s),
+      pred('Marathon', row.time_marathon_s),
+    ],
+  });
+}));
+
 // Set/clear the manual race override for a planned workout. Body: { override }
 // where override is 1 (force race), 0 (force not-race), or null (revert to
 // auto detection). Writes ONLY is_race_override — never any other column.
@@ -149,5 +209,168 @@ app.post('/api/planned/:schedule_id/race-override', handler((req, res) => {
   }
   res.json({ schedule_id: scheduleId, is_race_override: override });
 }));
+
+// Coaching profile (single row). Shoes/races/injuries are growable lists
+// stored as JSON; general_notes is plain text. GET returns parsed arrays;
+// POST stores them via the writable connection (same pattern as race-override).
+const parseList = (s) => { try { return s ? JSON.parse(s) : []; } catch { return []; } };
+
+const readProfile = () => {
+  const row = db.prepare(
+    'SELECT shoes_json, races_json, injuries_json, general_notes, updated_at FROM profile WHERE id = 1'
+  ).get() || {};
+  return {
+    shoes: parseList(row.shoes_json),
+    races: parseList(row.races_json),
+    injuries: parseList(row.injuries_json),
+    general_notes: row.general_notes || '',
+    updated_at: row.updated_at || null,
+  };
+};
+
+app.get('/api/profile', handler((req, res) => {
+  res.json(readProfile());
+}));
+
+app.post('/api/profile', handler((req, res) => {
+  const b = req.body || {};
+  const arr = (v) => (Array.isArray(v) ? v : []);
+  writeDb.prepare(
+    `UPDATE profile SET shoes_json = :shoes, races_json = :races,
+       injuries_json = :injuries, general_notes = :notes, updated_at = :updated_at
+     WHERE id = 1`
+  ).run({
+    shoes: JSON.stringify(arr(b.shoes)),
+    races: JSON.stringify(arr(b.races)),
+    injuries: JSON.stringify(arr(b.injuries)),
+    notes: b.general_notes || '',
+    updated_at: new Date().toISOString(),
+  });
+  res.json(readProfile());
+}));
+
+// Assembled coaching context — the compact structured summary the AI coach
+// will consume. Inspect this to gauge shape/token-weight before wiring a model.
+app.get('/api/coach/context', handler((req, res) => {
+  res.json(buildContext(db));
+}));
+
+// Copy-context dump — the full coaching context rendered as a readable text
+// block with a priming prompt on top, ready to paste into an external LLM chat
+// for a longer conversation than the in-app widget is meant for. Read-only.
+app.get('/api/coach/context-dump', handler((req, res) => {
+  res.json({ dump: renderContextDump(db) });
+}));
+
+// Generate a fresh daily coaching insight (spends Claude API credit), store it
+// in coach_notes, and return it. Write — uses the writable connection.
+app.post('/api/coach/daily', asyncHandler(async (req, res) => {
+  const { text, context, model } = await generateDailyInsight(db);
+  const createdAt = new Date().toISOString();
+  const end = createdAt.slice(0, 10);
+  const start = new Date(Date.now() - context.window_days * 86400000)
+    .toISOString().slice(0, 10);
+  const result = writeDb.prepare(
+    `INSERT INTO coach_notes
+       (created_at, note_type, content, model, date_range_start, date_range_end)
+     VALUES (?, 'daily', ?, ?, ?, ?)`
+  ).run(createdAt, text, model, start, end);
+  res.json({
+    id: result.lastInsertRowid,
+    created_at: createdAt,
+    note_type: 'daily',
+    content: text,
+    model,
+    date_range_start: start,
+    date_range_end: end,
+  });
+}));
+
+// Interactive chat with the coach (spends Sonnet credit). Body: { messages }
+// — the full conversation so far ([{role, content}, ...]). Stateless: nothing
+// is persisted. Returns { reply } with the assistant's text.
+app.post('/api/coach/chat', asyncHandler(async (req, res) => {
+  const { messages } = req.body || {};
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return res.status(400).json({ error: 'messages must be a non-empty array' });
+  }
+  const reply = await chatReply(db, messages);
+  res.json({ reply });
+}));
+
+// Recent coach notes, newest first. ?limit (default 10), ?note_type filters
+// to one kind (e.g. 'daily' for the dashboard hero carousel).
+app.get('/api/coach/notes', handler((req, res) => {
+  const limit = Number(req.query.limit) || 10;
+  const { note_type } = req.query;
+  const rows = db.prepare(
+    `SELECT id, created_at, note_type, content, model, date_range_start, date_range_end
+     FROM coach_notes
+     WHERE (:note_type IS NULL OR note_type = :note_type)
+     ORDER BY id DESC LIMIT :limit`
+  ).all({ limit, note_type: note_type || null });
+  res.json(rows);
+}));
+
+// Manually trigger the Python ingest (e.g. right after a run) instead of
+// waiting for the daily cron. Spawns ingest.py and waits for it to finish.
+// Interpreter is configurable via INGEST_PYTHON (the Pi differs from this Mac);
+// the script path is resolved relative to the repo root.
+const INGEST_PYTHON = process.env.INGEST_PYTHON || '/usr/local/bin/python3.13';
+const INGEST_SCRIPT = path.resolve(__dirname, '..', 'ingest', 'ingest.py');
+const INGEST_TIMEOUT_MS = 120000;
+// In-process lock: single-user app, so a boolean is enough to stop a second
+// ingest spawning while one is in flight (manual click or a future cron tick).
+let ingestRunning = false;
+
+app.post('/api/ingest/refresh', (req, res) => {
+  if (ingestRunning) {
+    return res.status(409).json({ error: 'ingest already running' });
+  }
+  ingestRunning = true;
+
+  const child = spawn(INGEST_PYTHON, [INGEST_SCRIPT], {
+    cwd: path.resolve(__dirname, '..'),
+  });
+
+  let out = '';
+  let settled = false;
+  // Release the lock and respond exactly once, on whichever path fires first.
+  const finish = (send) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    ingestRunning = false;
+    send();
+  };
+
+  child.stdout.on('data', (d) => { out += d; });
+  child.stderr.on('data', (d) => { out += d; });
+
+  // Guard against a hang — most likely the garth token expired and ingest is
+  // blocked on an MFA prompt that can't be answered headless. Kill and hint.
+  const timer = setTimeout(() => {
+    child.kill('SIGKILL');
+    finish(() => res.status(504).json({
+      error: 'Ingest timed out — the Garmin token may have expired. Run the ingest manually in a terminal once to re-authenticate (MFA).',
+    }));
+  }, INGEST_TIMEOUT_MS);
+
+  child.on('error', (err) => {
+    finish(() => res.status(500).json({ error: `Failed to start ingest: ${err.message}` }));
+  });
+
+  child.on('close', (code) => {
+    const tail = out.trim().split('\n').slice(-8).join('\n');
+    if (code === 0) {
+      finish(() => res.json({ ok: true, summary: tail }));
+    } else {
+      finish(() => res.status(500).json({
+        error: `Ingest failed (exit ${code}). If it stalled on login, the Garmin token may have expired — run it manually in a terminal to re-authenticate (MFA).`,
+        summary: tail,
+      }));
+    }
+  });
+});
 
 app.listen(PORT, () => console.log(`Garmin Hub API listening on port ${PORT}`));

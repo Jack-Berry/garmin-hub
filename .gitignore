@@ -17,6 +17,7 @@ data/*.db-shm
 .garminconnect/
 .garth/
 garmin_dump.json
+pr_dump.json
 
 # --- Python ---
 __pycache__/
