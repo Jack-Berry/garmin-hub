@@ -144,7 +144,8 @@ CREATE TABLE IF NOT EXISTS planned_workouts (
   calendar_date                TEXT,
   title                        TEXT,
   sport_type                   TEXT,
-  is_race                      INTEGER,              -- 0/1
+  is_race_auto                 INTEGER,              -- 0/1, keyword-derived; owned & overwritten by ingest
+  is_race_override             INTEGER,              -- 0/1 manual override; NULL = none; ingest NEVER writes this
   estimated_distance_m         REAL,
   estimated_duration_s         REAL,
   steps_json                   TEXT,                 -- parsed step structure
@@ -154,6 +155,64 @@ CREATE TABLE IF NOT EXISTS planned_workouts (
 
 CREATE INDEX IF NOT EXISTS idx_planned_workouts_calendar_date
   ON planned_workouts (calendar_date);
+
+-- =========================================================================
+-- recovery — one row per calendar date (HRV, sleep, readiness, stress, etc.)
+-- Consolidates several daily wellness payloads into a single typed row.
+-- =========================================================================
+CREATE TABLE IF NOT EXISTS recovery (
+  calendar_date                TEXT PRIMARY KEY,
+
+  -- HRV (get_hrv_data -> hrvSummary)
+  hrv_last_night               INTEGER,
+  hrv_weekly_avg               INTEGER,
+  hrv_status                   TEXT,
+  hrv_baseline_low             INTEGER,
+  hrv_baseline_balanced_low    INTEGER,
+  hrv_baseline_balanced_upper  INTEGER,
+
+  -- Resting HR (get_rhr_day)
+  resting_hr                   REAL,
+
+  -- Sleep (get_sleep_data -> dailySleepDTO)
+  sleep_seconds                INTEGER,
+  deep_sleep_seconds           INTEGER,
+  light_sleep_seconds          INTEGER,
+  rem_sleep_seconds            INTEGER,
+  awake_seconds                INTEGER,
+  sleep_score                  INTEGER,
+  sleep_score_qualifier        TEXT,
+  avg_sleep_stress             REAL,
+
+  -- Training readiness (get_training_readiness, most recent entry)
+  readiness_score              INTEGER,
+  readiness_level              TEXT,
+  readiness_feedback           TEXT,
+  recovery_time_minutes        REAL,
+  acute_load                   REAL,
+  sleep_factor_pct             INTEGER,
+  recovery_time_factor_pct     INTEGER,
+  acwr_factor_pct              INTEGER,
+  stress_factor_pct            INTEGER,
+  hrv_factor_pct               INTEGER,
+  sleep_history_factor_pct     INTEGER,
+
+  -- Training status (get_training_status)
+  training_status              TEXT,
+  vo2max                       REAL,
+
+  -- Stress (get_all_day_stress)
+  avg_stress                   INTEGER,
+  max_stress                   INTEGER,
+
+  -- Body Battery (get_body_battery, most recent entry)
+  bb_charged                   INTEGER,
+  bb_drained                   INTEGER,
+
+  -- Fidelity safety net (consolidated dict of all source payloads)
+  raw_json                     TEXT
+);
+-- PK already indexes calendar_date; no separate index needed.
 
 -- =========================================================================
 -- coach_notes — AI coaching output (our own data, no raw_json)
