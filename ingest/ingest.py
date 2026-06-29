@@ -93,6 +93,24 @@ def is_race_keyword(*texts):
     return 1 if any(t and _RACE_RE.search(t) for t in texts) else 0
 
 
+def activity_group(type_key):
+    """Bucket a Garmin activityType.typeKey into a coarse group for filtering.
+
+    run      ← any *_running variant (running, treadmill_running, trail_running…)
+    football ← Garmin's 'soccer' (or 'football')
+    walk     ← any *walking variant
+    other    ← everything else
+    (Mirrored in migrate_activity_type.py for the one-off backfill.)"""
+    k = (type_key or "").lower()
+    if "running" in k:
+        return "run"
+    if k in ("soccer", "football"):
+        return "football"
+    if "walking" in k:
+        return "walk"
+    return "other"
+
+
 def upsert(conn, table, pk_cols, row):
     """Generic INSERT ... ON CONFLICT(pk) DO UPDATE for a dict of columns.
 
@@ -170,6 +188,8 @@ def ingest_activities(g, conn, summary):
             "name": pick(a, "activityName"),
             "start_time_local": pick(a, "startTimeLocal"),
             "location_name": pick(a, "locationName"),
+            "activity_type": nested(a, "activityType", "typeKey"),
+            "activity_group": activity_group(nested(a, "activityType", "typeKey")),
 
             "distance_m": pick(a, "distance"),
             "duration_s": pick(a, "duration"),

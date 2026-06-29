@@ -12,6 +12,8 @@ CREATE TABLE IF NOT EXISTS activities (
   name                         TEXT,
   start_time_local             TEXT,    -- ISO 8601
   location_name                TEXT,
+  activity_type                TEXT,    -- Garmin activityType.typeKey (e.g. running)
+  activity_group               TEXT,    -- derived bucket: run/football/walk/other
 
   -- Distance / duration / speed
   distance_m                   REAL,
