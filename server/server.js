@@ -7,6 +7,7 @@ const express = require('express');
 const Database = require('better-sqlite3');
 const db = require('./db');
 const { buildContext, renderContextDump } = require('./context');
+const { collapseRaceDuplicates } = require('./planned');
 const { generateBrief, generateDetailedReport, generateDayInsight, chatReply } = require('./coach');
 const { pacerChat } = require('./pacer');
 
@@ -104,7 +105,9 @@ app.get('/api/planned', handler((req, res) => {
             estimated_distance_m, estimated_duration_s, steps_json
      FROM planned_workouts ${clause} ORDER BY calendar_date`
   ).all(params);
-  const out = rows.map((r) => {
+  // Collapse same-day race triplicates (Runna race + manual override + pacer)
+  // into one row before shaping; the survivor carries a pacer_available flag.
+  const out = collapseRaceDuplicates(rows).map((r) => {
     const { steps_json, ...rest } = r;
     return { ...rest, steps: steps_json ? JSON.parse(steps_json) : null };
   });

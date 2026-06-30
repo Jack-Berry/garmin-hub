@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from './api';
-import { Markdown } from './ui';
+import { Icon, Markdown } from './ui';
 
 // Floating chat coach — a discreet bottom-right widget that answers training
 // questions using the same context engine as the daily insight. Conversation
@@ -82,7 +82,7 @@ export default function ChatWidget() {
         aria-label="Open coach chat"
         className="fixed bottom-5 right-5 z-40 flex h-14 w-14 items-center justify-center rounded-full bg-indigo-500 text-2xl text-white shadow-lg transition hover:bg-indigo-600"
       >
-        💬
+        <Icon name="message-circle" />
       </button>
     );
   }

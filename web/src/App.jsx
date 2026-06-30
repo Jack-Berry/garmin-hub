@@ -5,7 +5,6 @@ import Hero from './sections/Hero';
 import RecentActivities from './sections/RecentActivities';
 import Recovery from './sections/Recovery';
 import PlannedWorkouts from './sections/PlannedWorkouts';
-import PlannedVsActual from './sections/PlannedVsActual';
 import SettingsModal from './SettingsModal';
 import PacerModal from './PacerModal';
 import ChatWidget from './ChatWidget';
@@ -96,10 +95,18 @@ export default function App() {
         <main key={refreshKey} className="mx-auto max-w-5xl space-y-6 px-6 py-8">
           <DailyInsight />
           <Hero />
-          <RecentActivities />
+          {/* Lower dashboard — a full-width Recovery band on top, then Recent
+              activities (wide, table) beside Upcoming planned (narrow, list).
+              The two columns top-align and collapse to a single column on
+              narrow widths. */}
           <Recovery />
-          <PlannedWorkouts />
-          <PlannedVsActual />
+          {/* [&>*]:min-w-0 stops the fr tracks blowing out wider than the shared
+              max-w-5xl width — without it the table/badges force the columns
+              (and the section's right edge) past the dashboard's right margin. */}
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1.5fr_1fr] lg:items-start [&>*]:min-w-0">
+            <RecentActivities />
+            <PlannedWorkouts />
+          </div>
         </main>
 
         {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}

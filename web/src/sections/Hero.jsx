@@ -157,7 +157,7 @@ export default function Hero() {
 
   const slides = [
     { key: 'week', label: 'This Week', node: <WeekStrip planned={planned.data} activities={acts.data} routines={profile.data?.routines} onSelectDay={setDay} /> },
-    { key: 'pace', label: 'Pace trend', node: <PaceSlide activities={acts.data} /> },
+    { key: 'pace', label: 'Activity trend', node: <PaceSlide activities={acts.data} /> },
     { key: 'load', label: 'Load', node: <LoadSlide weekly={weekly.data} /> },
   ];
 

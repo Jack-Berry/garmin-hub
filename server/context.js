@@ -2,6 +2,7 @@
 // from the DB for the AI coach. Summarises (never dumps) recent runs, recovery,
 // upcoming planned workouts, the profile, and a few code-derived signals.
 // Read-only: takes the shared read-only db connection.
+const { collapseRaceDuplicates } = require('./planned');
 
 // Profile lists are stored as JSON text; parse defensively.
 const parseList = (s) => { try { return s ? JSON.parse(s) : []; } catch { return []; } };
@@ -217,19 +218,24 @@ function buildContext(db) {
   };
 
   // --- Upcoming planned workouts (next 14 days) ---
+  // is_race_auto / is_race_override come along raw so collapseRaceDuplicates can
+  // fold the same-day race triplicate (Runna race + manual override + pacer)
+  // into one entry — otherwise the coach sees and counts the race three times.
   const planRows = db.prepare(
     `SELECT calendar_date, title, estimated_distance_m,
+            is_race_auto, is_race_override,
             COALESCE(is_race_override, is_race_auto) AS is_race, steps_json
      FROM planned_workouts
      WHERE calendar_date >= date('now') AND calendar_date <= date('now', '+14 days')
      ORDER BY calendar_date`
   ).all();
 
-  const upcoming = planRows.map((p) => ({
+  const upcoming = collapseRaceDuplicates(planRows).map((p) => ({
     date: p.calendar_date,
     title: p.title,
     km: p.estimated_distance_m ? +(p.estimated_distance_m / 1000).toFixed(2) : null,
     is_race: !!p.is_race,
+    pacer_ready: !!p.pacer_available,
     steps: parseSteps(p.steps_json),
   }));
 
@@ -465,7 +471,8 @@ function renderContextDump(db) {
   if (!c.upcoming.length) out.push('Nothing scheduled.');
   c.upcoming.forEach((p) => {
     const km = p.km != null ? ` — ${p.km}km` : '';
-    out.push(`${p.date} — ${p.title || 'workout'}${km}${p.is_race ? '  [RACE]' : ''}`);
+    const tags = `${p.is_race ? '  [RACE]' : ''}${p.pacer_ready ? '  [pacer ready]' : ''}`;
+    out.push(`${p.date} — ${p.title || 'workout'}${km}${tags}`);
     if (p.steps && p.steps.length) out.push(`    steps: ${p.steps.join(' | ')}`);
   });
 

@@ -30,9 +30,13 @@ function workoutLabel(title) {
 const ROUTINE_ICON = { football: 'ball-football', walk: 'walk', run: 'run' };
 const routineIcon = (group) => ROUTINE_ICON[group] || 'barbell';
 
-// Centred focal activity: a monochrome icon above the name, optional detail (km)
-// below. The run line uses this; `tone` colours the icon (done = success green,
-// planned = muted).
+// Centred focal activity, used uniformly for runs AND recurring routine
+// activities (football, gym…): a monochrome icon above the name, with a detail
+// line (km) below. `tone` colours the icon — 'done' = success green (logged),
+// anything else = muted (planned run / not-yet-logged routine), the same way a
+// planned run reads muted vs a done run green. The detail line is always present
+// (a blank space when there's no km) so every cell's icon + name align at the
+// same height regardless of whether it carries a distance.
 function ActivityBlock({ icon, tone, name, detail }) {
   const iconClass = tone === 'done'
     ? 'text-emerald-600 dark:text-emerald-400'
@@ -43,29 +47,9 @@ function ActivityBlock({ icon, tone, name, detail }) {
       <div className="max-w-full truncate text-[16px] font-medium leading-tight text-slate-700 dark:text-slate-200">
         {name}
       </div>
-      {detail && (
-        <div className="text-[10px] tabular-nums text-slate-400 dark:text-slate-500">{detail}</div>
-      )}
-    </div>
-  );
-}
-
-// A recurring profile activity (football, gym…) as a compact chip, stackable
-// under a run line or standing alone on a routine-only day. Two states: 'done'
-// (a matching activity was logged — solid success colour) and 'expected'
-// (today/future, not yet logged — dashed outline, no "expected" text; the dashed
-// style is the signal). A past routine with nothing logged isn't rendered here
-// at all — the day falls back to plain Rest.
-function RoutineChip({ icon, name, done }) {
-  return done ? (
-    <div className="flex max-w-full items-center gap-1 text-[11px] font-medium text-emerald-600 dark:text-emerald-400">
-      <Icon name={icon} className="text-sm" />
-      <span className="truncate">{name}</span>
-    </div>
-  ) : (
-    <div className="flex max-w-full items-center gap-1 rounded-full border border-dashed border-slate-300 px-2 py-0.5 text-[11px] text-slate-500 dark:border-slate-700 dark:text-slate-400">
-      <Icon name={icon} className="text-sm" />
-      <span className="truncate">{name}</span>
+      <div className="text-[10px] tabular-nums text-slate-400 dark:text-slate-500">
+        {detail || ' '}
+      </div>
     </div>
   );
 }
@@ -186,10 +170,10 @@ export default function WeekStrip({ planned, activities, routines, onSelectDay }
                 ) : null}
 
                 {routineState && (
-                  <RoutineChip
+                  <ActivityBlock
                     icon={routineIcon(routine.group)}
+                    tone={routineState === 'done' ? 'done' : 'planned'}
                     name={routine.activity}
-                    done={routineState === 'done'}
                   />
                 )}
 

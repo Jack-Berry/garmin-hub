@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { api } from '../api';
 import { useFetch } from '../useFetch';
-import { Section, StateWrap, Badge } from '../ui';
+import { Section, StateWrap, Badge, Icon } from '../ui';
 import { km, shortDate, todayISO } from '../format';
 
 // One planned workout row with its race-override controls.
@@ -20,12 +20,16 @@ function PlannedRow({ w, onChanged }) {
   };
 
   return (
-    <li className="flex items-center justify-between gap-3 py-3">
+    <li className="flex items-center justify-between gap-3 py-2">
       <div className="min-w-0">
         <div className="flex items-center gap-2">
           <span className="truncate text-sm font-medium text-slate-900 dark:text-slate-100">{w.title}</span>
           {w.is_race ? <Badge tone="amber">Race</Badge> : null}
           {overridden ? <Badge tone="slate">manual</Badge> : null}
+          {/* The same-day Engo pacer was collapsed into this row — flag it. */}
+          {w.pacer_available ? (
+            <Badge tone="indigo"><Icon name="stopwatch" className="mr-1" />pacer ready</Badge>
+          ) : null}
         </div>
         <div className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
           {shortDate(w.calendar_date)}
@@ -58,7 +62,7 @@ function PlannedRow({ w, onChanged }) {
 export default function PlannedWorkouts() {
   const { data, loading, error, reload } = useFetch(() => api.planned({ from: todayISO() }));
   return (
-    <Section title="Upcoming planned workouts" subtitle="From Runna · toggle a race override">
+    <Section title="Upcoming planned" subtitle="From Runna · toggle a race override">
       <StateWrap loading={loading} error={error} empty={!data || !data.length}>
         {data && (
           <ul className="divide-y divide-slate-100 dark:divide-slate-800">
