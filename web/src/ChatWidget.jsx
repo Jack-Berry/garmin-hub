@@ -80,7 +80,7 @@ export default function ChatWidget() {
       <button
         onClick={() => setOpen(true)}
         aria-label="Open coach chat"
-        className="fixed bottom-5 right-5 z-40 flex h-14 w-14 items-center justify-center rounded-full bg-indigo-500 text-2xl text-white shadow-lg transition hover:bg-indigo-600"
+        className="fixed bottom-5 right-5 z-40 flex h-14 w-14 items-center justify-center rounded-full bg-acc text-2xl text-acc-ink shadow-lg transition hover:opacity-90"
       >
         <Icon name="message-circle" />
       </button>
@@ -88,13 +88,13 @@ export default function ChatWidget() {
   }
 
   return (
-    <div className="fixed bottom-5 right-5 z-40 flex h-[500px] w-[360px] max-w-[calc(100vw-2.5rem)] flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xl dark:border-slate-800 dark:bg-slate-900">
-      <header className="flex items-center justify-between border-b border-slate-100 px-4 py-3 dark:border-slate-800">
+    <div className="fixed bottom-5 right-5 z-40 flex h-[500px] w-[360px] max-w-[calc(100vw-2.5rem)] flex-col overflow-hidden rounded-2xl border border-line bg-surface-1 shadow-xl">
+      <header className="flex items-center justify-between border-b border-line px-4 py-3">
         <div>
-          <h2 className="text-sm font-semibold tracking-tight text-slate-900 dark:text-slate-100">
+          <h2 className="font-display text-[0.9375rem] font-bold uppercase tracking-[0.1em] text-ink">
             Coach
           </h2>
-          <p className="text-[11px] text-slate-500 dark:text-slate-400">
+          <p className="mt-0.5 font-body text-nano uppercase tracking-[0.18em] text-ink-muted">
             Asks the data, not the workout plan
           </p>
         </div>
@@ -104,18 +104,18 @@ export default function ChatWidget() {
             disabled={copyState === 'copying'}
             title="Copy your full training context to paste into another chat (Claude, ChatGPT, etc.)"
             aria-label="Copy training context"
-            className="rounded-lg border border-slate-300 px-2 py-1 text-xs text-slate-500 transition hover:bg-slate-100 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+            className="inline-flex items-center gap-1 rounded-lg border border-line px-2 py-1 text-xs text-ink-secondary transition hover:bg-surface-2 disabled:opacity-50"
           >
             {copyState === 'copied' ? 'Copied ✓'
               : copyState === 'error' ? 'Failed'
               : copyState === 'copying' ? '…'
-              : '📋 Context'}
+              : <><Icon name="clipboard" /> Context</>}
           </button>
           {messages.length > 0 && (
             <button
               onClick={() => { setMessages([]); setError(null); }}
               aria-label="Clear conversation"
-              className="rounded-lg border border-slate-300 px-2 py-1 text-xs text-slate-500 transition hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+              className="rounded-lg border border-line px-2 py-1 text-xs text-ink-secondary transition hover:bg-surface-2"
             >
               Clear
             </button>
@@ -123,7 +123,7 @@ export default function ChatWidget() {
           <button
             onClick={() => setOpen(false)}
             aria-label="Minimise chat"
-            className="rounded-lg border border-slate-300 px-2.5 py-1 text-sm text-slate-500 transition hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+            className="rounded-lg border border-line px-2.5 py-1 text-sm text-ink-secondary transition hover:bg-surface-2"
           >
             ✕
           </button>
@@ -132,7 +132,7 @@ export default function ChatWidget() {
 
       <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
         {messages.length === 0 && (
-          <p className="mt-2 text-center text-xs text-slate-400 dark:text-slate-500">
+          <p className="mt-2 text-center text-xs text-ink-muted">
             Ask about your training — paces, recovery, whether a goal is realistic,
             why a run felt hard.
           </p>
@@ -140,11 +140,11 @@ export default function ChatWidget() {
         {messages.map((m, i) => (
           <div key={i} className={m.role === 'user' ? 'flex justify-end' : 'flex justify-start'}>
             {m.role === 'user' ? (
-              <div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-sm bg-indigo-500 px-3 py-2 text-sm text-white">
+              <div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-sm bg-acc px-3 py-2 text-sm text-acc-ink">
                 {m.content}
               </div>
             ) : (
-              <Markdown className="max-w-[85%] rounded-2xl rounded-bl-sm bg-slate-100 px-3 py-2 text-sm text-slate-800 dark:bg-slate-800 dark:text-slate-100">
+              <Markdown className="max-w-[85%] rounded-2xl rounded-bl-sm bg-surface-2 px-3 py-2 font-body text-sm text-ink">
                 {m.content}
               </Markdown>
             )}
@@ -152,29 +152,29 @@ export default function ChatWidget() {
         ))}
         {pending && (
           <div className="flex justify-start">
-            <div className="rounded-2xl rounded-bl-sm bg-slate-100 px-3 py-2 text-sm text-slate-400 dark:bg-slate-800 dark:text-slate-500">
+            <div className="rounded-2xl rounded-bl-sm bg-surface-2 px-3 py-2 text-sm text-ink-muted">
               thinking…
             </div>
           </div>
         )}
-        {error && <p className="text-center text-xs text-rose-500">{error}</p>}
+        {error && <p className="text-center text-xs text-sem-red">{error}</p>}
       </div>
 
       {fallbackText && (
-        <div className="border-t border-slate-100 p-3 dark:border-slate-800">
-          <p className="mb-1 text-[11px] text-slate-500 dark:text-slate-400">
+        <div className="border-t border-line p-3">
+          <p className="mb-1 text-[11px] text-ink-muted">
             Clipboard blocked — select all and copy manually:
           </p>
           <textarea
             readOnly
             value={fallbackText}
             onFocus={(e) => e.target.select()}
-            className="h-28 w-full resize-none rounded-lg border border-slate-300 bg-white px-2 py-1 font-mono text-[11px] text-slate-800 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200"
+            className="h-28 w-full resize-none rounded-lg border border-line bg-surface-2 px-2 py-1 font-mono text-[11px] text-ink-secondary"
           />
         </div>
       )}
 
-      <div className="border-t border-slate-100 p-3 dark:border-slate-800">
+      <div className="border-t border-line p-3">
         <div className="flex items-end gap-2">
           <textarea
             rows={1}
@@ -182,12 +182,12 @@ export default function ChatWidget() {
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onKeyDown}
             placeholder="Ask your coach…"
-            className="max-h-32 flex-1 resize-none rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/20 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100 dark:placeholder:text-slate-600"
+            className="max-h-32 flex-1 resize-none rounded-lg border border-line bg-surface-2 px-3 py-2 text-sm text-ink shadow-sm outline-none transition placeholder:text-ink-muted focus:border-acc focus:ring-2 focus:ring-acc/20"
           />
           <button
             onClick={send}
             disabled={pending || !input.trim()}
-            className="rounded-lg bg-indigo-500 px-3 py-2 text-sm font-medium text-white transition hover:bg-indigo-600 disabled:opacity-50"
+            className="rounded-lg bg-acc px-3 py-2 text-sm font-medium text-acc-ink transition hover:opacity-90 disabled:opacity-50"
           >
             Send
           </button>

@@ -1,9 +1,14 @@
 // Shared presentational primitives + chart theme constants.
 
-export const ACCENT = '#6366f1'; // indigo-500, reads well on light + dark
-export const ACCENT_2 = '#10b981'; // emerald-500
-export const AXIS = '#94a3b8'; // slate-400
+// Chart accent now comes from the accent context (useAccentHex) so it follows
+// the picker — see accents.js. Axis ticks stay a neutral grey for both themes.
+export const AXIS = '#6c6c74';
 export const GRID = 'rgba(148,163,184,0.18)';
+// Monochrome chart ink for the design-system reskin (accent rule: resting data
+// is not "live", so its lines stay grey, not accent). Mid-grey reads on both
+// the dark card (#1c1c20) and the light card (#fff). Recharts strokes need a
+// concrete colour, so this is a fixed value rather than a theme-switched var.
+export const INK = '#83838c';
 
 // Tabler webfont icon (the stylesheet is loaded via the CDN <link> in
 // index.html). `name` is the icon slug without the `ti-` prefix, e.g.
@@ -12,16 +17,36 @@ export function Icon({ name, className = '' }) {
   return <i className={`ti ti-${name} ${className}`} aria-hidden="true" />;
 }
 
+// Shared button treatments (token-driven). Primary carries the accent (it's the
+// live/primary action — see the accent rule); ghost is monochrome outline.
+export const btnPrimary =
+  'rounded-lg bg-acc px-4 py-2 text-sm font-semibold text-acc-ink transition hover:opacity-90 disabled:opacity-50';
+export const btnGhost =
+  'rounded-lg border border-line px-3 py-2 text-sm font-medium text-ink-secondary transition hover:bg-surface-2 disabled:opacity-50';
+
+// Section title + subtitle treatment, reused by every card header. The reference
+// uses small condensed-uppercase Archivo eyebrows (not a big sentence-case
+// heading) with a wide-tracked Hanken subtitle.
+export function SectionTitle({ title, subtitle }) {
+  return (
+    <>
+      <h2 className="font-display text-[0.8125rem] font-bold uppercase tracking-[0.14em] text-ink">
+        {title}
+      </h2>
+      {subtitle && (
+        <p className="mt-1 font-body text-nano uppercase tracking-[0.18em] text-ink-muted">
+          {subtitle}
+        </p>
+      )}
+    </>
+  );
+}
+
 export function Section({ title, subtitle, children }) {
   return (
-    <section className="rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
-      <header className="border-b border-slate-100 px-5 py-4 dark:border-slate-800">
-        <h2 className="text-sm font-semibold tracking-tight text-slate-900 dark:text-slate-100">
-          {title}
-        </h2>
-        {subtitle && (
-          <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">{subtitle}</p>
-        )}
+    <section className="rounded-xl border border-line bg-surface-1">
+      <header className="border-b border-line px-5 py-4">
+        <SectionTitle title={title} subtitle={subtitle} />
       </header>
       <div className="p-5">{children}</div>
     </section>
@@ -30,23 +55,23 @@ export function Section({ title, subtitle, children }) {
 
 // Handles the loading / error / empty states uniformly.
 export function StateWrap({ loading, error, empty, children }) {
-  if (loading) return <p className="text-sm text-slate-400 dark:text-slate-500">Loading…</p>;
+  if (loading) return <p className="text-sm text-ink-muted">Loading…</p>;
   if (error)
-    return <p className="text-sm text-rose-500">Couldn’t load: {error.message}</p>;
-  if (empty) return <p className="text-sm text-slate-400 dark:text-slate-500">No data yet.</p>;
+    return <p className="text-sm text-sem-red">Couldn’t load: {error.message}</p>;
+  if (empty) return <p className="text-sm text-ink-muted">No data yet.</p>;
   return children;
 }
 
 export function Stat({ label, value, sub }) {
   return (
     <div>
-      <div className="text-2xl font-bold tabular-nums tracking-tight text-slate-900 dark:text-slate-100">
+      <div className="font-mono text-[1.5rem] font-semibold tabular-nums tracking-tight text-ink">
         {value}
       </div>
-      <div className="mt-0.5 text-[11px] font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">
+      <div className="mt-0.5 font-body text-micro font-semibold uppercase tracking-[0.14em] text-ink-muted">
         {label}
       </div>
-      {sub && <div className="text-xs text-slate-400 dark:text-slate-500">{sub}</div>}
+      {sub && <div className="font-body text-micro text-ink-muted">{sub}</div>}
     </div>
   );
 }
@@ -55,9 +80,9 @@ export function Stat({ label, value, sub }) {
 export function PageMore({ visible, total, base, step, set }) {
   if (total <= base) return null;
   const btn =
-    'rounded-md border border-slate-300 px-2 py-1 font-medium text-slate-600 transition hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800';
+    'rounded-md border border-line px-2 py-1 font-medium text-ink-secondary transition hover:bg-surface-2';
   return (
-    <div className="mt-3 flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
+    <div className="mt-3 flex items-center justify-between text-xs text-ink-muted">
       <span>
         Showing {Math.min(visible, total)} of {total}
       </span>
@@ -99,7 +124,7 @@ export function Markdown({ children, className = '' }) {
           return (
             <h3
               key={bi}
-              className="pt-2 text-[13px] font-semibold uppercase tracking-wide text-slate-500 first:pt-0 dark:text-slate-400"
+              className="pt-2 font-body text-label font-semibold uppercase tracking-[0.12em] text-ink-muted first:pt-0"
             >
               {renderInline(heading[1])}
             </h3>
@@ -131,16 +156,21 @@ export function Markdown({ children, className = '' }) {
   );
 }
 
+// Small status pill. `race` is a solid lime fill (the reference's signature RACE
+// marker); `indigo` is a subtle accent tint for live/ready states (e.g. a pacer).
 export function Badge({ children, tone = 'slate' }) {
   const tones = {
-    slate: 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300',
-    amber: 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-400',
-    indigo: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-500/15 dark:text-indigo-300',
-    emerald: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-400',
+    slate: 'bg-surface-2 text-ink-secondary',
+    race: 'bg-acc text-acc-ink',
+    amber: 'bg-sem-amber/15 text-sem-amber',
+    indigo: 'bg-acc/15 text-acc',
+    blue: 'bg-sem-blue/15 text-sem-blue',
+    violet: 'bg-sem-violet/15 text-sem-violet',
+    emerald: 'bg-sem-blue/15 text-sem-blue',
   };
   return (
     <span
-      className={`inline-flex items-center rounded-md px-1.5 py-0.5 text-[11px] font-medium ${tones[tone]}`}
+      className={`inline-flex items-center rounded-md px-1.5 py-0.5 font-body text-nano font-semibold uppercase tracking-[0.1em] ${tones[tone]}`}
     >
       {children}
     </span>

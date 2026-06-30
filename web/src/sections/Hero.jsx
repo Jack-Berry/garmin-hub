@@ -2,11 +2,12 @@ import { useState, useEffect } from 'react';
 import { api } from '../api';
 import { useFetch } from '../useFetch';
 import { kmNum, ymd, shortDate } from '../format';
-import { Icon } from '../ui';
 import InsightModal from '../InsightModal';
+import DailyInsight from './DailyInsight';
 import WeekStrip from '../hero/WeekStrip';
 import PaceSlide from '../hero/PaceSlide';
 import LoadSlide from '../hero/LoadSlide';
+import BalanceSlide from '../hero/BalanceSlide';
 
 // Auto-cycling carousel: advances every 12s, pauses on hover / focus / any
 // interaction, with manual arrows + clickable dots. Slides are kept mounted
@@ -26,7 +27,7 @@ function Carousel({ slides }) {
   const go = (i) => setIdx(((i % n) + n) % n);
 
   const arrow =
-    'flex h-8 w-8 items-center justify-center rounded-full border border-slate-300 text-lg text-slate-600 transition hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800';
+    'flex h-8 w-8 items-center justify-center rounded-full border border-line text-lg text-ink-secondary transition hover:bg-surface-2';
 
   return (
     <div
@@ -35,7 +36,7 @@ function Carousel({ slides }) {
       onFocusCapture={() => setPaused(true)}
       onBlurCapture={() => setPaused(false)}
     >
-      <div className="relative h-[380px] px-5 pt-5">
+      <div className="relative h-[264px] px-5 pt-5">
         {slides.map((s, i) => (
           <div
             key={s.key}
@@ -49,7 +50,7 @@ function Carousel({ slides }) {
         ))}
       </div>
 
-      <div className="flex items-center justify-between px-5 py-3">
+      <div className="flex items-center justify-between px-5 py-2.5">
         <button className={arrow} onClick={() => go(idx - 1)} aria-label="Previous slide">‹</button>
         <div className="flex items-center gap-2">
           {slides.map((s, i) => (
@@ -59,7 +60,7 @@ function Carousel({ slides }) {
               aria-label={s.label}
               title={s.label}
               className={`h-2 w-2 rounded-full transition ${
-                i === idx ? 'bg-indigo-500' : 'bg-slate-300 hover:bg-slate-400 dark:bg-slate-700 dark:hover:bg-slate-600'
+                i === idx ? 'bg-acc' : 'bg-ink-muted/40 hover:bg-ink-muted'
               }`}
             />
           ))}
@@ -70,18 +71,15 @@ function Carousel({ slides }) {
   );
 }
 
-function Tile({ icon, label, value, sub }) {
+function Tile({ label, value, sub, accent }) {
   return (
-    <div className="flex flex-1 items-center gap-3 px-4 py-3">
-      <Icon name={icon} className="text-2xl leading-none text-slate-400 dark:text-slate-500" />
-      <div className="min-w-0">
-        <div className="text-lg font-bold tabular-nums leading-tight text-slate-900 dark:text-slate-100">
-          {value}
-          {sub && <span className="ml-0.5 text-[11px] font-normal text-slate-400">{sub}</span>}
-        </div>
-        <div className="text-[11px] font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">
-          {label}
-        </div>
+    <div className="flex flex-1 flex-col justify-center px-5 py-5">
+      <div className="font-body text-nano font-semibold uppercase tracking-[0.18em] text-ink-muted">
+        {label}
+      </div>
+      <div className={`mt-2 font-display text-[3.25rem] font-extrabold leading-none ${accent ? 'text-acc' : 'text-ink'}`}>
+        {value}
+        {sub && <span className="ml-1 align-baseline font-body text-base font-medium text-ink-muted">{sub}</span>}
       </div>
     </div>
   );
@@ -94,17 +92,19 @@ function Tile({ icon, label, value, sub }) {
 function MetricRow({ recovery, sevenDayKm }) {
   const r = (recovery && recovery[0]) || {};
   return (
-    <div className="flex flex-wrap divide-slate-100 dark:divide-slate-800 sm:divide-x">
-      <Tile icon="lungs" label="VO₂max" value={r.vo2max ?? '—'} />
-      <Tile icon="heartbeat" label="Resting HR" value={r.resting_hr != null ? Math.round(r.resting_hr) : '—'} />
-      <Tile icon="activity" label="HRV" value={r.hrv_last_night ?? '—'} />
-      <Tile icon="run" label="Last 7 days" value={sevenDayKm ?? '—'} sub={sevenDayKm != null ? 'km' : ''} />
+    <div className="flex flex-wrap divide-line sm:divide-x">
+      <Tile label="VO₂max" value={r.vo2max ?? '—'} />
+      <Tile label="Resting HR" value={r.resting_hr != null ? Math.round(r.resting_hr) : '—'} />
+      {/* Latest HRV is the live/current reading — accented, per the reference. */}
+      <Tile label="HRV" value={r.hrv_last_night ?? '—'} accent />
+      <Tile label="Last 7 days" value={sevenDayKm ?? '—'} sub={sevenDayKm != null ? 'km' : ''} />
     </div>
   );
 }
 
-// Stage 6a hero zone: a cycling carousel (This Week / Pace trend / Load) above
-// a persistent key-metric row. One fetch per endpoint, fanned out to slides.
+// Hero zone: a permanent This Week band, then a cycling carousel (Activity
+// trend / Load / Training Balance) above a persistent key-metric row. One fetch
+// per endpoint, fanned out to slides.
 // The day-insight modal titles with the clicked date; this is its subtitle.
 const DAY_SUBTITLE = {
   completed: 'How your run went',
@@ -142,6 +142,7 @@ export default function Hero() {
   const recovery = useFetch(() => api.recovery({ limit: 7 }));
   const weekly = useFetch(() => api.weekly());
   const profile = useFetch(() => api.profile());
+  const balance = useFetch(() => api.trainingBalance());
 
   // Rolling 7-day running mileage (today + prior 6 days), runs only.
   const cutoff = new Date(today);
@@ -156,16 +157,24 @@ export default function Hero() {
     : null;
 
   const slides = [
-    { key: 'week', label: 'This Week', node: <WeekStrip planned={planned.data} activities={acts.data} routines={profile.data?.routines} onSelectDay={setDay} /> },
     { key: 'pace', label: 'Activity trend', node: <PaceSlide activities={acts.data} /> },
     { key: 'load', label: 'Load', node: <LoadSlide weekly={weekly.data} /> },
+    { key: 'balance', label: 'Training Balance', node: <BalanceSlide data={balance.data} /> },
   ];
 
   return (
     <>
-      <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
+      {/* This Week is the most-glanceable view, so it's a permanent band rather
+          than a carousel slide that cycling could hide. */}
+      <section className="rounded-xl border border-line bg-surface-1 px-5 py-5">
+        <WeekStrip planned={planned.data} activities={acts.data} routines={profile.data?.routines} onSelectDay={setDay} />
+      </section>
+
+      <DailyInsight />
+
+      <section className="overflow-hidden rounded-xl border border-line bg-surface-1">
         <Carousel slides={slides} />
-        <div className="border-t border-slate-100 dark:border-slate-800">
+        <div className="border-t border-line">
           <MetricRow recovery={recovery.data} sevenDayKm={sevenDayKm} />
         </div>
       </section>

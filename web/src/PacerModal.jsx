@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from './api';
-import { Markdown } from './ui';
+import { Markdown, Icon } from './ui';
 import { duration, shortDate } from './format';
 
 // New-pacer builder (Stage 5c). Three steps in one modal:
@@ -11,13 +11,13 @@ import { duration, shortDate } from './format';
 //   3. preview   — a deterministic build (api.pacerPreview) shown for approval.
 //                  Only the explicit "Push to Garmin" click writes (pacerPush).
 const inputCls =
-  'w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/20 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100 dark:placeholder:text-slate-600';
+  'w-full rounded-lg border border-line bg-surface-2 px-3 py-2 text-sm text-ink shadow-sm outline-none transition placeholder:text-ink-muted focus:border-acc focus:ring-2 focus:ring-acc/20';
 
 const primaryBtn =
-  'rounded-lg bg-indigo-500 px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-600 disabled:opacity-50';
+  'rounded-lg bg-acc px-4 py-2 text-sm font-medium text-acc-ink transition hover:opacity-90 disabled:opacity-50';
 
 const ghostBtn =
-  'rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-100 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800';
+  'rounded-lg border border-line px-3 py-2 text-sm font-medium text-ink-secondary transition hover:bg-surface-2 disabled:opacity-50';
 
 // One row in the preview's segment list.
 function SegRow({ seg, n }) {
@@ -30,12 +30,12 @@ function SegRow({ seg, n }) {
     : seg.type === 'cooldown' ? 'Cool-down'
     : `Segment ${n}`;
   return (
-    <div className="flex items-center justify-between border-b border-slate-100 py-1.5 text-sm last:border-0 dark:border-slate-800">
-      <span className="font-medium text-slate-700 dark:text-slate-200">{label}</span>
-      <span className="tabular-nums text-slate-500 dark:text-slate-400">
+    <div className="flex items-center justify-between border-b border-line py-1.5 text-sm last:border-0">
+      <span className="font-body font-medium text-ink">{label}</span>
+      <span className="font-mono tabular-nums text-ink-secondary">
         {dist}
         {isInterval && seg.pace_label
-          ? <> @ <span className="font-semibold text-indigo-500 dark:text-indigo-300">{seg.pace_label}</span></>
+          ? <> @ <span className="font-semibold text-acc">{seg.pace_label}</span></>
           : ' easy'}
       </span>
     </div>
@@ -128,26 +128,26 @@ export default function PacerModal({ onClose }) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/50 p-4 backdrop-blur-sm sm:p-8"
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-4 backdrop-blur-sm sm:p-8"
       onClick={onClose}
     >
       <div
-        className="my-auto flex max-h-[85vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xl dark:border-slate-800 dark:bg-slate-900"
+        className="my-auto flex max-h-[85vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-line bg-surface-1 shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <header className="flex items-center justify-between border-b border-slate-100 px-5 py-4 dark:border-slate-800">
+        <header className="flex items-center justify-between border-b border-line px-5 py-4">
           <div>
-            <h2 className="text-sm font-semibold tracking-tight text-slate-900 dark:text-slate-100">
-              ⏱ New pacer
+            <h2 className="inline-flex items-center gap-1.5 font-display text-[0.9375rem] font-bold uppercase tracking-[0.1em] text-ink">
+              <Icon name="stopwatch" /> New pacer
             </h2>
-            <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+            <p className="mt-1 font-body text-nano uppercase tracking-[0.18em] text-ink-muted">
               Build a per-segment pace target for your Engo 3 glasses
             </p>
           </div>
           <button
             onClick={onClose}
             aria-label="Close"
-            className="rounded-lg border border-slate-300 px-2.5 py-1 text-sm text-slate-500 transition hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+            className="rounded-lg border border-line px-2.5 py-1 text-sm text-ink-secondary transition hover:bg-surface-2"
           >
             ✕
           </button>
@@ -157,10 +157,10 @@ export default function PacerModal({ onClose }) {
         {step === 'distance' && (
           <div className="space-y-4 p-5">
             <div>
-              <label className="text-sm font-medium text-slate-700 dark:text-slate-200">
+              <label className="font-body text-sm font-medium text-ink">
                 Distance of the run
               </label>
-              <p className="mb-2 mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+              <p className="mb-2 mt-0.5 text-xs text-ink-muted">
                 e.g. 5k, 10k, or 5000m. We'll ask the rest in a moment.
               </p>
               <input
@@ -185,11 +185,11 @@ export default function PacerModal({ onClose }) {
               {messages.map((m, i) => (
                 <div key={i} className={m.role === 'user' ? 'flex justify-end' : 'flex justify-start'}>
                   {m.role === 'user' ? (
-                    <div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-sm bg-indigo-500 px-3 py-2 text-sm text-white">
+                    <div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-sm bg-acc px-3 py-2 text-sm text-acc-ink">
                       {m.content}
                     </div>
                   ) : (
-                    <Markdown className="max-w-[85%] rounded-2xl rounded-bl-sm bg-slate-100 px-3 py-2 text-sm text-slate-800 dark:bg-slate-800 dark:text-slate-100">
+                    <Markdown className="max-w-[85%] rounded-2xl rounded-bl-sm bg-surface-2 px-3 py-2 font-body text-sm text-ink">
                       {m.content}
                     </Markdown>
                   )}
@@ -197,14 +197,14 @@ export default function PacerModal({ onClose }) {
               ))}
               {pending && (
                 <div className="flex justify-start">
-                  <div className="rounded-2xl rounded-bl-sm bg-slate-100 px-3 py-2 text-sm text-slate-400 dark:bg-slate-800 dark:text-slate-500">
+                  <div className="rounded-2xl rounded-bl-sm bg-surface-2 px-3 py-2 text-sm text-ink-muted">
                     {params ? 'building preview…' : 'thinking…'}
                   </div>
                 </div>
               )}
-              {error && <p className="text-center text-xs text-rose-500">{error}</p>}
+              {error && <p className="text-center text-xs text-sem-red">{error}</p>}
             </div>
-            <div className="border-t border-slate-100 p-3 dark:border-slate-800">
+            <div className="border-t border-line p-3">
               <div className="flex items-end gap-2">
                 <textarea
                   rows={1}
@@ -213,7 +213,7 @@ export default function PacerModal({ onClose }) {
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={onKeyDown}
                   placeholder="Type your answer…"
-                  className="max-h-32 flex-1 resize-none rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/20 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100 dark:placeholder:text-slate-600"
+                  className="max-h-32 flex-1 resize-none rounded-lg border border-line bg-surface-2 px-3 py-2 text-sm text-ink shadow-sm outline-none transition placeholder:text-ink-muted focus:border-acc focus:ring-2 focus:ring-acc/20"
                 />
                 <button onClick={send} disabled={pending || !input.trim()} className={primaryBtn}>
                   Send
@@ -229,14 +229,14 @@ export default function PacerModal({ onClose }) {
             {pushed ? (
               <div className="space-y-3 text-center">
                 <div className="text-3xl">✅</div>
-                <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                <p className="font-body text-sm font-semibold text-ink">
                   Pushed to Garmin
                 </p>
-                <p className="text-sm text-slate-600 dark:text-slate-300">
+                <p className="text-sm text-ink-secondary">
                   <span className="font-medium">{pushed.name}</span> is scheduled for{' '}
                   {shortDate(pushed.date)}.
                 </p>
-                <p className="text-xs text-slate-500 dark:text-slate-400">
+                <p className="text-xs text-ink-muted">
                   Garmin workout ID <span className="font-mono">{pushed.workout_id}</span>. It'll
                   sync to your watch next time the Garmin Connect app is open near it.
                 </p>
@@ -244,16 +244,16 @@ export default function PacerModal({ onClose }) {
               </div>
             ) : (
               <>
-                <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-950/40">
+                <div className="rounded-xl border border-line bg-surface-2 p-4">
                   <div className="flex items-baseline justify-between">
-                    <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                    <h3 className="font-body text-sm font-semibold text-ink">
                       {preview.name}
                     </h3>
-                    <span className="text-xs text-slate-500 dark:text-slate-400">
+                    <span className="font-mono text-xs text-ink-muted">
                       {shortDate(params.date)}
                     </span>
                   </div>
-                  <div className="mt-1 flex gap-4 text-xs text-slate-500 dark:text-slate-400">
+                  <div className="mt-1 flex gap-4 font-mono text-xs text-ink-muted">
                     <span>{(preview.total_distance_m / 1000).toFixed(2)} km total</span>
                     <span>est. {duration(preview.est_duration_s)}</span>
                     <span>{preview.segments.filter((s) => s.type === 'interval').length} segments</span>
@@ -265,7 +265,7 @@ export default function PacerModal({ onClose }) {
                   </div>
                 </div>
 
-                {error && <p className="text-center text-sm text-rose-500">{error}</p>}
+                {error && <p className="text-center text-sm text-sem-red">{error}</p>}
 
                 <div className="flex items-center gap-2">
                   <button className={primaryBtn} onClick={push} disabled={pending}>
@@ -278,7 +278,7 @@ export default function PacerModal({ onClose }) {
                   >
                     Back to chat
                   </button>
-                  <span className="text-xs text-slate-400 dark:text-slate-500">
+                  <span className="text-xs text-ink-muted">
                     Writes to Garmin — you can delete it after.
                   </span>
                 </div>

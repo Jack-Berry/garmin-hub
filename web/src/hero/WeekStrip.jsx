@@ -1,5 +1,4 @@
 import { kmNum, dateOnly, ymd, routineGroup } from '../format';
-import { Icon } from '../ui';
 
 // Mon→Sun dates for the week containing `today` (Monday start).
 function weekDates(today) {
@@ -25,31 +24,18 @@ function workoutLabel(title) {
   return title.split(' - ')[0].replace(/^W\d+\s+\w+\s+/, '') || 'Run';
 }
 
-// Tabler icon slug for a routine's activity group. One run icon (ti-run) covers
-// every run type — the name text does the differentiating.
-const ROUTINE_ICON = { football: 'ball-football', walk: 'walk', run: 'run' };
-const routineIcon = (group) => ROUTINE_ICON[group] || 'barbell';
-
-// Centred focal activity, used uniformly for runs AND recurring routine
-// activities (football, gym…): a monochrome icon above the name, with a detail
-// line (km) below. `tone` colours the icon — 'done' = success green (logged),
-// anything else = muted (planned run / not-yet-logged routine), the same way a
-// planned run reads muted vs a done run green. The detail line is always present
-// (a blank space when there's no km) so every cell's icon + name align at the
-// same height regardless of whether it carries a distance.
-function ActivityBlock({ icon, tone, name, detail }) {
-  const iconClass = tone === 'done'
-    ? 'text-emerald-600 dark:text-emerald-400'
-    : 'text-slate-400 dark:text-slate-500';
+// Left-aligned activity headline (no icons, matching the reference): a big bold
+// uppercase Archivo word with the distance small + muted directly below. Active
+// (done/planned/routine) reads white; a race is the lime highlight.
+function ActivityBlock({ name, detail, accent }) {
   return (
-    <div className="flex max-w-full flex-col items-center gap-1">
-      <Icon name={icon} className={`text-2xl ${iconClass}`} />
-      <div className="max-w-full truncate text-[16px] font-medium leading-tight text-slate-700 dark:text-slate-200">
+    <div className="flex max-w-full flex-col items-start">
+      <div className={`max-w-full truncate font-display text-[1.25rem] font-bold uppercase leading-none ${accent ? 'text-acc' : 'text-ink'}`}>
         {name}
       </div>
-      <div className="text-[10px] tabular-nums text-slate-400 dark:text-slate-500">
-        {detail || ' '}
-      </div>
+      {detail && (
+        <div className="mt-1.5 font-mono text-nano tabular-nums text-ink-muted">{detail}</div>
+      )}
     </div>
   );
 }
@@ -91,16 +77,16 @@ export default function WeekStrip({ planned, activities, routines, onSelectDay }
   });
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex flex-col">
       <header className="mb-3">
-        <h2 className="text-sm font-semibold tracking-tight text-slate-900 dark:text-slate-100">
+        <h2 className="font-display text-[0.8125rem] font-bold uppercase tracking-[0.14em] text-ink">
           This Week
         </h2>
-        <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+        <p className="mt-1 font-body text-nano uppercase tracking-[0.18em] text-ink-muted">
           Planned vs done · tap a day for detail
         </p>
       </header>
-      <div className="grid flex-1 grid-cols-7 gap-1.5">
+      <div className="grid grid-cols-7 gap-px">
         {days.map((d, i) => {
           const date = ymd(d);
           const plan = plannedByDate[date];
@@ -137,48 +123,40 @@ export default function WeekStrip({ planned, activities, routines, onSelectDay }
                 status,
                 routine: routineState ? { activity: routine.activity, state: routineState } : null,
               })}
-              className={`flex flex-col rounded-lg border p-2 text-left transition hover:border-indigo-400 hover:bg-slate-50 dark:hover:bg-slate-800/60 ${
-                isToday
-                  ? 'border-indigo-500 bg-indigo-50/60 dark:border-indigo-500 dark:bg-indigo-500/10'
-                  : 'border-slate-200 dark:border-slate-800'
+              className={`flex flex-col border-t-2 px-1.5 py-2 text-left transition hover:bg-surface-2 ${
+                isToday ? 'border-acc' : 'border-line'
               }`}
             >
               <div className="flex items-baseline justify-between">
-                <span className={`text-[11px] font-semibold uppercase ${isToday ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-500 dark:text-slate-400'}`}>
+                <span className={`font-body text-nano font-bold uppercase tracking-[0.12em] ${isToday ? 'text-acc' : 'text-ink-muted'}`}>
                   {DOW[i]}
                 </span>
-                <span className="text-[11px] tabular-nums text-slate-400 dark:text-slate-500">
+                <span className="font-mono text-nano tabular-nums text-ink-muted">
                   {d.getDate()}
                 </span>
               </div>
 
-              <div className="flex flex-1 flex-col items-center justify-center gap-1.5 pt-1 text-center">
+              <div className="mt-4 flex min-h-[56px] flex-col items-start gap-2">
                 {act ? (
                   <ActivityBlock
-                    icon="circle-check"
-                    tone="done"
+                    accent={!!plan?.is_race}
                     name={plan ? workoutLabel(plan.title) : 'Run'}
                     detail={`${kmNum(act.distance_m)} km`}
                   />
                 ) : plan ? (
                   <ActivityBlock
-                    icon="run"
-                    tone="planned"
+                    accent={!!plan.is_race}
                     name={workoutLabel(plan.title)}
                     detail={plan.estimated_distance_m != null ? `${kmNum(plan.estimated_distance_m)} km` : null}
                   />
                 ) : null}
 
                 {routineState && (
-                  <ActivityBlock
-                    icon={routineIcon(routine.group)}
-                    tone={routineState === 'done' ? 'done' : 'planned'}
-                    name={routine.activity}
-                  />
+                  <ActivityBlock name={routine.activity} />
                 )}
 
                 {!hasRun && !routineState && (
-                  <div className="text-[12px] text-slate-400 dark:text-slate-600">Rest</div>
+                  <div className="font-display text-[1.25rem] font-bold uppercase leading-none text-ink-muted">Rest</div>
                 )}
               </div>
             </button>

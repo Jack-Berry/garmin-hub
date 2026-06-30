@@ -78,26 +78,26 @@ export default function InsightModal({ title, subtitle, generate, staticBody, ch
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/50 p-4 backdrop-blur-sm sm:p-8"
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-4 backdrop-blur-sm sm:p-8"
       onClick={onClose}
     >
       <div
-        className="my-auto flex max-h-[85vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xl dark:border-slate-800 dark:bg-slate-900"
+        className="my-auto flex max-h-[85vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-line bg-surface-1 shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <header className="flex items-center justify-between gap-3 border-b border-slate-100 px-5 py-4 dark:border-slate-800">
+        <header className="flex items-center justify-between gap-3 border-b border-line px-5 py-4">
           <div className="min-w-0">
-            <h2 className="text-sm font-semibold tracking-tight text-slate-900 dark:text-slate-100">
+            <h2 className="font-display text-[0.9375rem] font-bold uppercase tracking-[0.1em] text-ink">
               {title}
             </h2>
             {subtitle && (
-              <p className="mt-0.5 truncate text-xs text-slate-500 dark:text-slate-400">{subtitle}</p>
+              <p className="mt-1 truncate font-body text-nano uppercase tracking-[0.18em] text-ink-muted">{subtitle}</p>
             )}
           </div>
           <button
             onClick={onClose}
             aria-label="Close"
-            className="shrink-0 rounded-lg border border-slate-300 px-2.5 py-1 text-sm text-slate-500 transition hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+            className="shrink-0 rounded-lg border border-line px-2.5 py-1 text-sm text-ink-secondary transition hover:bg-surface-2"
           >
             ✕
           </button>
@@ -105,30 +105,30 @@ export default function InsightModal({ title, subtitle, generate, staticBody, ch
 
         <div ref={scrollRef} className="overflow-y-auto px-5 py-5">
           {status === 'loading' ? (
-            <p className="text-sm text-slate-400 dark:text-slate-500">
+            <p className="text-sm text-ink-muted">
               <span className="mr-1 inline-block animate-spin">⟳</span> Thinking…
             </p>
           ) : status === 'error' ? (
-            <p className="text-sm text-rose-500">Couldn't generate: {error}</p>
+            <p className="text-sm text-sem-red">Couldn't generate: {error}</p>
           ) : (
             <>
-              <Markdown className="text-[15px] leading-relaxed text-slate-700 dark:text-slate-300">
+              <Markdown className="font-body text-[15px] leading-relaxed text-ink-secondary">
                 {content}
               </Markdown>
               {model && (
-                <p className="mt-4 text-[11px] text-slate-400 dark:text-slate-500">{model}</p>
+                <p className="mt-4 font-mono text-micro text-ink-muted">{model}</p>
               )}
 
               {canChat && (chat.length > 0 || pending) && (
-                <div className="mt-5 space-y-3 border-t border-slate-100 pt-4 dark:border-slate-800">
+                <div className="mt-5 space-y-3 border-t border-line pt-4">
                   {chat.map((m, i) => (
                     <div key={i} className={m.role === 'user' ? 'flex justify-end' : 'flex justify-start'}>
                       {m.role === 'user' ? (
-                        <div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-sm bg-indigo-500 px-3 py-2 text-sm text-white">
+                        <div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-sm bg-acc px-3 py-2 text-sm text-acc-ink">
                           {m.content}
                         </div>
                       ) : (
-                        <Markdown className="max-w-[85%] rounded-2xl rounded-bl-sm bg-slate-100 px-3 py-2 text-sm text-slate-800 dark:bg-slate-800 dark:text-slate-100">
+                        <Markdown className="max-w-[85%] rounded-2xl rounded-bl-sm bg-surface-2 px-3 py-2 font-body text-sm text-ink">
                           {m.content}
                         </Markdown>
                       )}
@@ -136,12 +136,12 @@ export default function InsightModal({ title, subtitle, generate, staticBody, ch
                   ))}
                   {pending && (
                     <div className="flex justify-start">
-                      <div className="rounded-2xl rounded-bl-sm bg-slate-100 px-3 py-2 text-sm text-slate-400 dark:bg-slate-800 dark:text-slate-500">
+                      <div className="rounded-2xl rounded-bl-sm bg-surface-2 px-3 py-2 text-sm text-ink-muted">
                         thinking…
                       </div>
                     </div>
                   )}
-                  {chatError && <p className="text-center text-xs text-rose-500">{chatError}</p>}
+                  {chatError && <p className="text-center text-xs text-sem-red">{chatError}</p>}
                 </div>
               )}
             </>
@@ -149,7 +149,7 @@ export default function InsightModal({ title, subtitle, generate, staticBody, ch
         </div>
 
         {canChat && (
-          <div className="border-t border-slate-100 p-3 dark:border-slate-800">
+          <div className="border-t border-line p-3">
             <div className="flex items-end gap-2">
               <textarea
                 rows={1}
@@ -157,12 +157,12 @@ export default function InsightModal({ title, subtitle, generate, staticBody, ch
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={onKeyDown}
                 placeholder="Ask a follow-up…"
-                className="max-h-32 flex-1 resize-none rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/20 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100 dark:placeholder:text-slate-600"
+                className="max-h-32 flex-1 resize-none rounded-lg border border-line bg-surface-2 px-3 py-2 text-sm text-ink shadow-sm outline-none transition placeholder:text-ink-muted focus:border-acc focus:ring-2 focus:ring-acc/20"
               />
               <button
                 onClick={send}
                 disabled={pending || !input.trim()}
-                className="rounded-lg bg-indigo-500 px-3 py-2 text-sm font-medium text-white transition hover:bg-indigo-600 disabled:opacity-50"
+                className="rounded-lg bg-acc px-3 py-2 text-sm font-medium text-acc-ink transition hover:opacity-90 disabled:opacity-50"
               >
                 Send
               </button>

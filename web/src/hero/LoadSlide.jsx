@@ -1,10 +1,11 @@
 import {
   ResponsiveContainer, BarChart, Bar, Cell, XAxis, YAxis, CartesianGrid, Tooltip,
 } from 'recharts';
-import { ACCENT, AXIS, GRID } from '../ui';
+import { INK, AXIS, GRID } from '../ui';
+import { useAccentHex } from '../accent';
 import { shortDate } from '../format';
 
-const MUTED = '#94a3b8'; // slate-400 — non-current weeks
+const MUTED = INK; // monochrome ink — non-current weeks (accent rule)
 
 // Plain-language load read. Placeholder heuristic (current week vs the mean of
 // the prior weeks); the AI-generated verdict lands in a later stage.
@@ -22,6 +23,7 @@ function verdict(weeks) {
 
 // Slide 3 — weekly running mileage bars, last 12 weeks, current week accented.
 export default function LoadSlide({ weekly }) {
+  const accent = useAccentHex();
   // weekly is newest-first; chart oldest→newest, current week is the last bar.
   const rows = (weekly || [])
     .slice()
@@ -32,17 +34,17 @@ export default function LoadSlide({ weekly }) {
   return (
     <div className="flex h-full flex-col">
       <header className="mb-3">
-        <h2 className="text-sm font-semibold tracking-tight text-slate-900 dark:text-slate-100">
+        <h2 className="font-display text-[0.8125rem] font-bold uppercase tracking-[0.14em] text-ink">
           Load
         </h2>
-        <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+        <p className="mt-1 font-body text-nano uppercase tracking-[0.18em] text-ink-muted">
           Weekly running mileage · last 12 weeks
         </p>
       </header>
 
       <div className="min-h-0 flex-1">
         {!rows.length ? (
-          <p className="text-sm text-slate-400 dark:text-slate-500">No mileage yet.</p>
+          <p className="text-sm text-ink-muted">No mileage yet.</p>
         ) : (
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={rows} margin={{ top: 8, right: 8, bottom: 0, left: -16 }}>
@@ -56,7 +58,7 @@ export default function LoadSlide({ weekly }) {
               />
               <Bar dataKey="km" radius={[4, 4, 0, 0]} maxBarSize={42}>
                 {rows.map((_, i) => (
-                  <Cell key={i} fill={i === lastIdx ? ACCENT : MUTED} />
+                  <Cell key={i} fill={i === lastIdx ? accent : MUTED} />
                 ))}
               </Bar>
             </BarChart>
@@ -65,7 +67,7 @@ export default function LoadSlide({ weekly }) {
       </div>
 
       {rows.length > 0 && (
-        <p className="mt-3 text-sm font-medium text-slate-700 dark:text-slate-300">
+        <p className="mt-3 font-body text-sm font-medium text-ink-secondary">
           {verdict(rows)}
         </p>
       )}

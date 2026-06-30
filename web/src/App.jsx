@@ -1,6 +1,5 @@
 import { useState } from 'react';
 import { api } from './api';
-import DailyInsight from './sections/DailyInsight';
 import Hero from './sections/Hero';
 import RecentActivities from './sections/RecentActivities';
 import Recovery from './sections/Recovery';
@@ -8,6 +7,8 @@ import PlannedWorkouts from './sections/PlannedWorkouts';
 import SettingsModal from './SettingsModal';
 import PacerModal from './PacerModal';
 import ChatWidget from './ChatWidget';
+import { Icon } from './ui';
+import { AccentProvider } from './accent';
 
 // Topbar button: runs the Python ingest, then bumps the dashboard refresh key
 // so every section refetches. Disabled while running; shows a brief outcome.
@@ -37,7 +38,7 @@ function RefreshButton({ className, onRefreshed }) {
   };
 
   const label =
-    status === 'running' ? 'Refreshing…' : status === 'ok' ? '✓ Updated' : '⟳ Refresh';
+    status === 'running' ? 'Refreshing…' : status === 'ok' ? 'Updated' : 'Refresh';
 
   return (
     <div className="relative">
@@ -48,11 +49,14 @@ function RefreshButton({ className, onRefreshed }) {
         aria-label="Refresh Garmin data"
         title="Refresh Garmin data"
       >
-        <span className={status === 'running' ? 'mr-1 inline-block animate-spin' : 'hidden'}>⟳</span>
+        <Icon
+          name={status === 'ok' ? 'check' : 'refresh'}
+          className={status === 'running' ? 'animate-spin' : ''}
+        />
         {label}
       </button>
       {status === 'error' && (
-        <p className="absolute right-0 mt-1 w-56 text-right text-xs text-rose-500">{message}</p>
+        <p className="absolute right-0 mt-1 w-56 text-right text-xs text-sem-red">{message}</p>
       )}
     </div>
   );
@@ -66,34 +70,34 @@ export default function App() {
   const [refreshKey, setRefreshKey] = useState(0);
 
   const topBtn =
-    'rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 transition hover:bg-slate-100 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800';
+    'inline-flex items-center gap-1.5 rounded-lg border border-line px-3 py-1.5 font-body text-micro font-semibold uppercase tracking-[0.1em] text-ink-secondary transition hover:bg-surface-2 hover:text-ink';
 
   return (
+    <AccentProvider dark={dark}>
     <div className={dark ? 'dark' : ''}>
-      <div className="min-h-screen bg-slate-50 text-slate-900 transition-colors dark:bg-slate-950 dark:text-slate-100">
-        <header className="sticky top-0 z-10 border-b border-slate-200/70 bg-slate-50/80 backdrop-blur dark:border-slate-800/70 dark:bg-slate-950/80">
+      <div className="min-h-screen bg-surface-0 text-ink transition-colors">
+        <header className="sticky top-0 z-10 border-b border-line bg-surface-0/80 backdrop-blur">
           <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
             <div>
-              <h1 className="text-lg font-bold tracking-tight">Garmin Hub</h1>
-              <p className="text-xs text-slate-500 dark:text-slate-400">Running dashboard</p>
+              <h1 className="font-display text-[1.5rem] font-extrabold uppercase leading-none tracking-[0.02em] text-ink">Garmin Hub</h1>
+              <p className="mt-1 font-body text-nano uppercase tracking-[0.22em] text-ink-muted">Running dashboard</p>
             </div>
             <div className="flex items-center gap-2">
               <RefreshButton className={topBtn} onRefreshed={() => setRefreshKey((k) => k + 1)} />
               <button onClick={() => setPacerOpen(true)} className={topBtn} aria-label="New pacer" title="Build a pacing workout">
-                ⏱ New pacer
+                <Icon name="stopwatch" /> New pacer
               </button>
               <button onClick={() => setSettingsOpen(true)} className={topBtn} aria-label="Settings">
-                ⚙ Settings
+                <Icon name="settings" /> Settings
               </button>
-              <button onClick={() => setDark((d) => !d)} className={topBtn} aria-label="Toggle theme">
-                {dark ? '☀︎ Light' : '☾ Dark'}
+              <button onClick={() => setDark((d) => !d)} className={`${topBtn} text-acc hover:text-acc`} aria-label="Toggle theme">
+                <Icon name={dark ? 'sun' : 'moon'} /> {dark ? 'Light' : 'Dark'}
               </button>
             </div>
           </div>
         </header>
 
-        <main key={refreshKey} className="mx-auto max-w-5xl space-y-6 px-6 py-8">
-          <DailyInsight />
+        <main key={refreshKey} className="mx-auto max-w-5xl space-y-5 px-6 py-6">
           <Hero />
           {/* Lower dashboard — a full-width Recovery band on top, then Recent
               activities (wide, table) beside Upcoming planned (narrow, list).
@@ -103,7 +107,7 @@ export default function App() {
           {/* [&>*]:min-w-0 stops the fr tracks blowing out wider than the shared
               max-w-5xl width — without it the table/badges force the columns
               (and the section's right edge) past the dashboard's right margin. */}
-          <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1.5fr_1fr] lg:items-start [&>*]:min-w-0">
+          <div className="grid grid-cols-1 gap-5 lg:grid-cols-[1.5fr_1fr] lg:items-start [&>*]:min-w-0">
             <RecentActivities />
             <PlannedWorkouts />
           </div>
@@ -114,5 +118,6 @@ export default function App() {
         <ChatWidget />
       </div>
     </div>
+    </AccentProvider>
   );
 }

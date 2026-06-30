@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { api } from '../api';
 import { useFetch } from '../useFetch';
-import { Markdown } from '../ui';
+import { Markdown, Icon } from '../ui';
 import { shortDate } from '../format';
 
 // Daily coach brief — a slim 2-3 sentence glance at the top of the dashboard.
@@ -64,27 +64,27 @@ export default function DailyInsight() {
   };
 
   const genBtn =
-    'rounded-lg bg-indigo-500 px-3 py-1.5 text-sm font-medium text-white transition hover:bg-indigo-600 disabled:opacity-60';
+    'inline-flex items-center gap-1.5 font-body text-label font-bold uppercase tracking-[0.14em] text-acc transition hover:opacity-80 disabled:opacity-50';
   const navBtn =
-    'flex h-9 w-9 items-center justify-center rounded-full border border-slate-300 text-lg text-slate-600 transition hover:bg-slate-100 disabled:opacity-30 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800';
+    'flex h-8 w-8 items-center justify-center rounded-full border border-line text-ink-secondary transition hover:bg-surface-2 disabled:opacity-30';
   const reportBtn =
-    'rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 transition hover:bg-slate-100 disabled:opacity-60 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800';
+    'inline-flex items-center gap-1.5 rounded-lg border border-line px-3 py-1.5 font-body text-micro font-semibold uppercase tracking-[0.1em] text-ink-secondary transition hover:bg-surface-2 disabled:opacity-60';
 
   const reportLabel =
     report.status === 'loading'
       ? 'Generating…'
       : report.status === 'done'
         ? (showReport ? 'Hide detailed report' : 'Show detailed report')
-        : '📋 Detailed report';
+        : 'Detailed report';
 
   return (
-    <section className="overflow-hidden rounded-2xl border border-l-4 border-slate-200 border-l-indigo-500 bg-white shadow-sm dark:border-slate-800 dark:border-l-indigo-500 dark:bg-slate-900">
-      <header className="flex items-center justify-between gap-3 border-b border-slate-100 px-6 py-4 dark:border-slate-800">
+    <section className="overflow-hidden rounded-xl border border-line bg-surface-1">
+      <header className="flex items-center justify-between gap-3 px-6 pt-5 pb-3">
         <div>
-          <h2 className="text-sm font-semibold uppercase tracking-wide text-indigo-600 dark:text-indigo-400">
+          <h2 className="font-body text-label font-bold uppercase tracking-[0.16em] text-acc">
             Coach's Daily Brief
           </h2>
-          <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+          <p className="mt-1 font-body text-nano uppercase tracking-[0.18em] text-ink-muted">
             {card ? shortDate(card.created_at) : 'A quick read on your training'}
           </p>
         </div>
@@ -94,19 +94,19 @@ export default function DailyInsight() {
           className={genBtn}
           aria-label="Generate today's brief"
         >
-          <span className={gen === 'running' ? 'mr-1 inline-block animate-spin' : 'hidden'}>⟳</span>
-          {gen === 'running' ? 'Thinking…' : card ? '⟳ Regenerate' : "Generate today's brief"}
+          <Icon name="refresh" className={gen === 'running' ? 'animate-spin' : ''} />
+          {gen === 'running' ? 'Thinking…' : card ? 'Regenerate' : "Generate today's brief"}
         </button>
       </header>
 
-      <div className="px-6 py-6">
+      <div className="px-6 pb-6">
         {loading ? (
-          <p className="text-sm text-slate-400 dark:text-slate-500">Loading…</p>
+          <p className="text-sm text-ink-muted">Loading…</p>
         ) : error ? (
-          <p className="text-sm text-rose-500">Couldn't load: {error.message}</p>
+          <p className="text-sm text-sem-red">Couldn't load: {error.message}</p>
         ) : card ? (
           <>
-            <Markdown className="text-[17px] leading-relaxed text-slate-800 dark:text-slate-200">
+            <Markdown className="font-body text-[17px] leading-relaxed text-ink [&_strong]:font-semibold [&_strong]:text-acc">
               {card.content}
             </Markdown>
 
@@ -115,23 +115,23 @@ export default function DailyInsight() {
             {safeIdx === 0 && (
               <div className="mt-5">
                 <button onClick={toggleReport} disabled={report.status === 'loading'} className={reportBtn}>
-                  <span className={report.status === 'loading' ? 'mr-1 inline-block animate-spin' : 'hidden'}>⟳</span>
+                  <Icon name={report.status === 'loading' ? 'refresh' : 'file-text'} className={report.status === 'loading' ? 'animate-spin' : ''} />
                   {reportLabel}
                 </button>
 
                 {showReport && report.status !== 'idle' && (
-                  <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50/60 p-5 dark:border-slate-800 dark:bg-slate-950/40">
+                  <div className="mt-4 rounded-xl border border-line bg-surface-2 p-5">
                     {report.status === 'loading' ? (
-                      <p className="text-sm text-slate-400 dark:text-slate-500">Analysing your recent training…</p>
+                      <p className="text-sm text-ink-muted">Analysing your recent training…</p>
                     ) : report.status === 'error' ? (
-                      <p className="text-sm text-rose-500">Couldn't generate: {report.error}</p>
+                      <p className="text-sm text-sem-red">Couldn't generate: {report.error}</p>
                     ) : (
                       <>
-                        <Markdown className="text-[15px] leading-relaxed text-slate-700 dark:text-slate-300">
+                        <Markdown className="font-body text-[15px] leading-relaxed text-ink-secondary">
                           {report.content}
                         </Markdown>
                         {report.model && (
-                          <p className="mt-4 text-[11px] text-slate-400 dark:text-slate-500">{report.model}</p>
+                          <p className="mt-4 font-mono text-micro text-ink-muted">{report.model}</p>
                         )}
                       </>
                     )}
@@ -141,17 +141,17 @@ export default function DailyInsight() {
             )}
           </>
         ) : (
-          <p className="text-[15px] leading-relaxed text-slate-600 dark:text-slate-300">
+          <p className="font-body text-[15px] leading-relaxed text-ink-secondary">
             No brief yet. Generate today's for a quick read on your recent training.
           </p>
         )}
         {gen === 'error' && (
-          <p className="mt-3 text-xs text-rose-500">Couldn't generate, check the server logs.</p>
+          <p className="mt-3 text-xs text-sem-red">Couldn't generate, check the server logs.</p>
         )}
       </div>
 
       {cards.length > 1 && (
-        <footer className="flex items-center justify-between border-t border-slate-100 px-6 py-3 dark:border-slate-800">
+        <footer className="flex items-center justify-between border-t border-line px-6 py-3">
           <button
             onClick={() => setIdx((i) => i + 1)}
             disabled={safeIdx >= cards.length - 1}
@@ -160,7 +160,7 @@ export default function DailyInsight() {
           >
             ‹
           </button>
-          <span className="text-xs text-slate-500 dark:text-slate-400">
+          <span className="font-body text-micro uppercase tracking-[0.12em] text-ink-muted">
             {safeIdx === 0 ? 'Most recent' : `${safeIdx + 1} of ${cards.length}`}
           </span>
           <button

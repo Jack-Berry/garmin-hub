@@ -29,6 +29,7 @@ export const api = {
   activity: (id) => get(`/api/activities/${id}`),
   planned: (params = {}) => get(`/api/planned${qs(params)}`),
   recovery: (params = {}) => get(`/api/recovery${qs(params)}`),
+  trainingBalance: () => get('/api/training-balance'),
   weekly: () => get('/api/summary/weekly'),
   raceOverride: (scheduleId, override) =>
     post(`/api/planned/${scheduleId}/race-override`, { override }),

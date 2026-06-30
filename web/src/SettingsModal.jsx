@@ -2,12 +2,14 @@ import { useEffect, useState } from 'react';
 import { api } from './api';
 import { useFetch } from './useFetch';
 import { StateWrap } from './ui';
+import { useAccent } from './accent';
+import { ACCENTS, ACCENT_KEYS } from './accents';
 
 const inputCls =
-  'w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/20 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100 dark:placeholder:text-slate-600';
+  'w-full rounded-lg border border-line bg-surface-2 px-3 py-2 text-sm text-ink shadow-sm outline-none transition placeholder:text-ink-muted focus:border-acc focus:ring-2 focus:ring-acc/20';
 
 const addBtnCls =
-  'rounded-lg border border-dashed border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-indigo-400 hover:text-indigo-500 dark:border-slate-700 dark:text-slate-300';
+  'rounded-lg border border-dashed border-line px-3 py-1.5 font-body text-micro font-semibold uppercase tracking-[0.1em] text-ink-secondary transition hover:border-acc hover:text-acc';
 
 const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
@@ -18,34 +20,65 @@ function DelBtn({ onClick, label }) {
       type="button"
       onClick={onClick}
       aria-label={label}
-      className="shrink-0 rounded-lg border border-slate-300 px-2.5 py-2 text-sm text-slate-400 transition hover:border-rose-400 hover:text-rose-500 dark:border-slate-700"
+      className="shrink-0 rounded-lg border border-line px-2.5 py-2 text-sm text-ink-muted transition hover:border-sem-red hover:text-sem-red"
     >
       ✕
     </button>
   );
 }
 
+// Accent-colour picker — swatches apply instantly (live preview, no save) and
+// persist to localStorage via the accent context. Swatches show each accent's
+// vivid dark-mode hue; the active one carries a neutral ring.
+function AccentPicker() {
+  const { accent, setAccent } = useAccent();
+  return (
+    <div>
+      <h3 className="font-display text-label font-bold uppercase tracking-[0.1em] text-ink">Accent colour</h3>
+      <p className="mt-1 font-body text-micro text-ink-muted">Recolours the whole dashboard — live, no save needed.</p>
+      <div className="mt-3 flex items-center gap-3">
+        {ACCENT_KEYS.map((key) => (
+          <button
+            key={key}
+            type="button"
+            onClick={() => setAccent(key)}
+            aria-label={ACCENTS[key].label}
+            aria-pressed={accent === key}
+            title={ACCENTS[key].label}
+            style={{ backgroundColor: ACCENTS[key].d[0] }}
+            className={`h-8 w-8 rounded-full ring-offset-2 ring-offset-surface-1 transition ${
+              accent === key ? 'ring-2 ring-ink' : 'opacity-70 hover:opacity-100'
+            }`}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function Group({ title, hint, children }) {
   return (
     <div>
-      <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">{title}</h3>
-      {hint && <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">{hint}</p>}
+      <h3 className="font-display text-label font-bold uppercase tracking-[0.1em] text-ink">{title}</h3>
+      {hint && <p className="mt-1 font-body text-micro text-ink-muted">{hint}</p>}
       <div className="mt-2 space-y-2">{children}</div>
     </div>
   );
 }
 
-// One read-only stat card: label on top, value below, optional sub line.
-function RecordCard({ label, value, sub }) {
+// One read-only stat card: label on top, value below, optional sub line. The
+// value is a mono data-readout; `accent` lifts it to the accent colour (used for
+// race predictions — current-fitness/live data, per the accent rule).
+function RecordCard({ label, value, sub, accent }) {
   return (
-    <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 dark:border-slate-800 dark:bg-slate-950/40">
-      <div className="text-[11px] font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">
+    <div className="rounded-lg border border-line bg-surface-2 px-3 py-2">
+      <div className="font-body text-nano font-semibold uppercase tracking-[0.12em] text-ink-muted">
         {label}
       </div>
-      <div className="mt-0.5 text-base font-semibold tabular-nums text-slate-900 dark:text-slate-100">
+      <div className={`mt-1 font-mono text-[1.375rem] font-semibold tabular-nums ${accent ? 'text-acc' : 'text-ink'}`}>
         {value}
       </div>
-      {sub && <div className="text-[11px] text-slate-400 dark:text-slate-500">{sub}</div>}
+      {sub && <div className="font-mono text-nano text-ink-muted">{sub}</div>}
     </div>
   );
 }
@@ -56,7 +89,7 @@ function GarminRecords() {
   const prs = useFetch(() => api.personalRecords());
   const preds = useFetch(() => api.racePredictions());
   return (
-    <div className="space-y-6 border-t border-slate-100 pt-6 dark:border-slate-800">
+    <div className="space-y-6 border-t border-line pt-6">
       <Group title="Personal records" hint="Your Garmin bests — read-only, updated by ingest">
         <StateWrap loading={prs.loading} error={prs.error} empty={prs.data && !prs.data.length}>
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
@@ -71,11 +104,11 @@ function GarminRecords() {
         <StateWrap loading={preds.loading} error={preds.error} empty={preds.data === null}>
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
             {(preds.data?.predictions || []).map((p) => (
-              <RecordCard key={p.label} label={p.label} value={p.display} />
+              <RecordCard key={p.label} label={p.label} value={p.display} accent />
             ))}
           </div>
           {preds.data?.calendar_date && (
-            <p className="mt-2 text-[11px] text-slate-400 dark:text-slate-500">
+            <p className="mt-2 font-mono text-nano text-ink-muted">
               As of {preds.data.calendar_date}
             </p>
           )}
@@ -149,32 +182,35 @@ export default function SettingsModal({ onClose }) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/50 p-4 backdrop-blur-sm sm:p-8"
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-4 backdrop-blur-sm sm:p-8"
       onClick={onClose}
     >
       <div
-        className="my-auto w-full max-w-2xl rounded-2xl border border-slate-200 bg-white shadow-xl dark:border-slate-800 dark:bg-slate-900"
+        className="my-auto w-full max-w-2xl rounded-2xl border border-line bg-surface-1 shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <header className="flex items-center justify-between border-b border-slate-100 px-5 py-4 dark:border-slate-800">
-          <div>
-            <h2 className="text-sm font-semibold tracking-tight text-slate-900 dark:text-slate-100">
+        <header className="flex items-center justify-between border-b border-line px-5 py-4">
+          <div className="border-l-2 border-l-acc pl-3">
+            <h2 className="font-display text-heading font-extrabold uppercase tracking-tight text-acc">
               Coaching profile
             </h2>
-            <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+            <p className="mt-1 font-body text-micro uppercase tracking-[0.14em] text-ink-muted">
               Context injected into AI-coach prompts
             </p>
           </div>
           <button
             onClick={onClose}
             aria-label="Close"
-            className="rounded-lg border border-slate-300 px-2.5 py-1 text-sm text-slate-500 transition hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+            className="rounded-lg border border-line px-2.5 py-1 text-sm text-ink-secondary transition hover:bg-surface-2"
           >
             ✕
           </button>
         </header>
 
         <div className="space-y-6 p-5">
+          <div className="border-b border-line pb-6">
+            <AccentPicker />
+          </div>
           <StateWrap loading={loading} error={error}>
             <Group title="Shoes" hint="Your shoes and what each is for (daily, tempo, race…)">
               {shoes.map((s, i) => (
@@ -291,17 +327,17 @@ export default function SettingsModal({ onClose }) {
               />
             </Group>
 
-            <div className="flex items-center gap-3 border-t border-slate-100 pt-4 dark:border-slate-800">
+            <div className="flex items-center gap-3 border-t border-line pt-4">
               <button
                 onClick={save}
                 disabled={saving}
-                className="rounded-lg bg-indigo-500 px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-600 disabled:opacity-50"
+                className="rounded-lg bg-acc px-4 py-2 text-sm font-medium text-acc-ink transition hover:opacity-90 disabled:opacity-50"
               >
                 {saving ? 'Saving…' : 'Save profile'}
               </button>
-              {status === 'saved' && <span className="text-sm text-emerald-500">Saved ✓</span>}
+              {status === 'saved' && <span className="text-sm text-acc">Saved ✓</span>}
               {status?.error && (
-                <span className="text-sm text-rose-500">Couldn’t save: {status.error.message}</span>
+                <span className="text-sm text-sem-red">Couldn’t save: {status.error.message}</span>
               )}
             </div>
           </StateWrap>

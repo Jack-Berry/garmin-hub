@@ -7,30 +7,32 @@ import { km, duration, pace, paceFromMps, shortDate } from '../format';
 const SHOWN = ['run', 'football']; // exclude walks and other
 const ACT_ICON = { run: 'run', football: 'ball-football' };
 
+// Lap types are categorical (historical), not "live" — so they use the semantic
+// palette (amber/blue), never the reserved accent.
 const intensityTone = (t) =>
-  /rest|recover/i.test(t || '') ? 'amber' : /interval|active/i.test(t || '') ? 'indigo' : 'slate';
+  /rest|recover/i.test(t || '') ? 'amber' : /interval|active/i.test(t || '') ? 'blue' : 'slate';
 
 // Laps for one activity, fetched on demand when its row is expanded.
 function ActivityDetail({ id }) {
   const { data, loading, error } = useFetch(() => api.activity(id), [id]);
   const laps = data && data.laps;
   return (
-    <div className="bg-slate-50 px-4 py-3 dark:bg-slate-950/40">
+    <div className="bg-surface-2 px-4 py-3">
       <StateWrap loading={loading} error={error} empty={!laps || !laps.length}>
         {laps && (
           <table className="w-full text-xs">
-            <thead className="text-slate-500 dark:text-slate-400">
+            <thead className="font-body text-nano uppercase tracking-[0.1em] text-ink-muted">
               <tr className="text-left">
-                <th className="py-1 pr-3 font-medium">Lap</th>
-                <th className="py-1 pr-3 font-medium">Distance</th>
-                <th className="py-1 pr-3 font-medium">Pace</th>
-                <th className="py-1 pr-3 font-medium">HR</th>
-                <th className="py-1 font-medium">Type</th>
+                <th className="py-1 pr-3 font-semibold">Lap</th>
+                <th className="py-1 pr-3 font-semibold">Distance</th>
+                <th className="py-1 pr-3 font-semibold">Pace</th>
+                <th className="py-1 pr-3 font-semibold">HR</th>
+                <th className="py-1 font-semibold">Type</th>
               </tr>
             </thead>
-            <tbody className="tabular-nums">
+            <tbody className="font-mono tabular-nums text-ink-secondary">
               {laps.map((l) => (
-                <tr key={l.lap_index} className="border-t border-slate-200/60 dark:border-slate-800/60">
+                <tr key={l.lap_index} className="border-t border-line">
                   <td className="py-1 pr-3">{l.lap_index}</td>
                   <td className="py-1 pr-3">{km(l.distance_m)}</td>
                   <td className="py-1 pr-3">{paceFromMps(l.avg_speed_mps)}</td>
@@ -69,44 +71,44 @@ export default function RecentActivities() {
         {data && (
           <div className="-mx-2 overflow-x-auto">
             <table className="w-full min-w-[34rem] text-sm">
-              <thead className="text-slate-500 dark:text-slate-400">
+              <thead className="font-body text-micro uppercase tracking-[0.12em] text-ink-muted">
                 <tr className="text-left">
-                  <th className="px-2 py-2 font-medium">Date</th>
-                  <th className="px-2 py-2 font-medium">Name</th>
-                  <th className="px-2 py-2 font-medium">Dist</th>
-                  <th className="px-2 py-2 font-medium">Time</th>
-                  <th className="px-2 py-2 font-medium">Pace</th>
-                  <th className="px-2 py-2 font-medium">HR</th>
+                  <th className="px-2 py-2 font-semibold">Date</th>
+                  <th className="px-2 py-2 font-semibold">Name</th>
+                  <th className="px-2 py-2 font-semibold">Dist</th>
+                  <th className="px-2 py-2 font-semibold">Time</th>
+                  <th className="px-2 py-2 font-semibold">Pace</th>
+                  <th className="px-2 py-2 font-semibold">HR</th>
                 </tr>
               </thead>
-              <tbody className="tabular-nums">
+              <tbody>
                 {shown.map((a) => {
                   const open = openId === a.activity_id;
                   return (
                     <Fragment key={a.activity_id}>
                       <tr
                         onClick={() => setOpenId(open ? null : a.activity_id)}
-                        className={`cursor-pointer border-t border-slate-100 transition hover:bg-slate-50 dark:border-slate-800 dark:hover:bg-slate-800/40 ${
-                          open ? 'bg-slate-50 dark:bg-slate-800/40' : ''
+                        className={`cursor-pointer border-t border-line transition hover:bg-surface-2 ${
+                          open ? 'bg-surface-2' : ''
                         }`}
                       >
-                        <td className="px-2 py-2 whitespace-nowrap">{shortDate(a.start_time_local)}</td>
+                        <td className="px-2 py-2 whitespace-nowrap font-mono text-ink-secondary">{shortDate(a.start_time_local)}</td>
                         <td className="px-2 py-2 not-italic">
                           <span className="flex items-center gap-2">
                             <Icon
                               name={ACT_ICON[a.activity_group] || 'run'}
-                              className="shrink-0 text-base text-slate-400 dark:text-slate-500"
+                              className="shrink-0 text-base text-ink-muted"
                             />
-                            <span className="truncate">{a.name}</span>
+                            <span className="truncate font-body text-ink">{a.name}</span>
                           </span>
                         </td>
-                        <td className="px-2 py-2 whitespace-nowrap">{km(a.distance_m)}</td>
-                        <td className="px-2 py-2 whitespace-nowrap">{duration(a.duration_s)}</td>
+                        <td className="px-2 py-2 whitespace-nowrap font-mono tabular-nums text-ink-secondary">{km(a.distance_m)}</td>
+                        <td className="px-2 py-2 whitespace-nowrap font-mono tabular-nums text-ink-secondary">{duration(a.duration_s)}</td>
                         {/* Football pace is distance ÷ match-time — meaningless, so blank it. */}
-                        <td className="px-2 py-2 whitespace-nowrap">
+                        <td className="px-2 py-2 whitespace-nowrap font-mono tabular-nums text-ink-secondary">
                           {a.activity_group === 'football' ? '—' : pace(a.distance_m, a.duration_s)}
                         </td>
-                        <td className="px-2 py-2">{a.avg_hr ?? '—'}</td>
+                        <td className="px-2 py-2 font-mono tabular-nums text-ink-secondary">{a.avg_hr ?? '—'}</td>
                       </tr>
                       {open && (
                         <tr>

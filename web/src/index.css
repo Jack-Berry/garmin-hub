@@ -2,6 +2,72 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ─────────────────────────────────────────────────────────────────────────
+   Design system tokens — "Training Trend" editorial reskin (Stage 7).
+
+   ACCENT RULE (enforce this on rollout): the accent colour (--acc) appears
+   ONLY on things that are genuinely live/active — active states, the primary/
+   regenerate action, today's marker, a live data point. Everything else is
+   monochrome (surface + text ramps). When in doubt, leave it grey: accent is a
+   signal, not decoration. One variable (--acc) drives every accent usage so the
+   palette is swappable later (indigo default → lime/amber/violet/blue picker).
+
+   Dark mode: the app toggles a `.dark` class on a NESTED wrapper div (App.jsx),
+   not <html>. So :root holds the light defaults and `.dark` overrides for its
+   subtree — both must be defined here, not via media query.
+   ───────────────────────────────────────────────────────────────────────── */
+:root {
+  /* Fonts */
+  --font-display: 'Archivo', ui-sans-serif, system-ui, sans-serif;
+  --font-body: 'Hanken Grotesk', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+  /* Accent — user-selectable (see accents.js + the Settings picker). The real
+     value is set in JS on <html> (documentElement) so it cascades into the
+     nested .dark subtree too; these are only the no-JS light-mode fallback.
+     --acc-ink is the foreground ON an accent fill (legible per accent). */
+  --acc: #5b7a00;
+  --acc-ink: #ffffff;
+
+  /* Semantic colours (use sparingly — race/status badges, error text) */
+  --sem-amber: #f5a623;
+  --sem-red: #b00020; /* readable on light; .dark lifts it (see below) */
+  --sem-violet: #a78bfa;
+  --sem-blue: #38bdf8;
+
+  /* Surface ramp — light mode (derived from the dark ramp, near-white layered) */
+  --surface-0: #f4f4f3; /* page */
+  --surface-1: #ffffff; /* cards */
+  --surface-2: #ededf0; /* raised within a card */
+  --border: #e5e5e8;
+
+  /* Text ramp — light */
+  --text-primary: #1b1b1f;
+  --text-secondary: #56565d;
+  --text-muted: #83838c;
+}
+
+.dark {
+  /* NB: --acc / --acc-ink are deliberately NOT set here — they're driven in JS
+     on <html> so one value cascades across both modes (see accents.js). */
+
+  /* Surface ramp — near-black. Cards barely lift off the page so content reads
+     as floating on black (thin borders do the separating), not boxed in grey. */
+  --surface-0: #0b0b0d; /* page */
+  --surface-1: #0e0e11; /* cards — a hair above the page */
+  --surface-2: #1a1a1f; /* raised: hovers, inputs, inner panels */
+  --border: rgba(255, 255, 255, 0.07);
+
+  /* Text ramp — dark */
+  --text-primary: #f4f4f2;
+  --text-secondary: #83838c;
+  --text-muted: #56565d;
+
+  /* Deep red is unreadable on the near-black surface — lift it for error text
+     (matches the reference's dark-mode red). */
+  --sem-red: #ff8a80;
+}
+
 @layer base {
   html {
     font-feature-settings: 'cv11', 'ss01';

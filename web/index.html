@@ -10,6 +10,11 @@
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
       rel="stylesheet"
     />
+    <!-- Design-system fonts: Archivo (display), Hanken Grotesk (body), JetBrains Mono (data readouts). -->
+    <link
+      href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800;900&family=Hanken+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
     <link
       href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3/dist/tabler-icons.min.css"
       rel="stylesheet"
@@ -17,6 +22,24 @@
   </head>
   <body>
     <div id="root"></div>
+    <!-- Pre-paint accent: the app boots in dark mode, so apply the saved accent's
+         DARK value on <html> before React mounts to avoid a flash of the default.
+         Keep these dark hexes in sync with accents.js (ACCENTS[*].d). -->
+    <script>
+      (function () {
+        var D = {
+          lime: ['#c9f24e', '#0b0b0d'], amber: ['#f5a623', '#0b0b0d'],
+          violet: ['#a78bfa', '#0b0b0d'], blue: ['#38bdf8', '#0b0b0d'],
+          indigo: ['#6366f1', '#ffffff'],
+        };
+        try {
+          var v = D[localStorage.getItem('gh:accent')] || D.lime;
+          var s = document.documentElement.style;
+          s.setProperty('--acc', v[0]);
+          s.setProperty('--acc-ink', v[1]);
+        } catch (e) {}
+      })();
+    </script>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

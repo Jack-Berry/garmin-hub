@@ -4,25 +4,28 @@ import {
 } from 'recharts';
 import { api } from '../api';
 import { useFetch } from '../useFetch';
-import { StateWrap, PageMore, Icon, ACCENT, ACCENT_2, AXIS, GRID } from '../ui';
+import { StateWrap, PageMore, Icon, AXIS, GRID } from '../ui';
+import { useAccentHex } from '../accent';
 import { shortDate } from '../format';
 
 // The two trend metrics shown as inline sparklines, each expandable to a modal.
+// Drawn in the accent — they're the recovery signature, so they follow the picker.
 const METRICS = {
-  hrv: { label: 'HRV', dataKey: 'hrv_last_night', color: ACCENT },
-  readiness: { label: 'Readiness', dataKey: 'readiness_score', color: ACCENT_2 },
+  hrv: { label: 'HRV', dataKey: 'hrv_last_night' },
+  readiness: { label: 'Readiness', dataKey: 'readiness_score' },
 };
 
 const sleepHours = (s) => (s == null ? '—' : `${(s / 3600).toFixed(1)} h`);
 
-// One latest-value entry in the compact number strip.
+// One latest-value entry in the compact number strip. Label in Hanken (uppercase
+// eyebrow), value in mono — the design-system data readout.
 function StripStat({ label, value }) {
   return (
-    <span className="flex items-baseline gap-1">
-      <span className="text-[11px] font-medium uppercase tracking-wide text-slate-400 dark:text-slate-500">
+    <span className="flex items-baseline gap-1.5">
+      <span className="font-body text-micro font-semibold uppercase tracking-[0.14em] text-ink-muted">
         {label}
       </span>
-      <span className="font-semibold tabular-nums text-slate-700 dark:text-slate-200">{value}</span>
+      <span className="font-mono text-body font-medium tabular-nums text-ink">{value}</span>
     </span>
   );
 }
@@ -36,9 +39,9 @@ function Spark({ rows, dataKey, color, label, onClick }) {
       type="button"
       onClick={onClick}
       title={`Expand ${label} history`}
-      className="group w-[84px] cursor-pointer rounded-md text-left transition hover:bg-slate-100 dark:hover:bg-slate-800/40"
+      className="group w-[84px] cursor-pointer rounded-md text-left transition hover:bg-surface-2"
     >
-      <div className="mb-1 flex items-center gap-1 text-[10px] font-medium uppercase tracking-wide text-slate-500 transition group-hover:text-slate-700 dark:text-slate-400 dark:group-hover:text-slate-200">
+      <div className="mb-1 flex items-center gap-1 font-body text-micro font-semibold uppercase tracking-[0.14em] text-ink-muted transition group-hover:text-ink-secondary">
         {label}
         <Icon name="arrows-diagonal" className="text-[11px] opacity-0 transition group-hover:opacity-100" />
       </div>
@@ -61,6 +64,7 @@ function Spark({ rows, dataKey, color, label, onClick }) {
 // sparkline. Reuses the shared modal shell (overlay + card + Escape-to-close).
 // Plots the full fetched history oldest → newest with axes, gridlines + dates.
 function MetricModal({ metric, rows, onClose }) {
+  const accentHex = useAccentHex();
   useEffect(() => {
     const onKey = (e) => e.key === 'Escape' && onClose();
     window.addEventListener('keydown', onKey);
@@ -69,24 +73,26 @@ function MetricModal({ metric, rows, onClose }) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/50 p-4 backdrop-blur-sm sm:p-8"
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-4 backdrop-blur-sm sm:p-8"
       onClick={onClose}
     >
       <div
-        className="my-auto flex w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xl dark:border-slate-800 dark:bg-slate-900"
+        className="my-auto flex w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-line bg-surface-1 shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <header className="flex items-center justify-between gap-3 border-b border-slate-100 px-5 py-4 dark:border-slate-800">
+        <header className="flex items-center justify-between gap-3 border-b border-line px-5 py-4">
           <div>
-            <h2 className="text-sm font-semibold tracking-tight text-slate-900 dark:text-slate-100">
+            <h2 className="font-display text-[0.9375rem] font-bold uppercase tracking-[0.1em] text-ink">
               {metric.label}
             </h2>
-            <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">Last {rows.length} days</p>
+            <p className="mt-1 font-body text-nano uppercase tracking-[0.18em] text-ink-muted">
+              Last {rows.length} days
+            </p>
           </div>
           <button
             onClick={onClose}
             aria-label="Close"
-            className="shrink-0 rounded-lg border border-slate-300 px-2.5 py-1 text-sm text-slate-500 transition hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+            className="shrink-0 rounded-lg border border-line px-2.5 py-1 text-sm text-ink-secondary transition hover:bg-surface-2"
           >
             ✕
           </button>
@@ -98,7 +104,7 @@ function MetricModal({ metric, rows, onClose }) {
               <XAxis dataKey="date" tick={{ fontSize: 11, fill: AXIS }} tickLine={false} axisLine={false} minTickGap={24} />
               <YAxis domain={['dataMin', 'dataMax']} width={40} tick={{ fontSize: 11, fill: AXIS }} tickLine={false} axisLine={false} />
               <Tooltip contentStyle={{ borderRadius: 8, border: 'none', fontSize: 12 }} formatter={(v) => [v, metric.label]} />
-              <Line type="monotone" dataKey={metric.dataKey} stroke={metric.color} strokeWidth={2} dot={{ r: 2 }} activeDot={{ r: 4 }} connectNulls />
+              <Line type="monotone" dataKey={metric.dataKey} stroke={accentHex} strokeWidth={2} dot={{ r: 2 }} activeDot={{ r: 4 }} connectNulls />
             </LineChart>
           </ResponsiveContainer>
         </div>
@@ -112,6 +118,7 @@ function MetricModal({ metric, rows, onClose }) {
 // table (7 by default, "Show more" paginates the rest 7 at a time) expands
 // inline below the band on click.
 export default function Recovery() {
+  const accentHex = useAccentHex();
   const { data, loading, error } = useFetch(() => api.recovery({ limit: 30 }));
   const [visible, setVisible] = useState(7);
   const [showHistory, setShowHistory] = useState(false);
@@ -126,7 +133,7 @@ export default function Recovery() {
   const shown = data ? data.slice(0, visible) : [];
 
   return (
-    <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
+    <section className="overflow-hidden rounded-xl border border-line bg-surface-1">
       <div className="p-5">
         <StateWrap loading={loading} error={error} empty={!data || !data.length}>
           {data && (
@@ -134,14 +141,16 @@ export default function Recovery() {
               {/* Left: title + the two trend sparklines side by side. */}
               <div className="flex items-center gap-5">
                 <div className="shrink-0">
-                  <h2 className="text-sm font-semibold tracking-tight text-slate-900 dark:text-slate-100">
+                  <h2 className="font-display text-[0.8125rem] font-bold uppercase tracking-[0.14em] text-ink">
                     Recovery trends
                   </h2>
-                  <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">Last 14 days</p>
+                  <p className="mt-1 font-body text-nano uppercase tracking-[0.18em] text-ink-muted">
+                    Last 14 days
+                  </p>
                 </div>
                 <div className="flex items-end gap-4">
-                  <Spark rows={rows} dataKey="hrv_last_night" color={ACCENT} label="HRV" onClick={() => setMetric(METRICS.hrv)} />
-                  <Spark rows={rows} dataKey="readiness_score" color={ACCENT_2} label="Readiness" onClick={() => setMetric(METRICS.readiness)} />
+                  <Spark rows={rows} dataKey="hrv_last_night" color={accentHex} label="HRV" onClick={() => setMetric(METRICS.hrv)} />
+                  <Spark rows={rows} dataKey="readiness_score" color={accentHex} label="Readiness" onClick={() => setMetric(METRICS.readiness)} />
                 </div>
               </div>
 
@@ -157,7 +166,7 @@ export default function Recovery() {
                 </div>
                 <button
                   onClick={() => setShowHistory((s) => !s)}
-                  className="flex shrink-0 items-center gap-1 text-xs font-medium text-slate-500 transition hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200"
+                  className="flex shrink-0 items-center gap-1 font-body text-micro font-semibold uppercase tracking-[0.12em] text-ink-muted transition hover:text-ink-secondary"
                 >
                   <Icon name={showHistory ? 'chevron-down' : 'chevron-right'} className="text-sm" />
                   Full history
@@ -170,20 +179,23 @@ export default function Recovery() {
 
       {/* Full day-by-day history — collapsed by default, unfolds below the band. */}
       {data && showHistory && (
-        <div className="overflow-x-auto border-t border-slate-100 px-5 py-4 dark:border-slate-800">
-          <table className="w-full min-w-[28rem] text-sm">
-            <thead className="text-slate-500 dark:text-slate-400">
+        <div className="overflow-x-auto border-t border-line px-5 py-4">
+          <table className="w-full min-w-[28rem]">
+            <thead>
               <tr className="text-left">
-                <th className="px-2 py-2 font-medium">Date</th>
-                <th className="px-2 py-2 font-medium">HRV</th>
-                <th className="px-2 py-2 font-medium">Rest HR</th>
-                <th className="px-2 py-2 font-medium">Sleep</th>
-                <th className="px-2 py-2 font-medium">Readiness</th>
+                {['Date', 'HRV', 'Rest HR', 'Sleep', 'Readiness'].map((h) => (
+                  <th
+                    key={h}
+                    className="px-2 py-2 font-body text-micro font-semibold uppercase tracking-[0.12em] text-ink-muted"
+                  >
+                    {h}
+                  </th>
+                ))}
               </tr>
             </thead>
-            <tbody className="tabular-nums">
+            <tbody className="font-mono text-body tabular-nums text-ink-secondary">
               {shown.map((r) => (
-                <tr key={r.calendar_date} className="border-t border-slate-100 dark:border-slate-800">
+                <tr key={r.calendar_date} className="border-t border-line">
                   <td className="px-2 py-1.5 whitespace-nowrap">{shortDate(r.calendar_date)}</td>
                   <td className="px-2 py-1.5">{r.hrv_last_night ?? '—'}</td>
                   <td className="px-2 py-1.5">{r.resting_hr != null ? Math.round(r.resting_hr) : '—'}</td>

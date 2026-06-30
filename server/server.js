@@ -128,6 +128,48 @@ app.get('/api/recovery', handler((req, res) => {
   res.json(rows.map(({ raw_json, ...rest }) => rest));
 }));
 
+// Training Balance snapshot — parsed from the latest recovery.raw_json's
+// `training_status` block (Garmin Load Focus + training status + ACWR/load
+// ratio). This is a current snapshot (~last 4 weeks of load), so it's a
+// separate route from the recovery time-series rather than a per-day column.
+// The frontend never sees raw_json. The deviceId is a dynamic map key, so we
+// grab the first/only entry rather than hardcoding it.
+app.get('/api/training-balance', handler((req, res) => {
+  const row = db.prepare(
+    `SELECT calendar_date, raw_json FROM recovery
+     WHERE raw_json IS NOT NULL ORDER BY calendar_date DESC LIMIT 1`
+  ).get();
+  const ts = row && JSON.parse(row.raw_json).training_status;
+  const first = (m) => (m ? Object.values(m)[0] : null);
+
+  const lb = first(ts?.mostRecentTrainingLoadBalance?.metricsTrainingLoadBalanceDTOMap);
+  const st = first(ts?.mostRecentTrainingStatus?.latestTrainingStatusData);
+  if (!lb && !st) return res.json(null);
+
+  const bar = (key, label, value, min, max) => ({
+    key,
+    label,
+    value: value != null ? Math.round(value) : null,
+    target_min: min ?? null,
+    target_max: max ?? null,
+  });
+  const acwr = st?.acuteTrainingLoadDTO;
+
+  res.json({
+    date: row.calendar_date,
+    load_focus: lb ? {
+      feedback: lb.trainingBalanceFeedbackPhrase || null,
+      bars: [
+        bar('low_aerobic', 'Low Aerobic', lb.monthlyLoadAerobicLow, lb.monthlyLoadAerobicLowTargetMin, lb.monthlyLoadAerobicLowTargetMax),
+        bar('high_aerobic', 'High Aerobic', lb.monthlyLoadAerobicHigh, lb.monthlyLoadAerobicHighTargetMin, lb.monthlyLoadAerobicHighTargetMax),
+        bar('anaerobic', 'Anaerobic', lb.monthlyLoadAnaerobic, lb.monthlyLoadAnaerobicTargetMin, lb.monthlyLoadAnaerobicTargetMax),
+      ],
+    } : null,
+    training_status: st ? { phrase: st.trainingStatusFeedbackPhrase || null, code: st.trainingStatus ?? null } : null,
+    acwr: acwr ? { ratio: acwr.dailyAcuteChronicWorkloadRatio ?? null, status: acwr.acwrStatus || null } : null,
+  });
+}));
+
 // Weekly mileage aggregate: totals per ISO week (Monday start), last ~12 weeks.
 app.get('/api/summary/weekly', handler((req, res) => {
   // Runs only by default so mileage/pace aren't polluted by walks/football.
