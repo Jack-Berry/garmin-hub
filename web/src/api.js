@@ -40,5 +40,10 @@ export const api = {
   contextDump: () => get('/api/coach/context-dump'),
   coachNotes: (params = {}) => get(`/api/coach/notes${qs(params)}`),
   generateDaily: () => post('/api/coach/daily', {}),
+  coachReport: () => post('/api/coach/report', {}),
+  coachDay: (date) => post(`/api/coach/day/${date}`, {}),
   refreshIngest: () => post('/api/ingest/refresh'),
+  pacerChat: (messages) => post('/api/pacer/chat', { messages }),
+  pacerPreview: (params) => post('/api/pacer/preview', params),
+  pacerPush: (params) => post('/api/pacer/push', params),
 };

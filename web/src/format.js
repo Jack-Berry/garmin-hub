@@ -44,3 +44,17 @@ export const shortDate = (d) => {
 export const dateOnly = (d) => (d ? d.slice(0, 10) : null);
 
 export const todayISO = () => new Date().toISOString().slice(0, 10);
+
+// Local YYYY-MM-DD for a Date (avoids the UTC shift of toISOString in week math).
+export const ymd = (d) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+// Coarse activity_group for a free-text routine name, mirroring ingest's
+// derivation so a logged Garmin activity can match a planned recurring one.
+export const routineGroup = (name) => {
+  const s = (name || '').toLowerCase();
+  if (/football|soccer/.test(s)) return 'football';
+  if (/walk/.test(s)) return 'walk';
+  if (/run/.test(s)) return 'run';
+  return 'other';
+};

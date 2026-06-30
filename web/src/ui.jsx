@@ -5,6 +5,13 @@ export const ACCENT_2 = '#10b981'; // emerald-500
 export const AXIS = '#94a3b8'; // slate-400
 export const GRID = 'rgba(148,163,184,0.18)';
 
+// Tabler webfont icon (the stylesheet is loaded via the CDN <link> in
+// index.html). `name` is the icon slug without the `ti-` prefix, e.g.
+// <Icon name="run" />. Inherits colour + size from the surrounding text.
+export function Icon({ name, className = '' }) {
+  return <i className={`ti ti-${name} ${className}`} aria-hidden="true" />;
+}
+
 export function Section({ title, subtitle, children }) {
   return (
     <section className="rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">

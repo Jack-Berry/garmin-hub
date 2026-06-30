@@ -6,6 +6,20 @@
 // Profile lists are stored as JSON text; parse defensively.
 const parseList = (s) => { try { return s ? JSON.parse(s) : []; } catch { return []; } };
 
+// Weekday label (matches the profile routine `day` values) for a YYYY-MM-DD.
+const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const dowOf = (date) => DOW[new Date(`${date}T00:00:00`).getDay()];
+
+// Coarse activity_group for a free-text routine name, mirroring ingest's
+// derivation so a logged Garmin activity can match a recurring profile one.
+const routineGroup = (name) => {
+  const s = (name || '').toLowerCase();
+  if (/football|soccer/.test(s)) return 'football';
+  if (/walk/.test(s)) return 'walk';
+  if (/run/.test(s)) return 'run';
+  return 'other';
+};
+
 // seconds-per-km -> "M:SS"
 const pace = (sPerKm) => {
   const s = Math.round(sPerKm);
@@ -101,7 +115,7 @@ const parseSteps = (stepsJson) => {
 
 function buildContext(db) {
   const profileRow = db.prepare(
-    'SELECT shoes_json, races_json, injuries_json, general_notes FROM profile WHERE id = 1'
+    'SELECT shoes_json, races_json, injuries_json, routines_json, general_notes FROM profile WHERE id = 1'
   ).get() || {};
   const profile = {
     shoes: parseList(profileRow.shoes_json)
@@ -116,6 +130,16 @@ function buildContext(db) {
         return parts.join(' — ');
       }),
     injuries: parseList(profileRow.injuries_json).filter(Boolean),
+    // Recurring non-Garmin-planned sessions (football, gym…). Cross-training
+    // the coach should weigh against running load and recovery.
+    routines: parseList(profileRow.routines_json)
+      .filter((r) => r && r.activity)
+      .map((r) => {
+        let s = r.activity;
+        if (r.day) s += ` every ${r.day}`;
+        if (r.intensity != null) s += ` (intensity ${r.intensity}/10)`;
+        return s;
+      }),
     notes: profileRow.general_notes || null,
     // The user no longer specifies paces; the coach derives them from runs.
     pace_guidance: 'Paces are not user-provided — infer easy/threshold/5k/long-run paces from recent_runs.',
@@ -293,6 +317,94 @@ function buildContext(db) {
   };
 }
 
+// Per-day focus for the on-demand day insight (Stage 6b). Returns the completed
+// run and/or planned workout on `date` with a `kind`: 'completed' (a run was
+// logged that day), 'planned' (only a plan, nothing run yet), or 'rest'. Reuses
+// the same lap/step helpers as buildContext so the detail stays consistent.
+function buildDayFocus(db, date) {
+  const actRow = db.prepare(
+    `SELECT activity_id, name, date(start_time_local) AS date, distance_m, duration_s,
+            avg_hr, max_hr, hr_zone1_s, hr_zone2_s, hr_zone3_s, hr_zone4_s, hr_zone5_s,
+            avg_cadence_spm, avg_power, aerobic_training_effect, anaerobic_training_effect,
+            training_effect_label, activity_training_load, elevation_gain_m
+     FROM activities
+     WHERE activity_group = 'run' AND distance_m > 0 AND date(start_time_local) = ?
+     ORDER BY start_time_local DESC LIMIT 1`
+  ).get(date);
+
+  const planRow = db.prepare(
+    `SELECT title, estimated_distance_m,
+            COALESCE(is_race_override, is_race_auto) AS is_race, steps_json
+     FROM planned_workouts WHERE calendar_date = ? LIMIT 1`
+  ).get(date);
+
+  const planned = planRow ? {
+    title: planRow.title,
+    km: planRow.estimated_distance_m ? +(planRow.estimated_distance_m / 1000).toFixed(2) : null,
+    is_race: !!planRow.is_race,
+    steps: parseSteps(planRow.steps_json),
+  } : null;
+
+  // Recurring profile activity scheduled for this weekday, with its render-time
+  // state resolved the same way the WeekStrip does: done if a matching
+  // activity_group was logged, else missed (past) / expected (today or future).
+  const profRow = db.prepare('SELECT routines_json FROM profile WHERE id = 1').get() || {};
+  const routineRow = parseList(profRow.routines_json)
+    .find((r) => r && r.activity && r.day === dowOf(date));
+  let routine = null;
+  if (routineRow) {
+    const group = routineGroup(routineRow.activity);
+    const logged = db.prepare(
+      `SELECT name, distance_m, duration_s, avg_hr FROM activities
+       WHERE activity_group = ? AND date(start_time_local) = ?
+       ORDER BY start_time_local DESC LIMIT 1`
+    ).get(group, date);
+    const today = db.prepare("SELECT date('now', 'localtime') AS d").get().d;
+    routine = {
+      activity: routineRow.activity,
+      intensity: routineRow.intensity ?? null,
+      group,
+      state: logged ? 'done' : date < today ? 'missed' : 'expected',
+      logged: logged
+        ? { name: logged.name, km: logged.distance_m ? +(logged.distance_m / 1000).toFixed(2) : null,
+            duration_s: logged.duration_s, avg_hr: logged.avg_hr }
+        : null,
+    };
+  }
+
+  if (actRow) {
+    const km = +(actRow.distance_m / 1000).toFixed(2);
+    const zoneMin = [actRow.hr_zone1_s, actRow.hr_zone2_s, actRow.hr_zone3_s, actRow.hr_zone4_s, actRow.hr_zone5_s]
+      .map((s) => Math.round((s || 0) / 60));
+    const laps = db.prepare(
+      'SELECT distance_m, duration_s, intensity_type FROM laps WHERE activity_id = ? ORDER BY lap_index'
+    ).all(actRow.activity_id);
+    const run = {
+      date: actRow.date,
+      name: actRow.name,
+      km,
+      pace: pace(actRow.duration_s / km),
+      avg_hr: actRow.avg_hr,
+      max_hr: actRow.max_hr,
+      hr_min_by_zone: zoneMin,
+      avg_cadence_spm: actRow.avg_cadence_spm != null ? Math.round(actRow.avg_cadence_spm) : null,
+      avg_power: actRow.avg_power != null ? Math.round(actRow.avg_power) : null,
+      load: actRow.activity_training_load != null ? Math.round(actRow.activity_training_load) : null,
+      effect: actRow.training_effect_label,
+      aerobic_te: actRow.aerobic_training_effect,
+      anaerobic_te: actRow.anaerobic_training_effect,
+      elev_m: actRow.elevation_gain_m != null ? Math.round(actRow.elevation_gain_m) : null,
+    };
+    const wi = workIntervalSummary(laps);
+    if (wi) run.work_intervals = wi;
+    return { kind: 'completed', date, run, planned, routine };
+  }
+
+  if (planned) return { kind: 'planned', date, planned, routine };
+  if (routine) return { kind: 'routine', date, routine };
+  return { kind: 'rest', date };
+}
+
 // Priming prompt that tops the copy-context dump — frames the role for whichever
 // external LLM the athlete pastes into (Claude, ChatGPT, etc.).
 const DUMP_PREAMBLE =
@@ -315,6 +427,7 @@ function renderContextDump(db) {
   out.push(`Shoes: ${c.profile.shoes.length ? c.profile.shoes.join('; ') : '—'}`);
   out.push(`Races: ${c.profile.races.length ? c.profile.races.join(' | ') : '—'}`);
   out.push(`Injuries/constraints: ${c.profile.injuries.length ? c.profile.injuries.join('; ') : '—'}`);
+  out.push(`Other regular activities: ${c.profile.routines.length ? c.profile.routines.join('; ') : '—'}`);
   if (c.profile.notes) out.push(`Notes: ${c.profile.notes}`);
   out.push(`Pace guidance: ${c.profile.pace_guidance}`);
 
@@ -377,4 +490,4 @@ function renderContextDump(db) {
   return out.join('\n');
 }
 
-module.exports = { buildContext, renderContextDump };
+module.exports = { buildContext, buildDayFocus, renderContextDump };

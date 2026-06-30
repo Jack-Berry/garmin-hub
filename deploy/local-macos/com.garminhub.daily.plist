@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.garminhub.daily</string>
+
+  <!-- Daily 10:00: ingest Garmin data, then generate the daily insight. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/jackberry/Code/Projects/garmin-hub/deploy/local-macos/daily.sh</string>
+  </array>
+
+  <!-- Fires at 10:00 local. If the Mac is ASLEEP at 10:00, launchd runs it
+       once at the next wake; if fully powered off through 10:00, that day is
+       skipped. -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>10</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+
+  <!-- Do NOT run on load — only on the schedule (or manual `launchctl start`). -->
+  <key>RunAtLoad</key>
+  <false/>
+
+  <!-- daily.sh appends to ~/garmin-hub-cron.log itself; these catch any
+       launchd-level launch errors too. -->
+  <key>StandardOutPath</key>
+  <string>/Users/jackberry/garmin-hub-cron.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/jackberry/garmin-hub-cron.log</string>
+</dict>
+</plist>

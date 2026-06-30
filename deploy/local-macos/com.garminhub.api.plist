@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.garminhub.api</string>
+
+  <!-- Express API: node server.js on port 3001 -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/node</string>
+    <string>/Users/jackberry/Code/Projects/garmin-hub/server/server.js</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/jackberry/Code/Projects/garmin-hub/server</string>
+
+  <!-- PATH so the API's child-process ingest (spawns python3.13) resolves. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <!-- Start at login/load and restart on crash. -->
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/jackberry/Library/Logs/garmin-hub-api.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/jackberry/Library/Logs/garmin-hub-api.log</string>
+</dict>
+</plist>

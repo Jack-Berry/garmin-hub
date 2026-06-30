@@ -1,13 +1,13 @@
 import { useState } from 'react';
 import { api } from './api';
 import DailyInsight from './sections/DailyInsight';
-import WeekSummary from './sections/WeekSummary';
-import PaceTrend from './sections/PaceTrend';
+import Hero from './sections/Hero';
 import RecentActivities from './sections/RecentActivities';
 import Recovery from './sections/Recovery';
 import PlannedWorkouts from './sections/PlannedWorkouts';
 import PlannedVsActual from './sections/PlannedVsActual';
 import SettingsModal from './SettingsModal';
+import PacerModal from './PacerModal';
 import ChatWidget from './ChatWidget';
 
 // Topbar button: runs the Python ingest, then bumps the dashboard refresh key
@@ -62,6 +62,7 @@ function RefreshButton({ className, onRefreshed }) {
 export default function App() {
   const [dark, setDark] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [pacerOpen, setPacerOpen] = useState(false);
   // Bumping this remounts <main>, so all sections refetch from the API.
   const [refreshKey, setRefreshKey] = useState(0);
 
@@ -79,6 +80,9 @@ export default function App() {
             </div>
             <div className="flex items-center gap-2">
               <RefreshButton className={topBtn} onRefreshed={() => setRefreshKey((k) => k + 1)} />
+              <button onClick={() => setPacerOpen(true)} className={topBtn} aria-label="New pacer" title="Build a pacing workout">
+                ⏱ New pacer
+              </button>
               <button onClick={() => setSettingsOpen(true)} className={topBtn} aria-label="Settings">
                 ⚙ Settings
               </button>
@@ -91,8 +95,7 @@ export default function App() {
 
         <main key={refreshKey} className="mx-auto max-w-5xl space-y-6 px-6 py-8">
           <DailyInsight />
-          <WeekSummary />
-          <PaceTrend />
+          <Hero />
           <RecentActivities />
           <Recovery />
           <PlannedWorkouts />
@@ -100,6 +103,7 @@ export default function App() {
         </main>
 
         {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
+        {pacerOpen && <PacerModal onClose={() => setPacerOpen(false)} />}
         <ChatWidget />
       </div>
     </div>

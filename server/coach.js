@@ -1,11 +1,16 @@
-// AI coach — Claude client. Generates a daily coaching insight from the
-// assembled training context (see context.js). Analyst, not workout generator.
+// AI coach — Claude client. Generates coaching text from the assembled training
+// context (see context.js). Analyst, not workout generator. Three tiers:
+//   - brief        : cheap 2-3 sentence daily glance (Sonnet)
+//   - detailed     : full multi-section daily report, on demand (Opus)
+//   - day insight  : on-demand per-day run report / planned tips (Sonnet)
 const Anthropic = require('@anthropic-ai/sdk');
-const { buildContext } = require('./context');
+const { buildContext, buildDayFocus } = require('./context');
 
+// Opus for the deep, on-demand detailed report only — depth is worth the cost
+// when explicitly requested.
 const MODEL = 'claude-opus-4-8';
-// Conversational chat uses a faster/cheaper model — it's interactive and runs
-// far more often than the daily insight.
+// Sonnet for everything frequent/interactive: chat, the daily brief, and the
+// per-day insights. Cheaper and fast enough for a glance.
 const CHAT_MODEL = 'claude-sonnet-4-6';
 
 // Static framing for the chat coach — the interactive sibling of the daily
@@ -41,12 +46,62 @@ Style rules:
 
 If the data is sparse, say so briefly rather than padding.`;
 
+// Glance-tier brief: the cheap default at the top of the dashboard. Deliberately
+// thin so it doesn't duplicate the detailed report's depth.
+const BRIEF_SYSTEM = `You are this athlete's running coach writing a short daily check-in, 2 to 3 conversational sentences and no more.
+
+In plain, warm prose cover three things: how their body is responding right now (recovery, expressed in words rather than a stat dump), what's on the plan today, and a light encouraging nudge.
+
+This is a glance, not a report. Do NOT: analyse past runs in detail, use any section headers, open with a bold TL;DR line, or list out numbers. Include at most one concrete number, and only if it genuinely adds colour, the detailed report is where the depth lives. If signals.flags are present, work them in briefly and in passing.
+
+Style: second person, direct. Do NOT use em-dashes. Do NOT use the ~ symbol, write "around 4:00/km" instead.`;
+
+// Per-day insight prompts (Sonnet). "How the run went" is the post-run analysis
+// deliberately kept OUT of the brief; "planned tips" coaches execution.
+const DAY_COMPLETED_SYSTEM = `You are this athlete's running coach reviewing ONE completed run in detail.
+
+From the focus run (pace, avg/max HR, time-in-HR-zone, cadence, power, training load and effect, plus any interval work-reps) and the backdrop context (recovery, recent runs, goal paces), tell them how this session actually went. If a planned workout matched the day, judge execution against it: did they hit the target paces and intervals, or over/under-cook it. Comment on effort relative to recovery and how it fits recent training.
+
+Be specific with real numbers (paces, HR, load). Keep to a few short sentences or a couple of tight bullets. One short markdown header at most, only if it helps. No bold TL;DR line. Do NOT use em-dashes or the ~ symbol. Second person.`;
+
+const DAY_PLANNED_SYSTEM = `You are this athlete's running coach giving practical tips for an UPCOMING planned workout.
+
+From the focus workout (title, distance, structured steps with any pace targets) and the backdrop context (current recovery and readiness, recent training load, goal paces, PRs), advise how to approach and execute it: what it's training, sensible pacing for the reps or segments, and any adjustment today's recovery or recent load warrants. If it's a race, factor its proximity and goal pace.
+
+You do NOT rewrite the workout, they use Runna for that, you coach the execution. Be specific with paces and numbers. A few short sentences or tight bullets. One short markdown header at most. No bold TL;DR line. Do NOT use em-dashes or the ~ symbol. Second person.`;
+
+const DAY_ROUTINE_SYSTEM = `You are this athlete's running coach commenting on a recurring non-running session in their week (e.g. football, gym, cycling).
+
+You have the session (activity, intensity 1-10, whether it has been logged today) plus the backdrop context (recovery, recent runs, upcoming planned runs, goal paces). Treat it as cross-training that affects running load and recovery. For an upcoming or expected session, advise how hard to go given current recovery and any nearby running workouts, and how to protect the next run. For a completed one, note how it adds to the week's load and what that means for upcoming runs.
+
+You do NOT coach the sport itself, only how it fits their running. A few short sentences. One short markdown header at most. No bold TL;DR line. Do NOT use em-dashes or the ~ symbol. Second person.`;
+
 let client;
 const getClient = () => (client ||= new Anthropic());
 
-// Generates the insight text. Returns { text, context, model } so the caller
-// can persist it with the context's date range.
-async function generateDailyInsight(db) {
+// Join the text blocks of a messages response into one trimmed string.
+const extractText = (response) =>
+  response.content.filter((b) => b.type === 'text').map((b) => b.text).join('').trim();
+
+// Glance brief (Sonnet). Returns { text, context, model } so the caller can
+// persist it with the context's date range (same note shape as before).
+async function generateBrief(db) {
+  const context = buildContext(db);
+  const response = await getClient().messages.create({
+    model: CHAT_MODEL,
+    max_tokens: 300,
+    system: [{ type: 'text', text: BRIEF_SYSTEM }],
+    messages: [{
+      role: 'user',
+      content: `Today's training context as JSON. Write today's check-in.\n\n${JSON.stringify(context)}`,
+    }],
+  });
+  return { text: extractText(response), context, model: CHAT_MODEL };
+}
+
+// Detailed multi-section report (Opus), generated on demand. Stateless — the
+// caller returns it directly without persisting.
+async function generateDetailedReport(db) {
   const context = buildContext(db);
   const response = await getClient().messages.create({
     model: MODEL,
@@ -54,15 +109,55 @@ async function generateDailyInsight(db) {
     system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
     messages: [{
       role: 'user',
-      content: `Here is today's training context as JSON. Write today's coaching insight.\n\n${JSON.stringify(context)}`,
+      content: `Here is today's training context as JSON. Write today's detailed coaching report.\n\n${JSON.stringify(context)}`,
     }],
   });
-  const text = response.content
-    .filter((b) => b.type === 'text')
-    .map((b) => b.text)
-    .join('')
-    .trim();
-  return { text, context, model: MODEL };
+  return { text: extractText(response), model: MODEL };
+}
+
+// On-demand per-day insight (Sonnet). Branches on what's on `date`: a completed
+// run gets a "how it went" analysis, a planned-only day gets execution tips, and
+// a rest day returns a static line with no model call. Returns { text, kind, model }.
+async function generateDayInsight(db, date) {
+  const focus = buildDayFocus(db, date);
+  if (focus.kind === 'rest') {
+    return { text: 'Rest day. Nothing planned and no run logged.', kind: 'rest', model: null };
+  }
+  // A missed recurring session needs no model call — a static line is enough.
+  if (focus.kind === 'routine' && focus.routine.state === 'missed') {
+    return {
+      text: `Looks like you skipped ${focus.routine.activity} today. No matching session was logged.`,
+      kind: 'routine', model: null,
+    };
+  }
+  const context = buildContext(db);
+  const isRoutine = focus.kind === 'routine';
+  const system = isRoutine ? DAY_ROUTINE_SYSTEM
+    : focus.kind === 'completed' ? DAY_COMPLETED_SYSTEM : DAY_PLANNED_SYSTEM;
+  const verb = isRoutine
+    ? (focus.routine.state === 'done'
+        ? `Comment on today's completed ${focus.routine.activity} session and how it fits the running week.`
+        : `Give tips for today's ${focus.routine.activity} session (intensity ${focus.routine.intensity ?? '?'}/10) and how to balance it with running.`)
+    : focus.kind === 'completed'
+      ? 'Analyse how this session went.'
+      : 'Give tips for executing this planned workout.';
+  const response = await getClient().messages.create({
+    model: CHAT_MODEL,
+    max_tokens: 600,
+    system: [
+      { type: 'text', text: system },
+      {
+        type: 'text',
+        text: `Backdrop training context as JSON:\n\n${JSON.stringify(context)}`,
+        cache_control: { type: 'ephemeral' },
+      },
+    ],
+    messages: [{
+      role: 'user',
+      content: `${verb} Focus day: ${date}.\n\nFocus as JSON:\n${JSON.stringify(focus)}`,
+    }],
+  });
+  return { text: extractText(response), kind: focus.kind, model: CHAT_MODEL };
 }
 
 // Interactive chat reply. `messages` is the conversation so far — an array of
@@ -85,11 +180,7 @@ async function chatReply(db, messages) {
     ],
     messages,
   });
-  return response.content
-    .filter((b) => b.type === 'text')
-    .map((b) => b.text)
-    .join('')
-    .trim();
+  return extractText(response);
 }
 
-module.exports = { generateDailyInsight, chatReply, MODEL };
+module.exports = { generateBrief, generateDetailedReport, generateDayInsight, chatReply, MODEL };

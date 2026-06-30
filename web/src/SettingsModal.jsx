@@ -9,6 +9,8 @@ const inputCls =
 const addBtnCls =
   'rounded-lg border border-dashed border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-indigo-400 hover:text-indigo-500 dark:border-slate-700 dark:text-slate-300';
 
+const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
 // Small round delete control for a list row.
 function DelBtn({ onClick, label }) {
   return (
@@ -90,6 +92,7 @@ export default function SettingsModal({ onClose }) {
   const [shoes, setShoes] = useState([]);
   const [races, setRaces] = useState([]);
   const [injuries, setInjuries] = useState([]);
+  const [routines, setRoutines] = useState([]);
   const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState(null); // 'saved' | { error }
@@ -107,6 +110,7 @@ export default function SettingsModal({ onClose }) {
     setShoes(data.shoes?.length ? data.shoes : [{ name: '', purpose: '' }]);
     setRaces(data.races || []);
     setInjuries(data.injuries || []);
+    setRoutines(data.routines || []);
     setNotes(data.general_notes || '');
   }, [data]);
 
@@ -115,6 +119,7 @@ export default function SettingsModal({ onClose }) {
   const remove = (setter) => (i) => { setter((a) => a.filter((_, j) => j !== i)); dirty(); };
   const setShoe = patch(setShoes);
   const setRace = patch(setRaces);
+  const setRoutine = patch(setRoutines);
 
   const save = async () => {
     setSaving(true);
@@ -125,6 +130,13 @@ export default function SettingsModal({ onClose }) {
         shoes: shoes.filter((s) => s.name?.trim() || s.purpose?.trim()),
         races: races.filter((r) => r.name?.trim() || r.date || r.goal_time?.trim()),
         injuries: injuries.map((s) => s.trim()).filter(Boolean),
+        routines: routines
+          .filter((r) => r.activity?.trim())
+          .map((r) => ({
+            activity: r.activity.trim(),
+            day: r.day || '',
+            intensity: r.intensity === '' || r.intensity == null ? null : Number(r.intensity),
+          })),
         general_notes: notes,
       });
       setStatus('saved');
@@ -230,6 +242,42 @@ export default function SettingsModal({ onClose }) {
               ))}
               <button type="button" className={addBtnCls} onClick={() => { setInjuries((a) => [...a, '']); dirty(); }}>
                 + Add constraint
+              </button>
+            </Group>
+
+            <Group title="Other regular activities" hint="Recurring sessions the coach should know about — football, gym, cycling, etc.">
+              {routines.map((r, i) => (
+                <div key={i} className="flex flex-wrap items-center gap-2">
+                  <input
+                    className={`${inputCls} min-w-[10rem] flex-1`}
+                    placeholder="Activity (e.g. Football)"
+                    value={r.activity || ''}
+                    onChange={(e) => setRoutine(i, { activity: e.target.value })}
+                  />
+                  <select
+                    className={`${inputCls} w-28`}
+                    value={r.day || ''}
+                    onChange={(e) => setRoutine(i, { day: e.target.value })}
+                  >
+                    <option value="">Any day</option>
+                    {DAYS.map((d) => (
+                      <option key={d} value={d}>{d}</option>
+                    ))}
+                  </select>
+                  <input
+                    type="number"
+                    min="1"
+                    max="10"
+                    className={`${inputCls} w-28`}
+                    placeholder="Intensity 1–10"
+                    value={r.intensity ?? ''}
+                    onChange={(e) => setRoutine(i, { intensity: e.target.value })}
+                  />
+                  <DelBtn onClick={() => remove(setRoutines)(i)} label="Remove activity" />
+                </div>
+              ))}
+              <button type="button" className={addBtnCls} onClick={() => { setRoutines((a) => [...a, { activity: '', day: '', intensity: '' }]); dirty(); }}>
+                + Add activity
               </button>
             </Group>
 

@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.garminhub.web</string>
+
+  <!-- Serve the production build (web/dist) via `vite preview`, localhost only,
+       on a fixed port. node is invoked directly on vite's entry script so this
+       does not depend on shebang/PATH resolution. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/node</string>
+    <string>/Users/jackberry/Code/Projects/garmin-hub/web/node_modules/vite/bin/vite.js</string>
+    <string>preview</string>
+    <string>--host</string>
+    <string>127.0.0.1</string>
+    <string>--port</string>
+    <string>4173</string>
+    <string>--strictPort</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/jackberry/Code/Projects/garmin-hub/web</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/jackberry/Library/Logs/garmin-hub-web.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/jackberry/Library/Logs/garmin-hub-web.log</string>
+</dict>
+</plist>

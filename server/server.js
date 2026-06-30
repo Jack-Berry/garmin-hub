@@ -7,7 +7,8 @@ const express = require('express');
 const Database = require('better-sqlite3');
 const db = require('./db');
 const { buildContext, renderContextDump } = require('./context');
-const { generateDailyInsight, chatReply } = require('./coach');
+const { generateBrief, generateDetailedReport, generateDayInsight, chatReply } = require('./coach');
+const { pacerChat } = require('./pacer');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -217,12 +218,13 @@ const parseList = (s) => { try { return s ? JSON.parse(s) : []; } catch { return
 
 const readProfile = () => {
   const row = db.prepare(
-    'SELECT shoes_json, races_json, injuries_json, general_notes, updated_at FROM profile WHERE id = 1'
+    'SELECT shoes_json, races_json, injuries_json, routines_json, general_notes, updated_at FROM profile WHERE id = 1'
   ).get() || {};
   return {
     shoes: parseList(row.shoes_json),
     races: parseList(row.races_json),
     injuries: parseList(row.injuries_json),
+    routines: parseList(row.routines_json),
     general_notes: row.general_notes || '',
     updated_at: row.updated_at || null,
   };
@@ -237,12 +239,14 @@ app.post('/api/profile', handler((req, res) => {
   const arr = (v) => (Array.isArray(v) ? v : []);
   writeDb.prepare(
     `UPDATE profile SET shoes_json = :shoes, races_json = :races,
-       injuries_json = :injuries, general_notes = :notes, updated_at = :updated_at
+       injuries_json = :injuries, routines_json = :routines,
+       general_notes = :notes, updated_at = :updated_at
      WHERE id = 1`
   ).run({
     shoes: JSON.stringify(arr(b.shoes)),
     races: JSON.stringify(arr(b.races)),
     injuries: JSON.stringify(arr(b.injuries)),
+    routines: JSON.stringify(arr(b.routines)),
     notes: b.general_notes || '',
     updated_at: new Date().toISOString(),
   });
@@ -262,10 +266,11 @@ app.get('/api/coach/context-dump', handler((req, res) => {
   res.json({ dump: renderContextDump(db) });
 }));
 
-// Generate a fresh daily coaching insight (spends Claude API credit), store it
-// in coach_notes, and return it. Write — uses the writable connection.
+// Generate a fresh daily glance brief (Sonnet, cheap), store it in coach_notes
+// as a 'daily' note, and return it. Write — uses the writable connection. The
+// dashboard's brief carousel reads these; the deeper report is on-demand below.
 app.post('/api/coach/daily', asyncHandler(async (req, res) => {
-  const { text, context, model } = await generateDailyInsight(db);
+  const { text, context, model } = await generateBrief(db);
   const createdAt = new Date().toISOString();
   const end = createdAt.slice(0, 10);
   const start = new Date(Date.now() - context.window_days * 86400000)
@@ -284,6 +289,27 @@ app.post('/api/coach/daily', asyncHandler(async (req, res) => {
     date_range_start: start,
     date_range_end: end,
   });
+}));
+
+// On-demand detailed report (Opus). The depth tier behind the daily brief,
+// generated ONLY when the user clicks "Detailed report". Stateless — not
+// persisted. Returns { content, model }.
+app.post('/api/coach/report', asyncHandler(async (req, res) => {
+  const { text, model } = await generateDetailedReport(db);
+  res.json({ content: text, model });
+}));
+
+// On-demand per-day insight (Sonnet) for a clicked week-strip cell. Branches on
+// the date's state: completed run -> how it went, planned-only -> execution
+// tips, rest -> a static line (no model call). Stateless. Returns
+// { content, kind, model }.
+app.post('/api/coach/day/:date', asyncHandler(async (req, res) => {
+  const { date } = req.params;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return res.status(400).json({ error: 'date must be YYYY-MM-DD' });
+  }
+  const { text, kind, model } = await generateDayInsight(db, date);
+  res.json({ content: text, kind, model });
 }));
 
 // Interactive chat with the coach (spends Sonnet credit). Body: { messages }
@@ -372,5 +398,64 @@ app.post('/api/ingest/refresh', (req, res) => {
     }
   });
 });
+
+// --- Pacer builder (Stage 5c) -------------------------------------------------
+// Conversational param-gathering + deterministic build/push of Engo pacers.
+// The AI (pacer.js) ONLY gathers params; the build + Garmin upload happen in
+// pacer_cli.py, and ONLY /api/pacer/push writes to Garmin (after explicit
+// preview approval in the UI). Reuses the ingest Python-spawn pattern.
+const PACER_SCRIPT = path.resolve(__dirname, '..', 'ingest', 'pacer_cli.py');
+
+// Run pacer_cli.py in the given mode, feeding params as JSON on stdin and
+// resolving its parsed JSON stdout. Rejects with stderr on non-zero exit.
+const runPacer = (mode, params, timeoutMs) =>
+  new Promise((resolve, reject) => {
+    const child = spawn(INGEST_PYTHON, [PACER_SCRIPT, mode], {
+      cwd: path.resolve(__dirname, '..'),
+    });
+    let out = '';
+    let err = '';
+    child.stdin.write(JSON.stringify(params));
+    child.stdin.end();
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error('Pacer timed out — the Garmin token may have expired; re-authenticate in a terminal (MFA).'));
+    }, timeoutMs);
+    child.stdout.on('data', (d) => { out += d; });
+    child.stderr.on('data', (d) => { err += d; });
+    child.on('error', (e) => { clearTimeout(timer); reject(new Error(`Failed to start pacer: ${e.message}`)); });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        return reject(new Error((err.trim().split('\n').pop() || `pacer exited ${code}`)));
+      }
+      try { resolve(JSON.parse(out)); }
+      catch { reject(new Error(`pacer returned unparseable output: ${out.slice(0, 200)}`)); }
+    });
+  });
+
+// Conversational Q&A to gather pacer params (Sonnet). Body: { messages }.
+// Returns { reply, params } — params is non-null once the Q&A is complete and
+// the UI should move to a preview. Never pushes to Garmin.
+app.post('/api/pacer/chat', asyncHandler(async (req, res) => {
+  const { messages } = req.body || {};
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return res.status(400).json({ error: 'messages must be a non-empty array' });
+  }
+  const today = new Date().toISOString().slice(0, 10);
+  const { reply, params } = await pacerChat(messages, today);
+  res.json({ reply, params });
+}));
+
+// Build (no network) and return a readable preview of the pacer. Body: params.
+app.post('/api/pacer/preview', asyncHandler(async (req, res) => {
+  res.json(await runPacer('preview', req.body || {}, 20000));
+}));
+
+// Build AND push to Garmin (upload + schedule). The ONLY endpoint that writes
+// to Garmin — called only after the user approves the preview. Body: params.
+app.post('/api/pacer/push', asyncHandler(async (req, res) => {
+  res.json(await runPacer('push', req.body || {}, 120000));
+}));
 
 app.listen(PORT, () => console.log(`Garmin Hub API listening on port ${PORT}`));
