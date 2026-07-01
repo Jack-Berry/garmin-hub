@@ -8,7 +8,7 @@ const Database = require('better-sqlite3');
 const db = require('./db');
 const { buildContext, renderContextDump } = require('./context');
 const { collapseRaceDuplicates } = require('./planned');
-const { generateBrief, generateDetailedReport, generateDayInsight, chatReply } = require('./coach');
+const { generateBrief, generateDetailedReport, generateDayInsight, chatReply, planReply } = require('./coach');
 const { pacerChat } = require('./pacer');
 
 const app = express();
@@ -367,6 +367,20 @@ app.post('/api/coach/chat', asyncHandler(async (req, res) => {
   }
   const reply = await chatReply(db, messages);
   res.json({ reply });
+}));
+
+// Planning-mode coach turn (Opus, Stage 8). Body: { messages } — the full
+// conversation so far. Returns { reply, spec } — spec is the extracted session
+// spec object when the coach presents one, else null. This endpoint COMPOSES
+// only; preview/push go through /api/pacer/preview and /api/pacer/push (which
+// take the spec object as-is and run the guard). Stateless: nothing persisted.
+app.post('/api/coach/plan', asyncHandler(async (req, res) => {
+  const { messages } = req.body || {};
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return res.status(400).json({ error: 'messages must be a non-empty array' });
+  }
+  const { reply, spec, done } = await planReply(db, messages);
+  res.json({ reply, spec, done });
 }));
 
 // Recent coach notes, newest first. ?limit (default 10), ?note_type filters

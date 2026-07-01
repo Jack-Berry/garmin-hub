@@ -58,6 +58,11 @@ DB_PATH = REPO_ROOT / "data" / "garmin.db"
 ENV_PATH = INGEST_DIR / ".env"
 TOKENSTORE = INGEST_DIR / ".garth"   # gitignored garth token cache
 
+# Garmin's lactate-threshold speed comes back needing a x10 scale to reach true
+# m/s (confirmed against Garmin Connect's displayed LT pace). Single named knob
+# so it's trivial to change if that ever differs.
+LT_SPEED_SCALE = 10
+
 
 # =========================================================================
 # Helpers
@@ -598,6 +603,31 @@ def ingest_race_predictions(g, conn, summary):
     summary["race_predictions"][result] += 1
 
 
+def ingest_lactate_threshold(g, conn, summary):
+    """Store the current lactate threshold on the profile row (id=1).
+
+    Single current value, NOT a series. Scoped UPDATE of only the three LT
+    columns so user-edited profile fields (shoes/races/injuries/routines/notes)
+    are never clobbered. Missing/null reading -> log and skip, never crash."""
+    try:
+        data = g.get_lactate_threshold(latest=True)
+    except Exception as e:
+        summary["errors"].append(f"lactate_threshold: {e}")
+        return
+    shr = data.get("speed_and_heart_rate") if isinstance(data, dict) else None
+    if not isinstance(shr, dict) or shr.get("speed") is None:
+        summary["errors"].append("lactate_threshold: no reading returned")
+        return
+
+    conn.execute(
+        "UPDATE profile SET lt_speed_mps = ?, lt_hr = ?, lt_detected_date = ? "
+        "WHERE id = 1",
+        (float(shr["speed"]) * LT_SPEED_SCALE,
+         pick(shr, "heartRate"), pick(shr, "calendarDate")),
+    )
+    summary["lactate_threshold"]["updated"] += 1
+
+
 # =========================================================================
 # Main
 # =========================================================================
@@ -611,6 +641,7 @@ def main():
         "recovery": {"inserted": 0, "updated": 0},
         "personal_records": {"inserted": 0, "updated": 0},
         "race_predictions": {"inserted": 0, "updated": 0},
+        "lactate_threshold": {"inserted": 0, "updated": 0},
         "errors": [],
     }
 
@@ -623,7 +654,8 @@ def main():
                       ("planned", ingest_planned),
                       ("recovery", ingest_recovery),
                       ("personal_records", ingest_personal_records),
-                      ("race_predictions", ingest_race_predictions)):
+                      ("race_predictions", ingest_race_predictions),
+                      ("lactate_threshold", ingest_lactate_threshold)):
         try:
             fn(g, conn, summary)
             conn.commit()
@@ -635,7 +667,7 @@ def main():
     # --- Summary -----------------------------------------------------------
     print("\n=== Ingest summary ===")
     for t in ("activities", "laps", "planned", "recovery",
-              "personal_records", "race_predictions"):
+              "personal_records", "race_predictions", "lactate_threshold"):
         s = summary[t]
         print(f"{t:12s} inserted={s['inserted']:4d}  updated={s['updated']:4d}")
     if summary["errors"]:

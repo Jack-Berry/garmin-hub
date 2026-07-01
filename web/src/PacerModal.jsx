@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from './api';
 import { Markdown, Icon } from './ui';
-import { duration, shortDate } from './format';
+import { shortDate } from './format';
+import { PacerPreview } from './PacerPreview';
 
 // New-pacer builder (Stage 5c). Three steps in one modal:
 //   1. distance  — the run distance, entered first.
@@ -18,29 +19,6 @@ const primaryBtn =
 
 const ghostBtn =
   'rounded-lg border border-line px-3 py-2 text-sm font-medium text-ink-secondary transition hover:bg-surface-2 disabled:opacity-50';
-
-// One row in the preview's segment list.
-function SegRow({ seg, n }) {
-  const isInterval = seg.type === 'interval';
-  const dist = seg.distance_m >= 1000
-    ? `${(seg.distance_m / 1000).toFixed(2)} km`
-    : `${seg.distance_m} m`;
-  const label =
-    seg.type === 'warmup' ? 'Warm-up'
-    : seg.type === 'cooldown' ? 'Cool-down'
-    : `Segment ${n}`;
-  return (
-    <div className="flex items-center justify-between border-b border-line py-1.5 text-sm last:border-0">
-      <span className="font-body font-medium text-ink">{label}</span>
-      <span className="font-mono tabular-nums text-ink-secondary">
-        {dist}
-        {isInterval && seg.pace_label
-          ? <> @ <span className="font-semibold text-acc">{seg.pace_label}</span></>
-          : ' easy'}
-      </span>
-    </div>
-  );
-}
 
 export default function PacerModal({ onClose }) {
   // 'distance' | 'chat' | 'preview'
@@ -122,9 +100,6 @@ export default function PacerModal({ onClose }) {
       step === 'distance' ? startChat() : send();
     }
   };
-
-  // Group preview segments so interval numbering is independent of warmup/cooldown.
-  let intervalN = 0;
 
   return (
     <div
@@ -244,26 +219,7 @@ export default function PacerModal({ onClose }) {
               </div>
             ) : (
               <>
-                <div className="rounded-xl border border-line bg-surface-2 p-4">
-                  <div className="flex items-baseline justify-between">
-                    <h3 className="font-body text-sm font-semibold text-ink">
-                      {preview.name}
-                    </h3>
-                    <span className="font-mono text-xs text-ink-muted">
-                      {shortDate(params.date)}
-                    </span>
-                  </div>
-                  <div className="mt-1 flex gap-4 font-mono text-xs text-ink-muted">
-                    <span>{(preview.total_distance_m / 1000).toFixed(2)} km total</span>
-                    <span>est. {duration(preview.est_duration_s)}</span>
-                    <span>{preview.segments.filter((s) => s.type === 'interval').length} segments</span>
-                  </div>
-                  <div className="mt-3">
-                    {preview.segments.map((seg, i) => (
-                      <SegRow key={i} seg={seg} n={seg.type === 'interval' ? ++intervalN : null} />
-                    ))}
-                  </div>
-                </div>
+                <PacerPreview preview={preview} date={params.date} />
 
                 {error && <p className="text-center text-sm text-sem-red">{error}</p>}
 

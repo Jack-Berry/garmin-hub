@@ -3,6 +3,8 @@
 // upcoming planned workouts, the profile, and a few code-derived signals.
 // Read-only: takes the shared read-only db connection.
 const { collapseRaceDuplicates } = require('./planned');
+const { computeZones } = require('./zones');
+const { resolveGoalPaces } = require('./goalpaces');
 
 // Profile lists are stored as JSON text; parse defensively.
 const parseList = (s) => { try { return s ? JSON.parse(s) : []; } catch { return []; } };
@@ -497,4 +499,63 @@ function renderContextDump(db) {
   return out.join('\n');
 }
 
-module.exports = { buildContext, buildDayFocus, renderContextDump };
+// Planning-mode context (Stage 8). Wraps buildContext and augments it with the
+// authoritative pace sources the composer needs: the LT-derived zone table
+// (zones.js) and resolved goal paces (goalpaces.js), plus the guard bounds so
+// the coach never emits a spec it knows will be rejected. Overrides the base
+// pace_guidance (which says "infer paces from runs" — wrong in planning mode).
+function buildPlanningContext(db) {
+  const context = buildContext(db);
+
+  const row = db.prepare('SELECT lt_speed_mps, races_json FROM profile WHERE id = 1').get() || {};
+  const records = db.prepare('SELECT label, value, value_kind FROM personal_records').all();
+  const races = parseList(row.races_json);
+  const lt = row.lt_speed_mps;
+  const lt_ready = !!lt;
+
+  const zones = lt_ready ? computeZones(lt).map((z) => ({
+    name: z.name,
+    point: z.point.pace,                        // "M:SS" per km
+    point_mps: +z.point.mps.toFixed(3),
+    range: z.ceilingOnly
+      ? { ceiling: z.range.fast.pace }          // easy: ceiling-only
+      : { fast: z.range.fast.pace, slow: z.range.slow.pace },
+  })) : null;
+
+  const goal_paces = resolveGoalPaces(races, records).map((g) => ({
+    name: g.name,
+    date: g.date,
+    distance: g.distance ? g.distance.key : null,
+    goal_time: g.goalTimeSec != null ? hms(g.goalTimeSec) : null,
+    goal_pace: g.goalPace ? g.goalPace.pace : null,
+    source: g.source,                           // explicit | pb | none
+    note: g.note,
+  }));
+
+  // OVERRIDE the base guidance: in planning the injected paces are authoritative.
+  context.profile.pace_guidance = lt_ready
+    ? 'Paces ARE provided in planning.zones and planning.goal_paces. Use those as the '
+      + 'AUTHORITATIVE pace source when composing sessions. recent_runs is context for '
+      + 'current fitness and fatigue only, NOT for deriving target paces.'
+    : 'planning.lt_ready is false: no LT zone table is available. Fall back to inferring '
+      + 'rough paces from recent_runs and race_predictions, tell the athlete the paces are '
+      + 'estimated, and stay conservative.';
+
+  context.planning = {
+    lt_ready,
+    lt_speed_mps: lt_ready ? +lt.toFixed(3) : null,
+    lt_pace: lt_ready ? pace(1000 / lt) : null, // threshold point, "M:SS/km"
+    zones,
+    goal_paces,
+    // Guard bounds surfaced so the coach never emits a spec it knows will be
+    // rejected. Enforcer is ingest/pacer_cli.py; these mirror it (keep in sync).
+    guard: {
+      pace_floor: '2:30/km', pace_ceil: '8:00/km',
+      total_dist_min_m: 400, total_dist_max_m: 60000, warmcool_max_m: 10000,
+      rest_time_max_s: 300, rest_dist_max_m: 1000,
+    },
+  };
+  return context;
+}
+
+module.exports = { buildContext, buildPlanningContext, buildDayFocus, renderContextDump };

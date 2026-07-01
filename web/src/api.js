@@ -38,6 +38,7 @@ export const api = {
   personalRecords: () => get('/api/personal-records'),
   racePredictions: () => get('/api/race-predictions'),
   chat: (messages) => post('/api/coach/chat', { messages }),
+  plan: (messages) => post('/api/coach/plan', { messages }),
   contextDump: () => get('/api/coach/context-dump'),
   coachNotes: (params = {}) => get(`/api/coach/notes${qs(params)}`),
   generateDaily: () => post('/api/coach/daily', {}),

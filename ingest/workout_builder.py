@@ -38,9 +38,12 @@ STEP_TYPES = {
     "warmup": {"stepTypeId": 1, "stepTypeKey": "warmup", "displayOrder": 1},
     "cooldown": {"stepTypeId": 2, "stepTypeKey": "cooldown", "displayOrder": 2},
     "interval": {"stepTypeId": 3, "stepTypeKey": "interval", "displayOrder": 3},
+    "rest": {"stepTypeId": 5, "stepTypeKey": "rest", "displayOrder": 5},
 }
 END_DISTANCE = {"conditionTypeId": 3, "conditionTypeKey": "distance",
                 "displayOrder": 3, "displayable": True}
+END_TIME = {"conditionTypeId": 2, "conditionTypeKey": "time",
+            "displayOrder": 2, "displayable": True}
 UNIT_KM = {"unitId": 2, "unitKey": "kilometer", "factor": 100000.0}
 TARGET_PACE = {"workoutTargetTypeId": 6, "workoutTargetTypeKey": "pace.zone",
                "displayOrder": 6}
@@ -141,7 +144,16 @@ def _pace_profile(n, goal_s, strategy, segment_m, ramp, band):
 
 
 def expand_block(block):
-    """Block dict -> list of (dist_m, faster_s, slower_s, center_s) per segment."""
+    """Block dict -> list of (dist_m, faster_s, slower_s, center_s) per segment.
+
+    Rest blocks ({kind: "rest", rest_s} time / {kind: "rest", length_m} distance)
+    return a single un-paced marker dict instead of paced tuples — a distinct
+    shape the assembler tells apart by type, so the paced path is untouched."""
+    if block.get("kind") == "rest":
+        if block.get("rest_s") is not None:
+            return [{"rest": True, "end_kind": "time", "value": float(block["rest_s"])}]
+        return [{"rest": True, "end_kind": "distance", "value": float(block["length_m"])}]
+
     length = block["length_m"]
     segment_m = block.get("segment_m", SEGMENT_DEFAULT_M)
     strategy = block.get("strategy", "flat")
@@ -195,6 +207,49 @@ def _step(order, type_key, end_value_m, target=None):
     return s
 
 
+def _rest_step(order, end_kind, value):
+    """Un-paced Garmin rest step. Matches Runna's proven rest shape exactly:
+    stepType rest (id 5), no target, weight nulled. preferredEndConditionUnit is
+    null for a TIME rest (Runna's captured shape); a DISTANCE rest mirrors our
+    working distance steps (UNIT_KM — the one field not directly Runna-attested,
+    since the captured example was time-based)."""
+    if end_kind == "time":
+        end_cond, unit = END_TIME, None           # seconds; unit null per Runna
+    else:
+        end_cond, unit = END_DISTANCE, UNIT_KM     # metres
+    return {
+        "type": "ExecutableStepDTO",
+        "stepId": None,           # Garmin assigns on upload
+        "stepOrder": order,
+        "stepType": STEP_TYPES["rest"],
+        "childStepId": None,
+        "description": None,
+        "endCondition": end_cond,
+        "endConditionValue": float(value),
+        "preferredEndConditionUnit": unit,
+        "endConditionCompare": None,
+        "targetType": None,                        # null, NOT no.target
+        "targetValueOne": None,
+        "targetValueTwo": None,
+        "targetValueUnit": None,
+        "zoneNumber": None,
+        "secondaryTargetType": None,
+        "secondaryTargetValueOne": None,
+        "secondaryTargetValueTwo": None,
+        "secondaryTargetValueUnit": None,
+        "secondaryZoneNumber": None,
+        "endConditionZone": None,
+        "strokeType": STROKE_NONE,
+        "equipmentType": EQUIP_NONE,
+        "category": None,
+        "exerciseName": None,
+        "workoutProvider": None,
+        "providerExerciseSourceId": None,
+        "weightValue": None,                       # nulled, NOT -1.0
+        "weightUnit": None,                        # nulled, NOT WEIGHT_KG
+    }
+
+
 def build_pacer_blocks(blocks, warmup_m=None, cooldown_m=None, name=None):
     """Build a Garmin pacer workout from an explicit ordered list of blocks."""
     steps, order, est_secs, total_dist = [], 1, 0.0, 0.0
@@ -206,7 +261,17 @@ def build_pacer_blocks(blocks, warmup_m=None, cooldown_m=None, name=None):
         total_dist += warmup_m
 
     for block in blocks:
-        for dist, faster_s, slower_s, center_s in expand_block(block):
+        for seg in expand_block(block):
+            if isinstance(seg, dict) and seg.get("rest"):
+                steps.append(_rest_step(order, seg["end_kind"], seg["value"]))
+                order += 1
+                if seg["end_kind"] == "time":
+                    est_secs += seg["value"]                      # seconds, 0 metres
+                else:
+                    est_secs += seg["value"] / 1000.0 * EASY_PACE_S
+                    total_dist += seg["value"]                    # distance rest covers ground
+                continue
+            dist, faster_s, slower_s, center_s = seg
             steps.append(_step(order, "interval", dist, target=(faster_s, slower_s)))
             order += 1
             est_secs += dist / 1000.0 * center_s
@@ -263,6 +328,12 @@ def summarise(workout):
           f"{workout['estimatedDistanceInMeters']:.0f}m)")
     for s in workout["workoutSegments"][0]["workoutSteps"]:
         t1, t2 = s["targetValueOne"], s["targetValueTwo"]
+        if s["stepType"]["stepTypeKey"] == "rest":
+            # rest end value is seconds (time) or metres (distance) — label it right.
+            unit = "s" if s["endCondition"]["conditionTypeKey"] == "time" else "m"
+            print(f"  step {s['stepOrder']:2d} {'rest':8s} "
+                  f"{s['endConditionValue']:6.0f}{unit}  rest")
+            continue
         if t1:
             tgt = (f"{fmt_pace(1000 / t1)}-{fmt_pace(1000 / t2)}/km  "
                    f"(t1={t1:.7f} t2={t2:.7f})")

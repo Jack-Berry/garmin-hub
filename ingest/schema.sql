@@ -241,7 +241,10 @@ CREATE TABLE IF NOT EXISTS profile (
   races_json                   TEXT,    -- JSON array of {name, date, goal_time}
   injuries_json                TEXT,    -- JSON array of constraint strings
   general_notes                TEXT,    -- anything else for the coach
-  updated_at                   TEXT     -- ISO 8601, set on each write
+  updated_at                   TEXT,    -- ISO 8601, set on each write
+  lt_speed_mps                 REAL,    -- lactate threshold speed, TRUE m/s (ingest-owned)
+  lt_hr                        INTEGER, -- lactate threshold heart rate, bpm (ingest-owned)
+  lt_detected_date             TEXT     -- LT source calendarDate (ISO), for staleness
 );
 -- Seed the single empty row so callers always find one (idempotent).
 INSERT OR IGNORE INTO profile (id) VALUES (1);
