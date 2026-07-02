@@ -44,7 +44,6 @@ build/
 *.log
 .vscode/
 .idea/
-CLAUDE.md
 
 # --- Temporary local test guide (delete when moving to Pi) ---
 LOCAL_TEST_GUIDE.md
