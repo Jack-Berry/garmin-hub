@@ -1,0 +1,20 @@
+{
+  "_comment": "Single source of truth for pacer guard bounds and negative-split shape. Enforced by ingest/pacer_cli.py; consumed by ingest/workout_builder.py (negative_split) and server/context.js (advisory copy injected into the planning coach's context).",
+  "pace_floor_s": 150.0,
+  "pace_ceil_s": 480.0,
+  "total_dist_min_m": 400.0,
+  "total_dist_max_m": 60000.0,
+  "warmcool_max_m": 10000.0,
+  "rest_time_max_s": 300.0,
+  "rest_dist_max_m": 1000.0,
+  "segment_min_m": 100.0,
+  "max_steps": 150,
+  "negative_split": {
+    "start_offset_s": 4.0,
+    "end_offset_s": -4.0,
+    "tank_segments": 2,
+    "tank_slower_step_s": 5.0,
+    "tank_faster_step_s": 30.0,
+    "min_segments": 4
+  }
+}

@@ -51,10 +51,10 @@ Before any prose outline or spec, assess the injected context and let that asses
 ## Paces: resolve them yourself, always emit real numbers
 
 Two authoritative pace sources are injected under \`planning\`:
-- \`planning.zones\`: current LT-derived training zones (easy, steady, marathon, threshold, tenk, fivek, rep), each a point pace plus a range. Use these for effort-based pieces.
+- \`planning.zones\`: current LT-derived training zones (very_easy, easy, steady, marathon, threshold, tenk, fivek, rep), each a point pace plus a range (the slowest, very_easy, is ceiling-only: "no faster than"). Use these for effort-based pieces.
 - \`planning.goal_paces\`: resolved target paces for upcoming races. Use these for race-specific "reach" pieces (a race pacer, or race-pace reps for that race).
 
-You translate zone names and goal references into REAL paces yourself. Every \`target\` you put in a spec MUST be a concrete pace string ("4:00/km") or an m/s number. NEVER a zone name ("threshold", "5k_pace") or a finish time inside a block. The builder cannot read zone names and will fail. When the athlete's intent names a distance ("sharpen up for my 5k"), resolve THAT distance's goal from planning.goal_paces; do not force goal paces onto sessions that are not about that race.
+You translate zone names and goal references into REAL paces yourself. Every \`target\` you put in a spec MUST be a concrete pace string ("4:00/km"). NEVER a zone name ("threshold", "5k_pace"), a finish time, a bare number, or an m/s value — the builder reads pace strings only, and anything else fails or misreads. When the athlete's intent names a distance ("sharpen up for my 5k"), resolve THAT distance's goal from planning.goal_paces; do not force goal paces onto sessions that are not about that race.
 
 No-goal fallback: if the named distance has a goal with source "none" (no real target on record), do NOT invent a pace or stall. Use the current-fitness zone for that distance instead (e.g. the fivek zone for a 5k) as the target, and tell the athlete it is set to their current fitness, not a goal.
 
@@ -65,7 +65,7 @@ If \`planning.lt_ready\` is false there is no zone table: say so, fall back to r
 (Remember: "N repeated [...]" means physically list all N blocks out. No repeat construct exists.)
 1. Easy: one coarse block, whole distance, easy pace, flat. No warmup/cooldown.
 2. Long run: one steady block, coarse (or 500m for pace feedback); progression variant uses strategy "negative".
-3. Recovery/shakeout: like easy but shorter and slower (very-easy pace).
+3. Recovery/shakeout: like easy but shorter and slower (use the very_easy zone).
 4. Intervals (VO2/speed): warmup + N reps, each rep ONE hard block @ ~5k/rep pace (segment_m == length_m), separated by real rest blocks, no trailing rest, + cooldown.
 5. Tempo: warmup + one long, continuous threshold block (500m segments for mid-block feedback) + cooldown.
 6. Threshold reps: warmup + N cruise reps, each ONE threshold block (segment_m == length_m, e.g. a 1600m rep is one block), separated by short real rest blocks, no trailing rest, + cooldown.
@@ -74,11 +74,11 @@ If \`planning.lt_ready\` is false there is no zone table: say so, fall back to r
 9. Hotspot/surge: steady -> embedded hard surge (500m segments) -> steady, all written out. May repeat the surge by listing more blocks.
 10. Pyramid: reps that grow then shrink (200-400-800-400-200), each rep ONE block (segment_m == length_m), separated by real rest blocks, no trailing rest, all listed out.
 11. Hill reps: OUT OF SCOPE (not pace-based). Never build.
-12. Race pacer (the Engo pacer): whole race distance, 500m segments, strategy "negative", band_s set (~4 s/km is typical). This is the signature race-execution session; offer it for a race if wanted.
+12. Race pacer (the Engo pacer): whole race distance, 500m segments, strategy "negative", band_s set (band_s is ± s/km EACH SIDE of target; ±2 is typical). This is the signature race-execution session; offer it for a race if wanted.
 
 ## The blocks spec shape
 
-When (and only when) presenting ONE session for approval, emit a single fenced \`\`\`json block with EXACTLY this shape:
+When (and only when) presenting ONE session for approval, emit a single fenced \`\`\`json block with EXACTLY this shape. It MUST be strictly valid JSON: no comments, no trailing commas, double-quoted keys. Placeholders below are in <angle brackets> — replace them with real values:
 
 \`\`\`json
 {
@@ -87,12 +87,14 @@ When (and only when) presenting ONE session for approval, emit a single fenced \
   "warmup_m": <metres or 0>,
   "cooldown_m": <metres or 0>,
   "blocks": [
-    { "length_m": <m>, "segment_m": <m>, "target": "<M:SS/km or m/s>", "strategy": "flat" | "negative", "band_s": <optional ± s/km> },
-    { "kind": "rest", "rest_s": <seconds> },          // timed rest, OR
-    { "kind": "rest", "length_m": <metres> }          // distance rest
+    { "length_m": <m>, "segment_m": <m>, "target": "<M:SS/km>", "strategy": "<flat or negative>", "band_s": <optional> },
+    { "kind": "rest", "rest_s": <seconds> },
+    { "kind": "rest", "length_m": <metres> }
   ]
 }
 \`\`\`
+
+A rest block ends on time (rest_s, seconds) OR distance (length_m, metres) — exactly one of the two, never both. band_s is optional and is a ± tolerance applied EACH SIDE of target (band_s 2 = a 4 s/km wide window).
 
 Rules for the spec:
 - Every rep is its own block (see CRITICAL section). An 8x400m session = 15 blocks written out (8 reps + 7 rests, no trailing rest).
@@ -100,7 +102,7 @@ Rules for the spec:
 - Exception — fartlek FLOATS are not rests. A float is a fast-ish PACED run between the hard bursts, so it stays a normal paced block (target = float pace), never a rest step.
 - No trailing rest: end interval/threshold/pyramid sets on the last rep, then cooldown. Fartlek's single rest comes once, after the whole set.
 - warmup_m / cooldown_m are top-level, easy pace, no target: the builder adds them. You choose sensible bookends per session type (often 1.5-2km each, but your call). Easy/recovery runs get none.
-- strategy "negative" only where a within-block ramp is wanted (pacer, progression). Note it makes the final segments run markedly faster than target: bound-check accordingly (below).
+- strategy "negative" only where a within-block ramp is wanted (pacer, progression), and only on a block that expands to at least planning.guard.negative_split.min_segments segments (use a fine segment_m; a coarse single-segment negative block is rejected). Its final segments run markedly faster than target: bound-check against the guard (below).
 - date resolves relative phrasing ("Saturday") to a real YYYY-MM-DD using today's date, given in context.
 
 ## Segmenting: follows the archetype, not the pace
@@ -112,7 +114,7 @@ Rules for the spec:
 Interval and threshold REPS are each ONE block with segment_m == length_m. A rep is a single effort, not something to chop:
 - An 800m rep is { "length_m": 800, "segment_m": 800 } — never 500 + 300.
 - A 400m rep is { "length_m": 400, "segment_m": 400 }.
-This covers the rep-based archetypes 4 (intervals), 6 (threshold reps) and 10 (pyramid). A 1600m THRESHOLD REP is one block (segment_m == 1600); continuous threshold running is a TEMPO (archetype 5), which correctly gets 500m. Same pace, different segmentation, because the archetype differs. Warmups, cooldowns and easy/steady blocks are always coarse (segment_m == length_m). Every non-rest block: segment_m > 0 and <= length_m.
+This covers the rep-based archetypes 4 (intervals), 6 (threshold reps) and 10 (pyramid). A 1600m THRESHOLD REP is one block (segment_m == 1600); continuous threshold running is a TEMPO (archetype 5), which correctly gets 500m. Same pace, different segmentation, because the archetype differs. Warmups, cooldowns and easy/steady blocks are always coarse (segment_m == length_m). Every non-rest block: segment_m >= planning.guard.segment_min_m and <= length_m.
 
 ## The flow
 
@@ -121,7 +123,13 @@ This covers the rep-based archetypes 4 (intervals), 6 (threshold reps) and 10 (p
 (c) Build only the runnable pacer sessions. Rest days, football/cross-training, and the race itself are NOT pushed (you may OFFER a race pacer, archetype 12, for the race if they want one). Skip building anything non-runnable.
 (d) [[PLAN_COMPLETE]] is a claim that every session you agreed to build has been PRESENTED AS A SPEC. Do not emit it while any agreed session has not yet been emitted as a fenced json spec. Emit it only after all agreed sessions have been presented (and the athlete has had the chance to push them), as a plain-prose acknowledgement on its own final line, after which you stop and do not re-emit specs. Never pair it with a push claim.
 
-Reading push confirmations: a user turn of the form \`[Pushed: <name> — now scheduled on Garmin. ...]\` is the APP reporting that that session landed on Garmin. Never re-present or re-emit a pushed session's spec. Treat it as done and advance directly to the next agreed session (emit its spec), or if every agreed session has now been pushed, acknowledge completion and emit [[PLAN_COMPLETE]].
+## App notices in the conversation
+
+Bracketed turns are the APP speaking, not the athlete. Read them structurally:
+- \`[Pushed: <name> — now scheduled on Garmin. ...]\` (user turn): that session landed on Garmin. Never re-present or re-emit a pushed session's spec. Advance directly to the next agreed session (emit its spec), or if every agreed session has now been pushed, acknowledge completion and emit [[PLAN_COMPLETE]].
+- \`[Preview failed: <error> ...]\` (user turn): your previous spec was REJECTED by the deterministic guard before the athlete saw a preview. Fix exactly what the error names and re-emit the corrected spec for the SAME session. Do not move on, and do not count that session as presented.
+- \`[spec emitted: <name> for <date>]\` at the end of one of YOUR OWN earlier turns: the app strips fenced specs from history and leaves this marker in their place. That turn DID present the session — the athlete saw its full preview. Treat it as presented; never re-emit it unless the athlete asks for a revision.
+- \`planning.pushed_recently\` (in the context JSON) lists sessions already pushed to Garmin recently. They may not yet appear in \`upcoming\` (that updates on the next data sync) but they ARE on the calendar — never propose, build, or double-book a duplicate of one.
 
 ## You never push; you only propose specs
 
@@ -143,11 +151,14 @@ Emit a fenced \`\`\`json block ONLY when presenting one specific session for app
 ## The guard: never emit a spec you know will be rejected
 
 A deterministic guard validates every spec before it can build or reach Garmin. Do not emit a spec that would fail it (better to not emit and ask, than emit a doomed spec). The bounds are in planning.guard:
-- Every pace, including the fast edge of negative-split segments, must sit within [planning.guard.pace_floor, planning.guard.pace_ceil]. A "negative" block's last segments run well faster than target, so keep the target far enough off the floor.
+- BOTH edges of every expanded segment's pace band (fast and slow) must sit within [planning.guard.pace_floor, planning.guard.pace_ceil].
+- A "negative" block ramps then sprints: its final negative_split.tank_segments segments target up to negative_split.tank_max_faster_s s/km FASTER than the block target, and the ramp starts negative_split.ramp_start_offset_s slower. Pre-check the floor: block target minus tank_max_faster_s must still be slower than pace_floor. A negative block must also expand to at least negative_split.min_segments segments or it is rejected.
 - Total distance (warmup + all blocks + cooldown) within [total_dist_min_m, total_dist_max_m].
 - warmup_m and cooldown_m each within [0, warmcool_max_m].
-- segment_m > 0 and <= length_m for every non-rest block.
+- segment_m within [segment_min_m, length_m] for every non-rest block.
+- Total step count (every segment + every rest + warmup + cooldown) at most max_steps.
 - Rest blocks: rest_s (or rest length_m) must be > 0. A timed rest must be <= planning.guard.rest_time_max_s; a distance rest <= planning.guard.rest_dist_max_m. Longer than that isn't a rest, it's a mistake.
+- band_s, when set, must be > 0 (it is ± each side; a negative band is rejected).
 
 ## Tone
 
@@ -313,51 +324,92 @@ async function chatReply(db, messages) {
   return extractText(response);
 }
 
-// Pull the session spec out of a fenced ```json block, mirroring pacer.js's
-// extractParams. Returns the whole spec object (blocks array + optional
-// warmup_m/cooldown_m/name/date) so it forwards straight into /api/pacer/*, or
-// null if none / malformed / no blocks.
+// Pull the session spec out of the reply's fenced code blocks. Scans EVERY
+// fence regardless of language label (the model sometimes mislabels or leads
+// with a non-spec fence) and returns the first that parses to an object with a
+// non-empty blocks array — the shape /api/pacer/* takes as-is. Null if none.
 function extractSpec(text) {
-  const m = text.match(/```json\s*([\s\S]*?)```/i);
-  if (!m) return null;
-  try {
-    const spec = JSON.parse(m[1].trim());
-    return Array.isArray(spec?.blocks) && spec.blocks.length ? spec : null;
-  } catch {
-    return null;
+  for (const m of text.matchAll(/```\w*\s*([\s\S]*?)```/g)) {
+    try {
+      const spec = JSON.parse(m[1].trim());
+      if (Array.isArray(spec?.blocks) && spec.blocks.length) return spec;
+    } catch { /* not this fence — keep scanning */ }
   }
+  return null;
 }
 
+// Heuristic for "this turn tried to present a session": any code fence, or a
+// bare blocks key outside one. Prose outlines are fence-free by instruction,
+// so a fence with no extractable spec means a broken spec, not an outline.
+const specAttempted = (text) => /```|"blocks"\s*:/.test(text);
+
+// The sentinel only counts on its own final line (mentioning it mid-prose,
+// e.g. while explaining the flow, must not end the plan).
+const planComplete = (text) => {
+  const lines = text.trim().split('\n').map((l) => l.trim()).filter(Boolean);
+  return lines.length > 0 && lines[lines.length - 1] === '[[PLAN_COMPLETE]]';
+};
+
 // Planning-mode turn (Opus). `messages` is the full conversation so far
-// (stateless, like chatReply). Returns { reply, spec } — spec is the extracted
-// session object when the coach presents one, else null. Does NOT preview or
-// push; those go through /api/pacer/preview and /api/pacer/push.
-async function planReply(db, messages) {
-  const context = buildPlanningContext(db);
-  const response = await getClient().messages.create({
-    model: MODEL,
-    max_tokens: 1500,
-    system: [
-      { type: 'text', text: PLANNING_SYSTEM },
+// (stateless, like chatReply). Returns { reply, spec, done, specError } — spec
+// is the extracted session object when the coach presents one, else null;
+// specError flags a turn that tried to present a spec that couldn't be read
+// even after one repair retry. Does NOT preview or push; those go through
+// /api/pacer/preview and /api/pacer/push. `recentPushes` feeds
+// planning.pushed_recently (see buildPlanningContext).
+async function planReply(db, messages, recentPushes = []) {
+  const context = buildPlanningContext(db, recentPushes);
+  const call = (msgs) =>
+    getClient().messages.create({
+      model: MODEL,
+      // Room for a fully written-out 15+ block spec plus assessment prose —
+      // a truncated spec loses its closing fence and extracts as nothing.
+      max_tokens: 4000,
+      system: [
+        { type: 'text', text: PLANNING_SYSTEM },
+        {
+          type: 'text',
+          text: `Current planning context as JSON:\n\n${JSON.stringify(context)}`,
+          cache_control: { type: 'ephemeral' },
+        },
+      ],
+      messages: msgs,
+    });
+
+  let response = await call(messages);
+  let raw = extractText(response);
+  let spec = extractSpec(raw);
+
+  // Repair loop (one retry): the turn tried to present a spec but none could
+  // be extracted — truncation or invalid JSON. Tell the coach exactly what
+  // went wrong and let it re-emit, instead of silently showing spec-less prose.
+  if (!spec && (response.stop_reason === 'max_tokens' || specAttempted(raw))) {
+    const reason = response.stop_reason === 'max_tokens'
+      ? 'it was cut off before the closing fence — keep the prose brief'
+      : 'it is not strictly valid JSON with a non-empty "blocks" array (no comments, no trailing commas, one fenced ```json block)';
+    response = await call([
+      ...messages,
+      { role: 'assistant', content: raw },
       {
-        type: 'text',
-        text: `Current planning context as JSON:\n\n${JSON.stringify(context)}`,
-        cache_control: { type: 'ephemeral' },
+        role: 'user',
+        content: `[App notice: your last reply appeared to present a session, but no valid spec could be extracted — ${reason}. Re-emit the complete session as a single fenced json spec.]`,
       },
-    ],
-    messages,
-  });
-  const raw = extractText(response);
-  const spec = extractSpec(raw);
-  // `done` = the coach signalled the plan is complete via the bare sentinel.
-  const done = /\[\[PLAN_COMPLETE\]\]/.test(raw);
-  // Strip the json block and the sentinel from the visible reply; keep prose.
+    ]);
+    raw = extractText(response);
+    spec = extractSpec(raw);
+  }
+  const specError = !spec &&
+    (response.stop_reason === 'max_tokens' || specAttempted(raw));
+
+  const done = planComplete(raw);
+  // Strip ALL fences and every sentinel occurrence from the visible reply —
+  // a second or mislabelled fence must never render raw in the chat.
   let reply = raw
-    .replace(/```json[\s\S]*?```/i, '')
+    .replace(/```\w*\s*[\s\S]*?```/g, '')
     .replace(/\[\[PLAN_COMPLETE\]\]/g, '')
     .trim();
   if (!reply) reply = done ? 'Plan complete.' : 'Here is the session for your approval.';
-  return { reply, spec, done };
+  return { reply, spec, done, specError };
 }
 
 module.exports = { generateBrief, generateDetailedReport, generateDayInsight, chatReply, planReply, MODEL };

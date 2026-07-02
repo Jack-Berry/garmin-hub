@@ -20,15 +20,24 @@ Both return the Garmin workout dict directly (ready for upload_workout()).
 
 import json
 import math
+from pathlib import Path
+
+# Negative-split shape constants live in guard_bounds.json — the single source
+# shared with the validation guard (pacer_cli.py) and the coach's advisory copy
+# (server/context.js), so the coach can pre-check what the builder will emit.
+_NEG = json.loads(
+    (Path(__file__).resolve().parent / "guard_bounds.json").read_text()
+)["negative_split"]
 
 # --- Tunables (negative-split shape, mirrors the Sub 20 5k template) ----------
 SEGMENT_DEFAULT_M = 500       # default segment length
-BAND_SEC_PER_KM = 4.0         # width of a normal pace window (template ~4 s/km)
-NEG_START_OFFSET = 4.0        # s/km slower than goal on the first ramp segment
-NEG_END_OFFSET = -4.0         # s/km faster than goal on the last ramp segment
-TANK_SEGMENTS = 2             # final "empty the tank" segments in a negative block
-TANK_SLOWER_STEP = 5.0        # s/km faster (slower bound) per tank segment
-TANK_FASTER_STEP = 30.0       # s/km faster (faster bound) per tank segment
+BAND_HALF_S = 2.0             # default ± s/km each side of target (4 s/km window,
+                              # matches the template); block band_s overrides it
+NEG_START_OFFSET = float(_NEG["start_offset_s"])   # s/km slower on first ramp seg
+NEG_END_OFFSET = float(_NEG["end_offset_s"])       # s/km faster on last ramp seg
+TANK_SEGMENTS = int(_NEG["tank_segments"])         # final "empty the tank" segments
+TANK_SLOWER_STEP = float(_NEG["tank_slower_step_s"])  # slower bound step per tank seg
+TANK_FASTER_STEP = float(_NEG["tank_faster_step_s"])  # faster bound step per tank seg
 EASY_PACE_S = 360.0           # 6:00/km, used only to estimate warmup/cooldown time
 DEFAULT_RAMP = "km_paired"    # negative ramp: "km_paired" or "continuous"
 
@@ -114,9 +123,12 @@ def _segment_lengths(length_m, segment_m):
 
 
 def _pace_profile(n, goal_s, strategy, segment_m, ramp, band):
-    """Return n tuples (faster_s_per_km, slower_s_per_km, center_s_per_km)."""
+    """Return n tuples (faster_s_per_km, slower_s_per_km, center_s_per_km).
+
+    `band` is a ± tolerance applied EACH SIDE of the center pace (a block's
+    band_s, or BAND_HALF_S by default) — band 2 gives a 4 s/km wide window."""
     if strategy != "negative":   # "flat" (default)
-        return [(goal_s - band / 2, goal_s + band / 2, goal_s) for _ in range(n)]
+        return [(goal_s - band, goal_s + band, goal_s) for _ in range(n)]
 
     tank = TANK_SEGMENTS if n >= 4 else max(0, n - 1)
     ramp_n = n - tank
@@ -129,13 +141,13 @@ def _pace_profile(n, goal_s, strategy, segment_m, ramp, band):
             off = NEG_START_OFFSET if groups == 1 else (
                 NEG_START_OFFSET + (NEG_END_OFFSET - NEG_START_OFFSET) * g / (groups - 1))
             center = goal_s + off
-            out.append((center - band / 2, center + band / 2, center))
+            out.append((center - band, center + band, center))
     else:                                                # "continuous"
         for i in range(ramp_n):
             off = NEG_START_OFFSET if ramp_n == 1 else (
                 NEG_START_OFFSET + (NEG_END_OFFSET - NEG_START_OFFSET) * i / (ramp_n - 1))
             center = goal_s + off
-            out.append((center - band / 2, center + band / 2, center))
+            out.append((center - band, center + band, center))
     for j in range(1, tank + 1):
         faster = goal_s - TANK_FASTER_STEP * j
         slower = goal_s - TANK_SLOWER_STEP * j
@@ -158,7 +170,7 @@ def expand_block(block):
     segment_m = block.get("segment_m", SEGMENT_DEFAULT_M)
     strategy = block.get("strategy", "flat")
     ramp = block.get("ramp", DEFAULT_RAMP)
-    band = block.get("band_s", BAND_SEC_PER_KM)
+    band = block.get("band_s", BAND_HALF_S)   # ± each side of target
     goal_s = parse_pace(block["target"])
     dists = _segment_lengths(length, segment_m)
     paces = _pace_profile(len(dists), goal_s, strategy, segment_m, ramp, band)

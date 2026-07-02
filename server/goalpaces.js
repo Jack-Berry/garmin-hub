@@ -18,16 +18,18 @@
 // ===========================================================================
 
 // Distance definitions, ORDERED most-specific first (half before marathon, so
-// "half marathon" resolves to half). Each: the substrings that identify it in a
-// race name, its length in metres, and the personal_records.label to use when
-// the goal is "PB". parkrun folds into 5k.
+// "half marathon" resolves to half). Each: a boundary-aware regex that
+// identifies it in a lowercased race name, its length in metres, and the
+// personal_records.label to use when the goal is "PB". parkrun folds into 5k.
+// The digit lookbehinds stop "15k" matching 5k, "21k" matching 1k, and
+// "10 mile" matching the mile.
 const DISTANCES = [
-  { key: 'half',     metres: 21097.5, pbLabel: 'Half Marathon', match: ['half'] },
-  { key: 'marathon', metres: 42195,   pbLabel: 'Marathon',      match: ['marathon'] },
-  { key: '10k',      metres: 10000,   pbLabel: '10K',           match: ['10k', '10 k', '10km'] },
-  { key: '5k',       metres: 5000,    pbLabel: '5K',            match: ['5k', '5 k', '5km', 'parkrun'] },
-  { key: 'mile',     metres: 1609.34, pbLabel: '1 mile',        match: ['mile'] },
-  { key: '1k',       metres: 1000,    pbLabel: '1 km',          match: ['1k', '1 km'] },
+  { key: 'half',     metres: 21097.5, pbLabel: 'Half Marathon', re: /half/ },
+  { key: 'marathon', metres: 42195,   pbLabel: 'Marathon',      re: /marathon/ },
+  { key: '10k',      metres: 10000,   pbLabel: '10K',           re: /(?<![\d.])10\s?km?\b/ },
+  { key: '5k',       metres: 5000,    pbLabel: '5K',            re: /(?<![\d.])5\s?km?\b|parkrun/ },
+  { key: 'mile',     metres: 1609.34, pbLabel: '1 mile',        re: /(?<!\d[\s-])(?<!\d)mile/ },
+  { key: '1k',       metres: 1000,    pbLabel: '1 km',          re: /(?<![\d.])1\s?km?\b/ },
 ];
 
 // Goal-parsing vocabulary. Prefix words that mean "this time or faster" are
@@ -68,6 +70,17 @@ const parseTime = (tok) => {
   return Number(tok) * BARE_NUMBER_UNIT_S;
 };
 
+// Two-part times and bare numbers are ambiguous: "3:30" means 3h30 for a
+// marathon but 3m30 for a 1k, and "sub 3" means 3 hours, not 3 minutes.
+// parseTime parses small-first; once the distance is known, rescale ×60 (at
+// most twice) while the implied pace is faster than any plausible human pace
+// (the pacer guard's floor).
+const MIN_PLAUSIBLE_PACE_S = require('../ingest/guard_bounds.json').pace_floor_s;
+const rescaleTime = (sec, metres) => {
+  for (let i = 0; i < 2 && sec / (metres / 1000) < MIN_PLAUSIBLE_PACE_S; i++) sec *= 60;
+  return sec;
+};
+
 // Free-ish goal text -> {kind, timeSec?, reason?}. kind: explicit | pb | none.
 function parseGoal(raw) {
   const g = (raw || '').trim().toLowerCase();
@@ -83,7 +96,7 @@ function parseGoal(raw) {
 // Race name -> its distance definition, or null if none can be inferred.
 const inferDistance = (name) => {
   const n = (name || '').toLowerCase();
-  return DISTANCES.find((d) => d.match.some((sub) => n.includes(sub))) || null;
+  return DISTANCES.find((d) => d.re.test(n)) || null;
 };
 
 // personal_records rows -> { label: seconds } for the time-valued PBs.
@@ -118,7 +131,9 @@ function resolveRace(race, pbs) {
   }
 
   if (goal.kind === 'explicit') {
-    out.goalTimeSec = goal.timeSec;
+    // Distance is known here, so ambiguous "3:30" / "sub 3" can be rescaled
+    // to hours if the minutes reading implies an impossible pace.
+    out.goalTimeSec = rescaleTime(goal.timeSec, dist.metres);
     out.note = 'explicit target';
   } else {
     const pb = pbs[dist.pbLabel];

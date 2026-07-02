@@ -374,13 +374,21 @@ app.post('/api/coach/chat', asyncHandler(async (req, res) => {
 // spec object when the coach presents one, else null. This endpoint COMPOSES
 // only; preview/push go through /api/pacer/preview and /api/pacer/push (which
 // take the spec object as-is and run the guard). Stateless: nothing persisted.
+// Sessions pushed to Garmin this server session, newest last. The DB only
+// learns about pushes on the next ingest, so the planning coach reads this
+// in-memory list (planning.pushed_recently) to avoid double-booking a session
+// it (or a previous thread) just pushed. Capped; resets on restart — after
+// which the next ingest has usually backfilled the calendar anyway.
+const recentPushes = [];
+const RECENT_PUSHES_MAX = 20;
+
 app.post('/api/coach/plan', asyncHandler(async (req, res) => {
   const { messages } = req.body || {};
   if (!Array.isArray(messages) || messages.length === 0) {
     return res.status(400).json({ error: 'messages must be a non-empty array' });
   }
-  const { reply, spec, done } = await planReply(db, messages);
-  res.json({ reply, spec, done });
+  const { reply, spec, done, specError } = await planReply(db, messages, recentPushes);
+  res.json({ reply, spec, done, specError });
 }));
 
 // Recent coach notes, newest first. ?limit (default 10), ?note_type filters
@@ -513,8 +521,17 @@ app.post('/api/pacer/preview', asyncHandler(async (req, res) => {
 
 // Build AND push to Garmin (upload + schedule). The ONLY endpoint that writes
 // to Garmin — called only after the user approves the preview. Body: params.
+// Successful pushes are recorded for the planning coach (see recentPushes).
 app.post('/api/pacer/push', asyncHandler(async (req, res) => {
-  res.json(await runPacer('push', req.body || {}, 120000));
+  const result = await runPacer('push', req.body || {}, 120000);
+  recentPushes.push({
+    name: result.name,
+    date: result.date,
+    workout_id: result.workout_id,
+    pushed_at: new Date().toISOString(),
+  });
+  if (recentPushes.length > RECENT_PUSHES_MAX) recentPushes.shift();
+  res.json(result);
 }));
 
 app.listen(PORT, () => console.log(`Garmin Hub API listening on port ${PORT}`));

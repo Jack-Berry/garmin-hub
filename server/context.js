@@ -5,6 +5,9 @@
 const { collapseRaceDuplicates } = require('./planned');
 const { computeZones } = require('./zones');
 const { resolveGoalPaces } = require('./goalpaces');
+// Guard bounds — the SAME file the enforcer (ingest/pacer_cli.py) and the
+// builder's negative-split shape load, so the advisory copy can't drift.
+const GUARD_BOUNDS = require('../ingest/guard_bounds.json');
 
 // Profile lists are stored as JSON text; parse defensively.
 const parseList = (s) => { try { return s ? JSON.parse(s) : []; } catch { return []; } };
@@ -504,7 +507,10 @@ function renderContextDump(db) {
 // (zones.js) and resolved goal paces (goalpaces.js), plus the guard bounds so
 // the coach never emits a spec it knows will be rejected. Overrides the base
 // pace_guidance (which says "infer paces from runs" — wrong in planning mode).
-function buildPlanningContext(db) {
+// `recentPushes` is the server's in-memory list of sessions pushed to Garmin
+// this server session — they won't appear in `upcoming` until the next ingest,
+// so they're surfaced separately to stop the coach double-booking them.
+function buildPlanningContext(db, recentPushes = []) {
   const context = buildContext(db);
 
   const row = db.prepare('SELECT lt_speed_mps, races_json FROM profile WHERE id = 1').get() || {};
@@ -548,12 +554,33 @@ function buildPlanningContext(db) {
     zones,
     goal_paces,
     // Guard bounds surfaced so the coach never emits a spec it knows will be
-    // rejected. Enforcer is ingest/pacer_cli.py; these mirror it (keep in sync).
+    // rejected. Read from guard_bounds.json — the same file the enforcer
+    // (ingest/pacer_cli.py) loads — and formatted for display here.
     guard: {
-      pace_floor: '2:30/km', pace_ceil: '8:00/km',
-      total_dist_min_m: 400, total_dist_max_m: 60000, warmcool_max_m: 10000,
-      rest_time_max_s: 300, rest_dist_max_m: 1000,
+      pace_floor: `${pace(GUARD_BOUNDS.pace_floor_s)}/km`,
+      pace_ceil: `${pace(GUARD_BOUNDS.pace_ceil_s)}/km`,
+      total_dist_min_m: GUARD_BOUNDS.total_dist_min_m,
+      total_dist_max_m: GUARD_BOUNDS.total_dist_max_m,
+      warmcool_max_m: GUARD_BOUNDS.warmcool_max_m,
+      rest_time_max_s: GUARD_BOUNDS.rest_time_max_s,
+      rest_dist_max_m: GUARD_BOUNDS.rest_dist_max_m,
+      segment_min_m: GUARD_BOUNDS.segment_min_m,
+      max_steps: GUARD_BOUNDS.max_steps,
+      // Negative-split shape: what strategy "negative" actually builds, so
+      // the coach can pre-check the floor (tank segments run up to
+      // tank_max_faster_s s/km faster than the block target).
+      negative_split: {
+        ramp_start_offset_s: GUARD_BOUNDS.negative_split.start_offset_s,
+        tank_segments: GUARD_BOUNDS.negative_split.tank_segments,
+        tank_max_faster_s:
+          GUARD_BOUNDS.negative_split.tank_faster_step_s *
+          GUARD_BOUNDS.negative_split.tank_segments,
+        min_segments: GUARD_BOUNDS.negative_split.min_segments,
+      },
     },
+    // Sessions pushed to Garmin this server session — not yet in `upcoming`
+    // (the DB only learns about them on the next ingest). Never double-book.
+    pushed_recently: recentPushes,
   };
   return context;
 }

@@ -17,8 +17,24 @@ import { PacerPreview } from './PacerPreview';
 //                "Push to Garmin" button (api.pacerPush) — the pacer flow lifted
 //                into the conversation. The panel gets an accent border while
 //                active; it auto-exits when the coach signals `done`.
-// Assistant messages may carry { spec, preview, previewError, pushed } for the
-// inline preview attached to that turn.
+// Assistant messages may carry { spec, preview, previewError, pushed, specError,
+// duplicate, apiContent } for the inline preview attached to that turn.
+// `apiContent` is what goes to the API instead of `content`: turns that carried
+// a spec get a "[spec emitted: …]" marker appended, so the model's history
+// shows WHICH sessions it already presented (the fence itself is stripped
+// server-side and never stored — without the marker the model believes it
+// never presented anything and re-emits).
+
+// Same spec, already pushed in this thread? Keyed on name+date — the only
+// stable identity a spec has before Garmin assigns an id.
+const alreadyPushed = (msgs, spec) =>
+  msgs.some((m) => m.pushed && m.spec &&
+    m.spec.name === spec.name && m.spec.date === spec.date);
+
+// Strip UI-only fields for the API; prefer the marker-stamped variant.
+const toPayload = (msgs) =>
+  msgs.map((m) => ({ role: m.role, content: m.apiContent ?? m.content }));
+
 export default function ChatWidget() {
   const [open, setOpen] = useState(false);
   const [mode, setMode] = useState('chat'); // 'chat' | 'planning'
@@ -86,26 +102,54 @@ export default function ChatWidget() {
 
   // Run one planning turn: send `nextMessages` to the coach, attach any inline
   // preview to the reply, and apply the done/auto-exit gate. Shared by manual
-  // sends and the post-push auto-advance. Deliberately does NOT fire any
-  // follow-up itself — auto-advance lives only in push()'s success path, so the
-  // coach presenting the next session's spec never auto-triggers anything.
-  const runPlanTurn = async (nextMessages) => {
+  // sends and the post-push auto-advance. The only follow-up it can fire
+  // itself is the single guard-failure relay below (`canRelayFailure` blocks
+  // re-entry, so a coach that keeps emitting rejected specs can't loop) —
+  // push auto-advance still lives only in push()'s success path.
+  const runPlanTurn = async (nextMessages, canRelayFailure = true) => {
     setError(null);
     setPending(true);
-    // Only role/content go to the API — strip inline-preview and `system` flags.
-    const payload = nextMessages.map(({ role, content }) => ({ role, content }));
     try {
-      const { reply, spec, done } = await api.plan(payload);
+      const { reply, spec, done, specError } = await api.plan(toPayload(nextMessages));
       let assistant = { role: 'assistant', content: reply };
+      let failNote = null;
       if (spec) {
-        try {
-          const preview = await api.pacerPreview(spec);
-          assistant = { ...assistant, spec, preview };
-        } catch (e) {
-          assistant = { ...assistant, spec, previewError: e.message || 'Preview failed' };
+        // Marker for the model's history — see toPayload/apiContent above.
+        assistant.apiContent =
+          `${reply}\n\n[spec emitted: ${spec.name || 'session'} for ${spec.date || 'unscheduled'}]`;
+        if (alreadyPushed(nextMessages, spec)) {
+          // Re-presented session that already went to Garmin — never offer a
+          // second push (double-booking); render an "already pushed" note.
+          assistant = { ...assistant, spec, duplicate: true };
+        } else {
+          try {
+            const preview = await api.pacerPreview(spec);
+            assistant = { ...assistant, spec, preview };
+          } catch (e) {
+            const msg = e.message || 'Preview failed';
+            assistant = { ...assistant, spec, previewError: msg };
+            // Relay the guard rejection to the coach (mirrors the [Pushed:]
+            // note) so it can fix and re-emit without the athlete having to
+            // copy error text around.
+            failNote = {
+              role: 'user',
+              system: true,
+              content: `[Preview failed: ${msg} — the spec was rejected by the guard before the athlete saw it. Fix exactly what the error names and re-emit the corrected spec for this same session.]`,
+            };
+          }
         }
+      } else if (specError) {
+        // Server already retried once; surface the dead end to the athlete.
+        assistant = { ...assistant, specError: true };
       }
-      setMessages([...nextMessages, assistant]);
+      const withReply = failNote
+        ? [...nextMessages, assistant, failNote]
+        : [...nextMessages, assistant];
+      setMessages(withReply);
+      if (failNote && canRelayFailure) {
+        await runPlanTurn(withReply, false);
+        return;
+      }
       // Coach signalled the plan is complete — drop back to the analyst but
       // keep the transcript so the finished plan stays visible. Gate the
       // auto-exit on a REAL push having happened in the thread: a bare
@@ -115,7 +159,7 @@ export default function ChatWidget() {
       // never by coach prose — so this reads structural push state, not text.
       // The final push's stamped turn is in nextMessages, so the last session
       // acknowledges + [[PLAN_COMPLETE]] and this exits cleanly.
-      if (done && nextMessages.some((m) => m.pushed)) setMode('chat');
+      if (done && withReply.some((m) => m.pushed)) setMode('chat');
     } catch (e) {
       setError(e.message || 'Something went wrong');
     } finally {
@@ -135,9 +179,8 @@ export default function ChatWidget() {
     }
     setError(null);
     setPending(true);
-    const payload = next.map(({ role, content }) => ({ role, content }));
     try {
-      const { reply } = await api.chat(payload);
+      const { reply } = await api.chat(toPayload(next));
       setMessages([...next, { role: 'assistant', content: reply }]);
     } catch (e) {
       setError(e.message || 'Something went wrong');
@@ -155,7 +198,14 @@ export default function ChatWidget() {
   // never fires a follow-up of its own.
   const push = async (i) => {
     const msg = messages[i];
-    if (!msg?.spec || pushingIdx != null || pending) return;
+    // Planning-only: a leftover Push button after the mode exits must not
+    // fire a planning turn into a chat thread. Duplicate/pushed specs never
+    // push twice (name+date identity).
+    if (!planning || !msg?.spec || msg.duplicate || pushingIdx != null || pending) return;
+    if (alreadyPushed(messages, msg.spec)) {
+      setError(`Already pushed "${msg.spec.name}" for ${msg.spec.date}.`);
+      return;
+    }
     setPushingIdx(i);
     setError(null);
     try {
@@ -295,8 +345,21 @@ export default function ChatWidget() {
                 <Markdown className="max-w-[85%] rounded-2xl rounded-bl-sm bg-surface-2 px-3 py-2 font-body text-sm text-ink">
                   {m.content}
                 </Markdown>
+                {m.specError && (
+                  <p className="mt-2 text-xs text-sem-red">
+                    The coach tried to present a session but its spec couldn't be read.
+                    Ask it to re-send the session.
+                  </p>
+                )}
                 {m.previewError && (
                   <p className="mt-2 text-xs text-sem-red">Couldn't build preview: {m.previewError}</p>
+                )}
+                {m.duplicate && (
+                  <p className="mt-2 text-xs text-ink-muted">
+                    Already pushed — <span className="font-medium">{m.spec.name}</span> is on
+                    Garmin for {shortDate(m.spec.date)}. Ask the coach to rename it if this
+                    is a deliberate revision.
+                  </p>
                 )}
                 {m.preview && (
                   <div className="mt-2 w-full space-y-2">
@@ -307,7 +370,7 @@ export default function ChatWidget() {
                         {shortDate(m.pushed.date)} · ID{' '}
                         <span className="font-mono">{m.pushed.workout_id}</span>
                       </p>
-                    ) : (
+                    ) : planning ? (
                       <button
                         onClick={() => push(i)}
                         disabled={pushingIdx != null || pending}
@@ -315,6 +378,10 @@ export default function ChatWidget() {
                       >
                         {pushingIdx === i ? 'Pushing…' : 'Push to Garmin'}
                       </button>
+                    ) : (
+                      <p className="text-xs text-ink-muted">
+                        Not pushed — planning ended. Re-enter planning to push this session.
+                      </p>
                     )}
                   </div>
                 )}

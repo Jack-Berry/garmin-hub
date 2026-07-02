@@ -1,7 +1,7 @@
 // LT-anchored training zones.
 //
 // Knows ONLY lactate-threshold speed — nothing about race goals or PBs (that's a
-// separate goal-pace module). Give it LT speed in m/s, get back the seven zones,
+// separate goal-pace module). Give it LT speed in m/s, get back the eight zones,
 // each with a point pace and a derived band. Everything is in m/s internally
 // (matches the pacer/Garmin convention); pace strings are for display only.
 //
@@ -18,6 +18,7 @@
 // Ordered SLOW -> FAST; that order also defines each zone's neighbours, which set
 // the band widths below.
 const RATIOS = [
+  { name: 'very_easy', ratio: 0.68 },
   { name: 'easy',      ratio: 0.74 },
   { name: 'steady',    ratio: 0.82 },
   { name: 'marathon',  ratio: 0.88 },
@@ -55,7 +56,7 @@ const paceStr = (secPerKm) => {
 // A {mps, pace} readout from a speed in m/s.
 const readout = (mps) => ({ mps, pace: paceStr(mpsToPace(mps)) });
 
-// LT speed (m/s) -> array of seven zones, slow -> fast.
+// LT speed (m/s) -> array of eight zones, slow -> fast.
 function computeZones(ltMps) {
   // Point speeds first (pure ratio x LT) so the band pass can see neighbours.
   const pts = RATIOS.map((z) => {
@@ -64,10 +65,11 @@ function computeZones(ltMps) {
   });
 
   return pts.map((z, i) => {
-    const slower = pts[i - 1]; // next-slower zone (undefined for easy)
+    const slower = pts[i - 1]; // next-slower zone (undefined for very_easy)
     const faster = pts[i + 1]; // next-faster zone (undefined for rep)
 
-    // Easy is ceiling-only: its point IS the "no faster than" limit, no slow edge.
+    // The slowest zone (very_easy, the recovery/shakeout target) is
+    // ceiling-only: its point IS the "no faster than" limit, no slow edge.
     if (i === 0) {
       return {
         name: z.name,

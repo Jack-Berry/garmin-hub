@@ -25,18 +25,21 @@ import workout_builder as wb
 
 
 # --- Blocks validation guard (Stage 8 step 1) --------------------------------
-# Sane human pace window, seconds per km. Reject a typo'd target that would push
-# a dangerous or nonsensical pace. Tunable.
-PACE_FLOOR_S = 150.0     # 2:30/km — faster than any realistic pacer target
-PACE_CEIL_S  = 480.0     # 8:00/km — slower than this isn't a "pace" workout
-# Total workout distance (warmup + blocks + cooldown), metres.
-TOTAL_DIST_MIN_M = 400.0     # under a lap = a mistake
-TOTAL_DIST_MAX_M = 60000.0   # >60 km = out of scope, refuse
-# Warmup / cooldown ceiling, each, metres.
-WARMCOOL_MAX_M = 10000.0
-# Rest-block magnitude ceilings (rest blocks have no pace to bound-check).
-REST_TIME_MAX_S = 300.0   # 5 min — longer than this isn't a rest, it's a mistake
-REST_DIST_MAX_M = 1000.0  # 1 km  — a "rest" longer than this is a running block
+# All bounds load from guard_bounds.json — the single source shared with the
+# builder (negative-split shape) and server/context.js (the advisory copy the
+# planning coach sees). Tune the JSON, not code.
+BOUNDS = json.loads(
+    (Path(__file__).resolve().parent / "guard_bounds.json").read_text())
+PACE_FLOOR_S = BOUNDS["pace_floor_s"]        # faster than any realistic target
+PACE_CEIL_S = BOUNDS["pace_ceil_s"]          # slower than this isn't a "pace" workout
+TOTAL_DIST_MIN_M = BOUNDS["total_dist_min_m"]   # under a lap = a mistake
+TOTAL_DIST_MAX_M = BOUNDS["total_dist_max_m"]   # beyond = out of scope, refuse
+WARMCOOL_MAX_M = BOUNDS["warmcool_max_m"]    # warmup / cooldown ceiling, each
+REST_TIME_MAX_S = BOUNDS["rest_time_max_s"]  # longer isn't a rest, it's a mistake
+REST_DIST_MAX_M = BOUNDS["rest_dist_max_m"]  # longer is a running block, not a rest
+SEGMENT_MIN_M = BOUNDS["segment_min_m"]      # finer than this is a silly gauge step
+MAX_STEPS = BOUNDS["max_steps"]              # total Garmin steps incl. rests/bookends
+NEG_MIN_SEGMENTS = BOUNDS["negative_split"]["min_segments"]  # ramp needs room
 
 
 class GuardError(ValueError):
@@ -58,6 +61,7 @@ def validate_blocks(blocks, warmup_m, cooldown_m):
         raise GuardError("blocks must be a non-empty list", check="blocks_present")
 
     total = 0.0
+    n_steps = (1 if warmup_m else 0) + (1 if cooldown_m else 0)
     for i, b in enumerate(blocks):
         if not isinstance(b, dict):
             raise GuardError(f"blocks[{i}]: not an object", block=i,
@@ -85,6 +89,7 @@ def validate_blocks(blocks, warmup_m, cooldown_m):
                                      f"{REST_DIST_MAX_M:g}m", block=i,
                                      check="rest_dist_max", value=length)
                 total += float(length)
+            n_steps += 1
             continue
 
         length = b.get("length_m")
@@ -96,28 +101,52 @@ def validate_blocks(blocks, warmup_m, cooldown_m):
         if not isinstance(segment, (int, float)) or segment <= 0:
             raise GuardError(f"blocks[{i}]: segment_m must be > 0", block=i,
                              check="segment_m", value=segment)
+        if segment < SEGMENT_MIN_M:
+            raise GuardError(f"blocks[{i}]: segment_m ({segment:g}) under the "
+                             f"{SEGMENT_MIN_M:g}m minimum", block=i,
+                             check="segment_min", value=segment)
         if segment > length:
             raise GuardError(f"blocks[{i}]: segment_m ({segment:g}) exceeds "
                              f"length_m ({length:g})", block=i,
                              check="segment_le_length", value=segment)
 
+        band = b.get("band_s")
+        if band is not None and (not isinstance(band, (int, float)) or band <= 0):
+            raise GuardError(f"blocks[{i}]: band_s must be > 0 (± s/km each side)",
+                             block=i, check="band_s", value=band)
+
         # Resolve the actual per-segment profile the builder will emit and
-        # bound-check every segment's faster bound (the dangerous edge).
+        # bound-check BOTH edges of every segment (the fast edge is the
+        # dangerous one; the slow edge catches not-a-pace-workout targets).
         try:
             segs = wb.expand_block(b)
         except (KeyError, ValueError, TypeError):
             raise GuardError(f"blocks[{i}]: target missing or unparseable",
                              block=i, check="target_parse", value=b.get("target"))
+        if b.get("strategy") == "negative" and len(segs) < NEG_MIN_SEGMENTS:
+            raise GuardError(
+                f"blocks[{i}]: strategy 'negative' needs at least "
+                f"{NEG_MIN_SEGMENTS} segments to ramp (got {len(segs)}) — "
+                f"use a finer segment_m", block=i,
+                check="negative_min_segments", value=len(segs))
         ramp_label = ("negative ramp" if b.get("strategy") == "negative" else "flat")
         for j, (dist, faster_s, slower_s, center_s) in enumerate(segs):
-            if not (PACE_FLOOR_S <= faster_s <= PACE_CEIL_S):
+            if slower_s < faster_s:
                 raise GuardError(
-                    f"blocks[{i}]: expanded segment {j} pace {wb.fmt_pace(faster_s)}/km "
-                    f"outside [{wb.fmt_pace(PACE_FLOOR_S)}–{wb.fmt_pace(PACE_CEIL_S)}]/km "
-                    f"({ramp_label})",
-                    block=i, check="pace_bounds", value=faster_s)
+                    f"blocks[{i}]: expanded segment {j} band is inverted "
+                    f"(slow bound faster than fast bound)", block=i,
+                    check="band_inverted", value=(faster_s, slower_s))
+            for edge, val in (("fast edge", faster_s), ("slow edge", slower_s)):
+                if not (PACE_FLOOR_S <= val <= PACE_CEIL_S):
+                    raise GuardError(
+                        f"blocks[{i}]: expanded segment {j} {edge} "
+                        f"{wb.fmt_pace(val)}/km outside "
+                        f"[{wb.fmt_pace(PACE_FLOOR_S)}–{wb.fmt_pace(PACE_CEIL_S)}]/km "
+                        f"({ramp_label})",
+                        block=i, check="pace_bounds", value=val)
 
         total += float(length)
+        n_steps += len(segs)
 
     for label, val in (("warmup_m", warmup_m), ("cooldown_m", cooldown_m)):
         if val is None:
@@ -131,32 +160,45 @@ def validate_blocks(blocks, warmup_m, cooldown_m):
         raise GuardError(f"total distance {total:.0f} m outside "
                          f"[{TOTAL_DIST_MIN_M:.0f}–{TOTAL_DIST_MAX_M:.0f}] m",
                          check="total_distance", value=total)
+    if n_steps > MAX_STEPS:
+        raise GuardError(f"workout expands to {n_steps} steps, over the "
+                         f"{MAX_STEPS}-step cap", check="max_steps", value=n_steps)
     return blocks
 
 
 def build(params):
     """Map approved params -> the Garmin workout dict via the proven builder.
 
-    Two shapes, same warmup/cooldown handling:
-      * blocks present -> validate_blocks() then wb.build_pacer_blocks()
-      * else           -> the flat pacer sugar (wb.build_pacer), unchanged.
+    Two shapes, ONE validation path: simple/no-blocks params are converted to
+    the equivalent single-block spec (exactly what wb.build_pacer constructs),
+    so EVERY workout passes validate_blocks before build — nothing reaches
+    Garmin unvalidated.
     """
     warmup_m = float(params["warmup_m"]) if params.get("warmup_m") else None
     cooldown_m = float(params["cooldown_m"]) if params.get("cooldown_m") else None
 
     if params.get("blocks"):
-        blocks = validate_blocks(params["blocks"], warmup_m, cooldown_m)
-        return wb.build_pacer_blocks(blocks, warmup_m=warmup_m,
-                                     cooldown_m=cooldown_m, name=params.get("name"))
+        blocks, name = params["blocks"], params.get("name")
+    else:
+        try:
+            distance_m = float(params["distance_m"])
+        except (KeyError, TypeError, ValueError):
+            raise GuardError("simple mode requires a numeric distance_m",
+                             check="distance_m", value=params.get("distance_m"))
+        try:
+            goal_s, label = wb.parse_target(params["target"], distance_m)
+        except (KeyError, ValueError, IndexError, TypeError):
+            raise GuardError("target missing or unparseable",
+                             check="target_parse", value=params.get("target"))
+        blocks = [{"length_m": distance_m,
+                   "segment_m": float(params.get("segment_m") or wb.SEGMENT_DEFAULT_M),
+                   "target": goal_s,
+                   "strategy": params.get("strategy", "flat")}]
+        name = params.get("name") or f"{label} {wb.dist_label(distance_m)} Pacer"
 
-    return wb.build_pacer(
-        distance_m=float(params["distance_m"]),
-        target=params["target"],
-        strategy=params.get("strategy", "flat"),
-        segment_m=float(params.get("segment_m") or wb.SEGMENT_DEFAULT_M),
-        warmup_m=warmup_m,
-        cooldown_m=cooldown_m,
-    )
+    blocks = validate_blocks(blocks, warmup_m, cooldown_m)
+    return wb.build_pacer_blocks(blocks, warmup_m=warmup_m,
+                                 cooldown_m=cooldown_m, name=name)
 
 
 def breakdown(workout):
@@ -208,7 +250,18 @@ def cmd_push(params):
         import workout_push as wp
         g = wp.connect()
         wid, _ = wp.upload(g, w)
-        sid, _ = wp.schedule(g, wid, date_str)
+        try:
+            sid, _ = wp.schedule(g, wid, date_str)
+        except Exception as e:
+            # Upload + schedule isn't atomic — don't strand an unscheduled
+            # workout in the Garmin library. Roll the upload back if we can.
+            try:
+                wp.delete(g, wid)
+                detail = "the uploaded workout was rolled back; nothing is left on Garmin"
+            except Exception:
+                detail = (f"rollback also failed — workout {wid} is uploaded but "
+                          f"unscheduled; delete it in Garmin Connect before re-pushing")
+            raise RuntimeError(f"scheduling failed after upload ({e}); {detail}") from e
     finally:
         sys.stdout = real_stdout
     return {
@@ -227,6 +280,10 @@ def main():
         out = cmd_preview(params) if sys.argv[1] == "preview" else cmd_push(params)
     except GuardError as e:
         sys.exit(f"pacer guard rejected spec: {e}")
+    except Exception as e:
+        # One clean line, not a traceback — the Node caller surfaces the last
+        # stderr line to the UI (and to the planning coach's repair loop).
+        sys.exit(f"pacer {sys.argv[1]} failed: {e}")
     json.dump(out, sys.stdout)
 
 

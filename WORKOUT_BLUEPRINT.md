@@ -13,9 +13,9 @@ The AI's job: pick the archetype, fill in the parameters (distance, paces, rep c
 
 - `length_m` — how long this block runs.
 - `segment_m` — granularity the block is chopped into. This is **driven by the workout, not a global default**: a 300m rep is a 300m segment, a 1600m threshold rep is a 1600m segment, an easy run is one coarse segment. **500m is the default ONLY for the Engo pacer archetype (#12)** — and even there it's changeable on request. Everywhere else, segment length = whatever that piece of the workout naturally is.
-- `target` — goal pace (as pace or m/s).
+- `target` — goal pace, as a pace string (e.g. `"4:00/km"`). Never a bare number or m/s value — the builder reads bare numbers as s/km, so an m/s value silently misreads.
 - `strategy` — `flat` (hold the band) or `negative` (ramp faster through the block).
-- `band_s` — ± seconds/km tolerance around target.
+- `band_s` — ± seconds/km tolerance EACH SIDE of target (band_s 2 = a 4 s/km wide window).
 
 **Warmup / cooldown** — optional bookend steps, easy pace, wrap any workout.
 
@@ -37,7 +37,7 @@ Before proposing ANY plan or session, assess first. The assessment **governs** t
 
 ## Pace reference
 
-Pace reference — now LT-derived (implemented). Zone paces are no longer a static table. They're computed live by server/zones.js from the athlete's current lactate threshold (profile.lt_speed_mps), via per-zone ratios + derived bands. Goal/target paces (for "reach" sessions) come from server/goalpaces.js. Archetypes below reference zone names (easy, steady, marathon, threshold, tenk, fivek, rep) — the builder resolves these to m/s at build time from the live modules. See CLAUDE.md Stage 8a for the full pace system.
+Pace reference — now LT-derived (implemented). Zone paces are no longer a static table. They're computed live by server/zones.js from the athlete's current lactate threshold (profile.lt_speed_mps), via per-zone ratios + derived bands. Goal/target paces (for "reach" sessions) come from server/goalpaces.js. Archetypes below reference zone names (very_easy, easy, steady, marathon, threshold, tenk, fivek, rep; very_easy is ceiling-only) — the coach resolves these to concrete pace strings at spec time from the live modules. See CLAUDE.md Stage 8a for the full pace system.
 
 ---
 
