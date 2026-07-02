@@ -16,8 +16,9 @@ data/*.db-shm
 # --- Garmin auth token cache ---
 .garminconnect/
 .garth/
-garmin_dump.json
-pr_dump.json
+
+# --- Data dumps (probe/debug JSON) ---
+*_dump.json
 
 # --- Python ---
 __pycache__/
