@@ -269,6 +269,10 @@ def cmd_push(params):
         "schedule_id": sid,
         "name": w["workoutName"],
         "date": date_str,
+        # Built totals so the Node caller can persist the planned_workouts row
+        # (Stage 9a) without re-deriving them from the spec.
+        "total_distance_m": round(w["estimatedDistanceInMeters"]),
+        "est_duration_s": w["estimatedDurationInSecs"],
     }
 
 

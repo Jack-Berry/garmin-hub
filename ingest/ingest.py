@@ -425,7 +425,9 @@ def ingest_planned(g, conn, summary):
 
 
 def _delete_stale(conn, source, seen_ids):
-    """Delete FUTURE planned_workouts rows of one source not in seen_ids."""
+    """Delete FUTURE planned_workouts rows of one source not in seen_ids.
+    Only ever called with 'garmin' / 'runna_ical' — the source = %s scope means
+    source='app' rows (API-written, Stage 9) are immune to ingest cleanup."""
     today_str = str(date.today())
     if seen_ids:
         marks = ", ".join("%s" for _ in seen_ids)

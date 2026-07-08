@@ -161,7 +161,11 @@ CREATE TABLE IF NOT EXISTS planned_workouts (
   -- Appended by SQLite migrations (live column order preserved)
   is_race_auto                 smallint,            -- 0/1, keyword-derived; ingest-owned
   is_race_override             smallint,            -- 0/1 manual override; NULL = none (semantic)
-  source                       text                 -- 'garmin' | 'runna_ical'
+  source                       text,                -- 'garmin' | 'runna_ical' | 'app' (app = API-written, ingest never touches)
+
+  -- Appended by Stage 9a (app-generated plans)
+  plan_id                      text,                -- app rows: owning adapted-plan id; NULL = one-off push / non-app row
+  rationale                    text                 -- app rows: per-session "why" from the coach
 );
 
 CREATE INDEX IF NOT EXISTS idx_planned_workouts_calendar_date

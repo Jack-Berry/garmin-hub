@@ -2,7 +2,7 @@
 // from the DB for the AI coach. Summarises (never dumps) recent runs, recovery,
 // upcoming planned workouts, the profile, and a few code-derived signals.
 // Read-only: takes the shared read-only db connection.
-const { collapseRaceDuplicates } = require('./planned');
+const { collapseRaceDuplicates, applyAppPlanPrecedence } = require('./planned');
 const { computeZones } = require('./zones');
 const { resolveGoalPaces } = require('./goalpaces');
 // Guard bounds — the SAME file the enforcer (ingest/pacer_cli.py) and the
@@ -250,14 +250,15 @@ async function buildContext(db) {
   // fold the same-day race triplicate (Runna race + manual override + pacer)
   // into one entry — otherwise the coach sees and counts the race three times.
   const planRows = await db.all(
-    `SELECT calendar_date, title, estimated_distance_m,
+    `SELECT calendar_date, title, estimated_distance_m, source,
             is_race_auto, is_race_override,
             COALESCE(is_race_override, is_race_auto) AS is_race, steps_json
      FROM planned_workouts
      WHERE calendar_date >= $1 AND calendar_date <= $2
      ORDER BY calendar_date`, [utcDate(0), utcDate(14)]);
 
-  const upcoming = collapseRaceDuplicates(planRows).map((p) => ({
+  // App-plan precedence (an app row owns its date) before the race collapse.
+  const upcoming = collapseRaceDuplicates(applyAppPlanPrecedence(planRows)).map((p) => ({
     date: p.calendar_date,
     title: p.title,
     km: p.estimated_distance_m ? +(p.estimated_distance_m / 1000).toFixed(2) : null,
@@ -368,7 +369,8 @@ async function buildDayFocus(db, date) {
   const planRow = await db.get(
     `SELECT title, estimated_distance_m,
             COALESCE(is_race_override, is_race_auto) AS is_race, steps_json
-     FROM planned_workouts WHERE calendar_date = $1 LIMIT 1`, [date]);
+     FROM planned_workouts WHERE calendar_date = $1
+     ORDER BY (source = 'app') DESC NULLS LAST LIMIT 1`, [date]);
 
   const planned = planRow ? {
     title: planRow.title,
@@ -614,13 +616,13 @@ async function buildPlanningContext(db, recentPushes = []) {
 // upcoming/not-yet-completed so the model never mistakes it for history.
 async function scheduledSummary(db, from, to) {
   const rows = await db.all(
-    `SELECT calendar_date, title, estimated_distance_m,
+    `SELECT calendar_date, title, estimated_distance_m, source,
             is_race_auto, is_race_override,
             COALESCE(is_race_override, is_race_auto) AS is_race, steps_json
      FROM planned_workouts
      WHERE calendar_date >= $1 AND calendar_date <= $2
      ORDER BY calendar_date`, [from, to]);
-  const items = collapseRaceDuplicates(rows);
+  const items = collapseRaceDuplicates(applyAppPlanPrecedence(rows));
   if (!items.length) return `No scheduled workouts between ${from} and ${to}.`;
 
   const lines = [`Scheduled workouts ${from} to ${to} (UPCOMING — not yet completed):`];

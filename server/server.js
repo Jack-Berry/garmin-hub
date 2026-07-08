@@ -1,5 +1,6 @@
 // Garmin Hub — Express API over the garminhub Postgres database.
 const path = require('path');
+const crypto = require('crypto');
 // Load server/.env (ANTHROPIC_API_KEY, optional DATABASE_URL_RO/RW) before
 // requiring the db pools and coach client.
 require('dotenv').config({ path: path.resolve(__dirname, '.env') });
@@ -7,7 +8,7 @@ const { spawn } = require('child_process');
 const express = require('express');
 const { db, writeDb } = require('./db');
 const { buildContext, renderContextDump } = require('./context');
-const { collapseRaceDuplicates } = require('./planned');
+const { collapseRaceDuplicates, applyAppPlanPrecedence } = require('./planned');
 const { generateBrief, generateDetailedReport, generateDayInsight, chatReply, planReply } = require('./coach');
 const { pacerChat } = require('./pacer');
 
@@ -111,15 +112,17 @@ app.get('/api/planned', handler(async (req, res) => {
   if (req.query.to) { params.push(req.query.to); where.push(`calendar_date <= $${params.length}`); }
   const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
   const rows = await db.all(
-    `SELECT schedule_id, workout_id, calendar_date, title, sport_type,
+    `SELECT schedule_id, workout_id, calendar_date, title, sport_type, source,
             is_race_auto, is_race_override,
             COALESCE(is_race_override, is_race_auto) AS is_race,
             estimated_distance_m, estimated_duration_s, steps_json
      FROM planned_workouts ${clause} ORDER BY calendar_date`, params);
-  // Collapse same-day race triplicates (Runna race + manual override + pacer)
-  // into one row before shaping; the survivor carries a pacer_available flag.
+  // App-plan precedence first (an app row owns its date — upcoming Runna/
+  // Garmin rows on it are dropped), then collapse same-day race triplicates
+  // (Runna race + manual override + pacer) into one row before shaping; the
+  // survivor carries a pacer_available flag.
   // steps_json is jsonb — pg hands back the parsed array (or null) directly.
-  const out = collapseRaceDuplicates(rows).map((r) => {
+  const out = collapseRaceDuplicates(applyAppPlanPrecedence(rows)).map((r) => {
     const { steps_json, ...rest } = r;
     return { ...rest, steps: steps_json ?? null };
   });
@@ -532,11 +535,27 @@ app.post('/api/pacer/preview', handler(async (req, res) => {
   res.json(await runPacer('preview', req.body || {}, 20000));
 }));
 
+// App-row schedule id: the ical negative-hash convention (ingest.py
+// _ical_schedule_id — sha1, first 15 hex digits = 60 bits, negated) so it can
+// never collide with Garmin's positive calendar-item ids. Computed as BigInt
+// and bound as a string: the value exceeds 2^53, so a JS Number would round
+// BEFORE it ever reached Postgres (the db.js int8 read-back TODO still rounds
+// it on the way out, same as ical rows).
+const appScheduleId = (uid) =>
+  (-BigInt('0x' + crypto.createHash('sha1').update(uid).digest('hex').slice(0, 15))).toString();
+
 // Build AND push to Garmin (upload + schedule). The ONLY endpoint that writes
-// to Garmin — called only after the user approves the preview. Body: params.
-// Successful pushes are recorded for the planning coach (see recentPushes).
+// to Garmin — called only after the user approves the preview. Body: params
+// (+ optional plan_id / rationale, Stage 9 — NULL for one-off single pushes).
+// Successful pushes are recorded for the planning coach (see recentPushes)
+// AND persisted as a source='app' planned_workouts row (Stage 9a): durable,
+// ingest-immune, and what the read-path app-plan precedence keys on. The
+// Garmin push is the point of no return — a failed insert afterwards must not
+// look like a failed push (a retry would double-book Garmin), so it degrades
+// to persisted:false in the response instead of a 500.
 app.post('/api/pacer/push', handler(async (req, res) => {
-  const result = await runPacer('push', req.body || {}, 120000);
+  const spec = req.body || {};
+  const result = await runPacer('push', spec, 120000);
   recentPushes.push({
     name: result.name,
     date: result.date,
@@ -544,7 +563,27 @@ app.post('/api/pacer/push', handler(async (req, res) => {
     pushed_at: new Date().toISOString(),
   });
   if (recentPushes.length > RECENT_PUSHES_MAX) recentPushes.shift();
-  res.json(result);
+
+  let persisted = true;
+  try {
+    // steps_json holds the pushed spec verbatim (deterministic rebuild input).
+    // node-pg serialises the object for the jsonb column — no JSON.stringify.
+    await writeDb.run(
+      `INSERT INTO planned_workouts
+         (schedule_id, workout_id, calendar_date, title, sport_type,
+          estimated_distance_m, estimated_duration_s, steps_json,
+          source, plan_id, rationale)
+       VALUES ($1, $2, $3, $4, 'running', $5, $6, $7, 'app', $8, $9)
+       ON CONFLICT (schedule_id) DO NOTHING`,
+      [appScheduleId(`app:${result.schedule_id}`), result.workout_id,
+       result.date, result.name,
+       result.total_distance_m ?? null, result.est_duration_s ?? null,
+       spec, spec.plan_id || null, spec.rationale || null]);
+  } catch (err) {
+    persisted = false;
+    console.error('pacer push succeeded on Garmin but planned_workouts insert failed:', err.message);
+  }
+  res.json({ ...result, persisted });
 }));
 
 // Async init: the column lists must exist before any route can run, so they
