@@ -14,13 +14,38 @@ const { pacerChat } = require('./pacer');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// JSON body parsing + minimal CORS for the local dashboard (single-user app).
+// Shared-secret auth: single-user app, so no login/sessions — every /api
+// request must carry the secret in an X-Api-Key header (the frontend bakes it
+// in at build time via VITE_API_SECRET). Fail fast if unconfigured: an
+// unauthenticated API should never come up by accident.
+const API_SECRET = process.env.API_SECRET;
+if (!API_SECRET) {
+  console.error('API_SECRET is not set (server/.env) — refusing to start unauthenticated.');
+  process.exit(1);
+}
+
+// JSON body parsing + CORS pinned to the known frontend origins (no wildcard).
+// The custom auth header makes browsers preflight every request, so OPTIONS is
+// answered here, BEFORE the auth gate (preflights never carry custom headers).
+const ORIGINS = (process.env.CORS_ORIGINS || 'http://localhost:4173,http://localhost:5173')
+  .split(',').map((s) => s.trim());
 app.use(express.json());
 app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
+  const origin = req.headers.origin;
+  if (origin && ORIGINS.includes(origin)) res.header('Access-Control-Allow-Origin', origin);
+  res.header('Vary', 'Origin');
   res.header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, X-Api-Key');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
+// The one auth gate for every /api route. Kept as a single middleware so it's
+// trivially replaceable if hosting brings its own auth (e.g. Cloudflare Access).
+app.use('/api', (req, res, next) => {
+  if (req.get('X-Api-Key') !== API_SECRET) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
   next();
 });
 
@@ -527,7 +552,8 @@ app.post('/api/pacer/push', handler(async (req, res) => {
 async function start() {
   ACTIVITY_COLS = await cols('activities');
   LAP_COLS = await cols('laps');
-  app.listen(PORT, () => console.log(`Garmin Hub API listening on port ${PORT}`));
+  // Loopback only — nothing on the LAN should reach the API directly.
+  app.listen(PORT, '127.0.0.1', () => console.log(`Garmin Hub API listening on 127.0.0.1:${PORT}`));
 }
 
 start().catch((err) => {

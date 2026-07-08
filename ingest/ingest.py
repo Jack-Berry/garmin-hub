@@ -11,6 +11,7 @@ Run with Homebrew Python 3.13 (NOT Apple's 3.9):
 
 import os
 import re
+import sys
 import json
 import time
 import hashlib
@@ -817,8 +818,10 @@ def main():
         print(f"\n{len(summary['errors'])} error(s):")
         for e in summary["errors"]:
             print(f"  - {e}")
-    else:
-        print("\nNo errors.")
+        # Non-zero exit so cron/daily.sh and /api/ingest/refresh see the
+        # failure instead of a clean 0 from a (partially) failed pull.
+        sys.exit(1)
+    print("\nNo errors.")
 
 
 if __name__ == "__main__":

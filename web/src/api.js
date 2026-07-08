@@ -1,6 +1,9 @@
 // Thin fetch wrapper over the Stage 2 Express API. Base URL is configurable
 // via VITE_API_URL; defaults to the local API port.
 const BASE = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+// Shared API secret, baked in at build time (web/.env.local) — must match the
+// server's API_SECRET or every call 401s.
+const SECRET = import.meta.env.VITE_API_SECRET || '';
 
 const qs = (params) => {
   const entries = Object.entries(params).filter(([, v]) => v != null && v !== '');
@@ -8,7 +11,7 @@ const qs = (params) => {
 };
 
 async function get(path) {
-  const res = await fetch(`${BASE}${path}`);
+  const res = await fetch(`${BASE}${path}`, { headers: { 'X-Api-Key': SECRET } });
   if (!res.ok) throw new Error(`GET ${path} → ${res.status} ${res.statusText}`);
   return res.json();
 }
@@ -16,7 +19,7 @@ async function get(path) {
 async function post(path, body) {
   const res = await fetch(`${BASE}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'X-Api-Key': SECRET },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`POST ${path} → ${res.status} ${res.statusText}`);

@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { api } from '../api';
 import { useFetch } from '../useFetch';
 import { kmNum, ymd, shortDate } from '../format';
+import { StateWrap } from '../ui';
 import InsightModal from '../InsightModal';
 import DailyInsight from './DailyInsight';
 import WeekStrip from '../hero/WeekStrip';
@@ -102,6 +103,14 @@ function MetricRow({ recovery, sevenDayKm }) {
   );
 }
 
+// Merge several useFetch results into one StateWrap-able state: loading while
+// any is loading, first error wins. Keeps a dead/loading API visibly distinct
+// from a real rest week instead of silently rendering empty data.
+const merge = (...fs) => ({
+  loading: fs.some((f) => f.loading),
+  error: fs.find((f) => f.error)?.error || null,
+});
+
 // Hero zone: a permanent This Week band, then a cycling carousel (Activity
 // trend / Load / Training Balance) above a persistent key-metric row. One fetch
 // per endpoint, fanned out to slides.
@@ -157,9 +166,9 @@ export default function Hero() {
     : null;
 
   const slides = [
-    { key: 'pace', label: 'Activity trend', node: <PaceSlide activities={acts.data} /> },
-    { key: 'load', label: 'Load', node: <LoadSlide weekly={weekly.data} /> },
-    { key: 'balance', label: 'Training Balance', node: <BalanceSlide data={balance.data} /> },
+    { key: 'pace', label: 'Activity trend', node: <StateWrap {...merge(acts)}><PaceSlide activities={acts.data} /></StateWrap> },
+    { key: 'load', label: 'Load', node: <StateWrap {...merge(weekly)}><LoadSlide weekly={weekly.data} /></StateWrap> },
+    { key: 'balance', label: 'Training Balance', node: <StateWrap {...merge(balance)}><BalanceSlide data={balance.data} /></StateWrap> },
   ];
 
   return (
@@ -167,7 +176,9 @@ export default function Hero() {
       {/* This Week is the most-glanceable view, so it's a permanent band rather
           than a carousel slide that cycling could hide. */}
       <section className="rounded-xl border border-line bg-surface-1 px-5 py-5">
-        <WeekStrip planned={planned.data} activities={acts.data} routines={profile.data?.routines} onSelectDay={setDay} />
+        <StateWrap {...merge(planned, acts, profile)}>
+          <WeekStrip planned={planned.data} activities={acts.data} routines={profile.data?.routines} onSelectDay={setDay} />
+        </StateWrap>
       </section>
 
       <DailyInsight />
@@ -175,7 +186,9 @@ export default function Hero() {
       <section className="overflow-hidden rounded-xl border border-line bg-surface-1">
         <Carousel slides={slides} />
         <div className="border-t border-line">
-          <MetricRow recovery={recovery.data} sevenDayKm={sevenDayKm} />
+          <StateWrap {...merge(recovery, acts)}>
+            <MetricRow recovery={recovery.data} sevenDayKm={sevenDayKm} />
+          </StateWrap>
         </div>
       </section>
 

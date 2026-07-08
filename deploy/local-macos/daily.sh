@@ -29,14 +29,20 @@ if [ "$RC" -ne 0 ]; then
 fi
 
 # 2. Daily insight — POST to the always-on API (spends Claude credit, stored in
-#    coach_notes, surfaces in the dashboard carousel).
+#    coach_notes, surfaces in the dashboard carousel). The API requires the
+#    shared secret; read it from server/.env. --fail-with-body makes an HTTP
+#    error (e.g. a 500 from the coach) fail the step while still logging the
+#    error body, and the failure propagates to the script's exit code.
+API_SECRET=$(grep -m1 '^API_SECRET=' "$REPO/server/.env" | cut -d= -f2-)
 echo "--- [$(ts)] daily insight ---" >> "$LOG"
-curl -sS --max-time 180 -X POST "$API/api/coach/daily" \
-  -H 'Content-Type: application/json' -d '{}' >> "$LOG" 2>&1
+curl -sS --fail-with-body --max-time 180 -X POST "$API/api/coach/daily" \
+  -H 'Content-Type: application/json' -H "X-Api-Key: $API_SECRET" -d '{}' >> "$LOG" 2>&1
 CURL_RC=$?
 echo "" >> "$LOG"
 if [ "$CURL_RC" -ne 0 ]; then
-  echo "--- [$(ts)] INSIGHT CALL FAILED (curl exit $CURL_RC) — is the API up on 3001?" >> "$LOG"
+  echo "--- [$(ts)] INSIGHT CALL FAILED (curl exit $CURL_RC) — HTTP error or API down on 3001?" >> "$LOG"
+  echo "========== $(ts) daily run END (insight failed) ==========" >> "$LOG"
+  exit 1
 fi
 
 echo "========== $(ts) daily run END ==========" >> "$LOG"

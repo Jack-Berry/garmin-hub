@@ -335,7 +335,11 @@ async function buildContext(db) {
     : null;
 
   return {
-    generated_at: new Date().toISOString(),
+    // Day-granular on purpose: this object is injected as a cache_control'd
+    // prompt block, so it must be byte-stable across calls — a per-call
+    // timestamp here busts the prompt cache every request. The coach still
+    // needs "today" to resolve relative dates ("Saturday").
+    today: localDate(),
     window_days: 14,
     profile,
     recent_runs,
@@ -514,7 +518,8 @@ async function renderContextDump(db) {
     ? `As of ${c.race_predictions.as_of}: ${c.race_predictions.times.join(', ')}`
     : '—');
 
-  out.push('', `(Context generated ${c.generated_at}.)`);
+  // Full timestamp is fine here — the dump is copy-paste text, never cached.
+  out.push('', `(Context generated ${new Date().toISOString()}.)`);
   return out.join('\n');
 }
 

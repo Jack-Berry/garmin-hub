@@ -9,7 +9,7 @@ A personal, single-user web app that ingests my Garmin running data and provides
 - **Ingest:** Python + `garminconnect` (0.3.6) + `psycopg` (3). Pulls data, upserts into Postgres. Run by cron.
 - **Database:** PostgreSQL (database `garminhub`; locally the Homebrew PG 14 service). `db/schema.pg.sql` is the canonical schema.
 - **API:** Node + Express + `pg`, fully async. Two pools mirror a deliberate read/write split (see API section). Serves JSON to the frontend and handles AI-coach calls.
-- **Frontend:** React (JavaScript, not TypeScript) + Tailwind + Recharts.
+- **Frontend:** React (JavaScript, not TypeScript) + Tailwind + Recharts. Fetch state flows through `useFetch` + the shared `StateWrap` wrapper — every section must render visible loading/error states, never silently fall through to empty data (the hero once rendered a confident fake "rest week" while the API was down).
 - **AI layer:** Node calls the Anthropic Claude API (Opus, daily). Uses a separate API key in `.env`.
 - **Host:** TBD — moving toward a proper hosted single-user deployment; provider not yet chosen. Until then, the local macOS launchd setup (see Build & deploy) is the running instance.
 
@@ -67,7 +67,7 @@ Running displays are runs-only. `activity_group` is the filter:
 
 ## Ingest
 
-`ingest/ingest.py`. Idempotent (safe to re-run from cron): all writes are upserts (`INSERT … ON CONFLICT(pk) DO UPDATE`), no duplicates.
+`ingest/ingest.py`. Idempotent (safe to re-run from cron): all writes are upserts (`INSERT … ON CONFLICT(pk) DO UPDATE`), no duplicates. Exits **1** when the run collected any errors (even partial, e.g. one rate-limited date) so cron/`daily.sh`/`/api/ingest/refresh` see the failure — note `daily.sh` skips the brief on any non-zero exit.
 
 - **Run/auth:** runs via `/usr/local/bin/python3.13` (Homebrew Python 3.13 — **NOT** Apple's system 3.9). garth token cache lives in `ingest/.garth/` (gitignored), so MFA is only prompted on first login / token expiry. DB connection: `DATABASE_URL` (rw role; local default in code). Per-pull-section transactions: each section commits on success and **rolls back on error**, so one failed pull can't poison the rest.
 - **Activities:** pulls the recent N activities (+ laps per activity). Skips the splits fetch when an activity is unchanged and its laps already exist (cheap idempotency win for the common cron case).
@@ -81,13 +81,15 @@ Garmin's own `race` boolean is unreliable — it's `false` even for workouts tit
 
 ## API
 
-`server/server.js`. All DB access is **async** (`pg` pools via `server/db.js`): reads go through the `db` pool (the SELECT-only `garminhub_ro` role — read-only is enforced by Postgres itself), writes through the `writeDb` pool (`garminhub_rw`), scoped so they can never clobber ingest-owned data. The curated column lists (everything but `raw_json`) come from `information_schema.columns` and are **awaited at startup before `app.listen`** — don't move that init after routes can fire. The narrowly-scoped DB writes:
+`server/server.js`. **Auth:** every `/api/*` route sits behind one shared-secret middleware — requests must send `X-Api-Key` matching `API_SECRET` (`server/.env`; the server refuses to start without it) or get a 401. The frontend bakes the same value in at build time from `VITE_API_SECRET` (`web/.env.local`) — **the two must match, and changing the secret means a frontend rebuild**. CORS is pinned to the frontend origins (`:4173`/`:5173`, override via `CORS_ORIGINS`); the server binds `127.0.0.1` only; `daily.sh` reads the secret out of `server/.env` (a plain `grep`/`cut` of the `API_SECRET=` line — keep it unquoted, one line). Quirk: the custom header makes browsers **preflight every request**, and preflights never carry custom headers — so the CORS middleware answers OPTIONS **before** the auth gate; keep that ordering. All DB access is **async** (`pg` pools via `server/db.js`): reads go through the `db` pool (the SELECT-only `garminhub_ro` role — read-only is enforced by Postgres itself), writes through the `writeDb` pool (`garminhub_rw`), scoped so they can never clobber ingest-owned data. The curated column lists (everything but `raw_json`) come from `information_schema.columns` and are **awaited at startup before `app.listen`** — don't move that init after routes can fire. The narrowly-scoped DB writes:
 
 - `POST /api/planned/:schedule_id/race-override` — body `{ override }` where override is `1` (force race), `0` (force not-race), or `null` (revert to auto). Writes **only** `is_race_override`.
 - `POST /api/profile` — replaces the single `profile` row (shoes/races/injuries/routines/notes/runna_ical_url). `GET /api/profile` returns parsed arrays.
 - `POST /api/coach/daily` — generates the glance brief and inserts a `daily` row into `coach_notes`.
 
 The AI-coach and pacer routes also spawn Python or call Claude (see AI coach / Pacer below); `POST /api/pacer/push` is the only endpoint that writes to **Garmin**. `POST /api/ingest/refresh` spawns `ingest.py` on demand (in-process lock stops concurrent runs).
+
+**Prompt-cache stability (real money):** `buildContext` / `buildPlanningContext` output is injected as a `cache_control`'d system block on every coach call, so it must be **byte-stable across calls** — a per-call timestamp in it busts the cache every request. That's why the context carries a day-granular `today` (the coach needs it to resolve "Saturday" to a date), not an ISO timestamp; never add per-call values (timestamps, randomness) to those payloads. `renderContextDump` stamps its timestamp at render time, outside any cached path.
 
 Read endpoints: `/api/health`, `/api/activities` (+ `/:id` with laps), `/api/planned` (returns derived `is_race`; same-day race duplicates collapsed — see 6g), `/api/recovery`, `/api/summary/weekly` (per-ISO-week mileage/pace, runs-only by default), `/api/training-balance` (Load Focus / training-status / ACWR snapshot parsed from the latest `recovery.raw_json`; drives the Training Balance slide), `/api/personal-records`, `/api/race-predictions`, `/api/coach/context` + `/api/coach/context-dump`, `/api/coach/notes`.
 
@@ -161,8 +163,9 @@ Build proceeds in stages; don't build ahead of the current one.
 Local always-on test deployment via launchd (`deploy/local-macos/`, see its `README.md`). **This trips people up:**
 
 - **Frontend changes don't hot-reload.** The web service runs `vite preview` serving the **production build** (`web/dist`) on `:4173` — not a dev server. To see any frontend change you must rebuild: `bash deploy/local-macos/install.sh` (it stops stray dev servers, runs `npm run build`, and reloads the launchd services).
-- **API changes need a service restart.** After editing `server/`, restart the API launchd agent: `launchctl kickstart -k gui/$(id -u)/com.garminhub.api` (it serves on `:3001`).
-- **The daily brief IS generated on a schedule.** `com.garminhub.daily` runs `deploy/local-macos/daily.sh` at **10:00 local** — it ingests, then (on success) POSTs `/api/coach/daily` to generate and persist the day's brief. The dashboard's **Regenerate** button generates the same brief on demand; they are not mutually exclusive. (Ingest can also be triggered mid-day via the Refresh button → `POST /api/ingest/refresh`.)
+- **API changes need a service restart.** After editing `server/`, restart the API launchd agent: `launchctl kickstart -k gui/$(id -u)/com.garminhub.api` (it serves on `:3001`, loopback only — nothing on the LAN, e.g. a phone, can reach it).
+- **The API secret spans both deploy halves.** `API_SECRET` (`server/.env`) and `VITE_API_SECRET` (`web/.env.local`, gitignored) must hold the same value — the frontend bakes it into the built bundle, so rotating it = edit both files **and** rerun `install.sh` (a stale bundle 401s on everything). If `API_SECRET` is missing the server exits at startup, which under launchd `KeepAlive` looks like a crash-loop in `garmin-hub-api.log` — never a running-but-open API.
+- **The daily brief IS generated on a schedule.** `com.garminhub.daily` runs `deploy/local-macos/daily.sh` at **10:00 local** — it ingests, then (on success) POSTs `/api/coach/daily` to generate and persist the day's brief. The dashboard's **Regenerate** button generates the same brief on demand; they are not mutually exclusive. (Ingest can also be triggered mid-day via the Refresh button → `POST /api/ingest/refresh`.) Failure semantics: ingest exiting non-zero (now: any error at all) skips the brief, and the brief call uses `curl --fail-with-body` — an HTTP 500 fails the run (script exits 1) while still logging the error body.
 
 ## Known rough edges (consolidate later)
 
@@ -173,4 +176,5 @@ Local always-on test deployment via launchd (`deploy/local-macos/`, see its `REA
 - **TODO — repeat groups not built.** The builder flattens every block and emits intervals as a flat rep/rest list; Garmin's real `RepeatGroupDTO` is **not** emitted. **Doc contradiction to resolve before building it:** `WORKOUT_BLUEPRINT.md` (§Decisions) says repeat-groups are a YES; but `PLANNING_SYSTEM` in `coach.js` hard-instructs the coach that there are NO repeat constructs (every rep written out). Reconcile these two before implementing repeats.
 - **TODO — race-pacer bookends.** The race pacer (archetype 12) should **not** bake in warmup/cooldown — those are run in-race / separately, not part of the pushed pacer. Warmup/cooldown are currently coach-decided per session with no pacer-specific exception.
 - **TODO — coach decisiveness in planning mode.** It still tends to list a run on most days and then trim down. It should propose **fewer, more decisive** sessions up front rather than a full week the athlete has to talk it down from (the assess-before-propose framing exists but is under-applied).
+- **TODO — ingest partial-failure strictness.** `ingest.py` exits 1 on *any* error, so a single rate-limited recovery date skips the daily brief (`daily.sh` gates on exit 0) and makes the Refresh button report failure even though everything else ingested fine. If that proves too noisy, split "a whole section failed" from "minor per-item errors".
 - **TODO — distance-rest shape not Garmin-attested.** The distance-based rest step (`{kind:"rest", length_m}`) hasn't been confirmed against a real Garmin-captured rest step. The **time** rest mirrors Runna's proven captured shape; the **distance** rest is our own mirror of it and is unverified on-device.
