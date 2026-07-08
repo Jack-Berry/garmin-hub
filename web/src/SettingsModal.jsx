@@ -127,6 +127,7 @@ export default function SettingsModal({ onClose }) {
   const [injuries, setInjuries] = useState([]);
   const [routines, setRoutines] = useState([]);
   const [notes, setNotes] = useState('');
+  const [icalUrl, setIcalUrl] = useState('');
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState(null); // 'saved' | { error }
 
@@ -145,6 +146,7 @@ export default function SettingsModal({ onClose }) {
     setInjuries(data.injuries || []);
     setRoutines(data.routines || []);
     setNotes(data.general_notes || '');
+    setIcalUrl(data.runna_ical_url || '');
   }, [data]);
 
   const dirty = () => setStatus(null);
@@ -171,6 +173,7 @@ export default function SettingsModal({ onClose }) {
             intensity: r.intensity === '' || r.intensity == null ? null : Number(r.intensity),
           })),
         general_notes: notes,
+        runna_ical_url: icalUrl.trim(),
       });
       setStatus('saved');
     } catch (e) {
@@ -315,6 +318,16 @@ export default function SettingsModal({ onClose }) {
               <button type="button" className={addBtnCls} onClick={() => { setRoutines((a) => [...a, { activity: '', day: '', intensity: '' }]); dirty(); }}>
                 + Add activity
               </button>
+            </Group>
+
+            <Group title="Runna calendar feed" hint="Runna's iCal subscription URL — ingest pulls the full plan from it (Garmin only syncs ~2 weeks)">
+              <input
+                className={inputCls}
+                type="url"
+                placeholder="https://… or webcal://… feed URL"
+                value={icalUrl}
+                onChange={(e) => { setIcalUrl(e.target.value); dirty(); }}
+              />
             </Group>
 
             <Group title="General notes" hint="Anything else useful for coaching context">

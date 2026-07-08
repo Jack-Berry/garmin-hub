@@ -19,7 +19,7 @@ The AI's job: pick the archetype, fill in the parameters (distance, paces, rep c
 
 **Warmup / cooldown** — optional bookend steps, easy pace, wrap any workout.
 
-**Rest vs recovery** — Garmin has a real `rest` step (stepTypeId 5, no pace target), ending on either **time** (seconds) or **distance** (metres). A rest block — `{kind: "rest", rest_s}` (time) or `{kind: "rest", length_m}` (distance) — emits that real rest step; it is **not** a slow running block. (A deliberate slow *recovery jog* between efforts can still be modelled as a slow paced block if you want the athlete running — but a true rest/standstill is now a real Garmin rest step.)
+**Rest vs recovery** — Garmin has a real `rest` step (stepTypeId 5, no pace target), ending on either **time** (seconds) or **distance** (metres). A rest block — `{kind: "rest", rest_s}` (time) or `{kind: "rest", length_m}` (distance) — emits that real rest step; it is **not** a slow running block. (A deliberate slow _recovery jog_ between efforts can still be modelled as a slow paced block if you want the athlete running — but a true rest/standstill is now a real Garmin rest step.)
 
 ---
 
@@ -100,7 +100,7 @@ cooldown_m: 1000
 
 ### 6. Threshold (reps)
 
-**Trains:** threshold via longer cruise reps with short rests. **Structure:** warmup + N×[threshold rep, short real rest] + cooldown, no trailing rest. Like intervals but longer reps, shorter rests, threshold (not 5k) pace. **Segments:** each rep is ONE block (`segment_m == length_m`) — a rep is a single effort, not chopped. (Continuous threshold running is a *tempo*, archetype 5, which gets 500m; a rep does not.)
+**Trains:** threshold via longer cruise reps with short rests. **Structure:** warmup + N×[threshold rep, short real rest] + cooldown, no trailing rest. Like intervals but longer reps, shorter rests, threshold (not 5k) pace. **Segments:** each rep is ONE block (`segment_m == length_m`) — a rep is a single effort, not chopped. (Continuous threshold running is a _tempo_, archetype 5, which gets 500m; a rep does not.)
 
 ```
 warmup_m: 1500

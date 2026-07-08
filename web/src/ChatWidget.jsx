@@ -49,8 +49,20 @@ export default function ChatWidget() {
   const [copyState, setCopyState] = useState('idle');
   const [fallbackText, setFallbackText] = useState(null);
   const scrollRef = useRef(null);
+  const inputRef = useRef(null);
 
   const planning = mode === 'planning';
+
+  // Auto-grow the input with its content: reset to the natural (rows=3) height,
+  // then fit scrollHeight. The max-h class caps it around 8 rows, after which
+  // the textarea scrolls internally. Re-runs on open so the panel remounting
+  // the textarea starts at the right size.
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${el.scrollHeight}px`;
+  }, [input, open]);
 
   // Fetch the full coaching context as a pasteable block and copy it to the
   // clipboard. Falls back to a selectable textarea if the clipboard is blocked.
@@ -417,12 +429,13 @@ export default function ChatWidget() {
       <div className="border-t border-line p-3">
         <div className="flex items-end gap-2">
           <textarea
-            rows={1}
+            ref={inputRef}
+            rows={3}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onKeyDown}
-            placeholder={planning ? 'Reply, or say "too fast" / "skip this"…' : 'Ask your coach…'}
-            className="max-h-32 flex-1 resize-none rounded-lg border border-line bg-surface-2 px-3 py-2 text-sm text-ink shadow-sm outline-none transition placeholder:text-ink-muted focus:border-acc focus:ring-2 focus:ring-acc/20"
+            placeholder={planning ? 'Reply, or say "too fast" / "skip this"…' : 'Ask your coach… (Shift+Enter for a new line)'}
+            className="max-h-[178px] flex-1 resize-none overflow-y-auto rounded-lg border border-line bg-surface-2 px-3 py-2 text-sm text-ink shadow-sm outline-none transition placeholder:text-ink-muted focus:border-acc focus:ring-2 focus:ring-acc/20"
           />
           <button
             onClick={send}
