@@ -137,10 +137,11 @@ CREATE TABLE IF NOT EXISTS laps (
 );
 
 -- =========================================================================
--- planned_workouts — one row per Runna planned workout
+-- planned_workouts — one row per planned workout. Two sources: the Garmin
+-- calendar sync (~2 weeks of Runna) and Runna's own ical feed (the full plan).
 -- =========================================================================
 CREATE TABLE IF NOT EXISTS planned_workouts (
-  schedule_id                  INTEGER PRIMARY KEY,  -- calendar item id
+  schedule_id                  INTEGER PRIMARY KEY,  -- Garmin calendar item id; ical rows use a negative UID hash
 
   workout_id                   INTEGER,
   calendar_date                TEXT,
@@ -150,7 +151,8 @@ CREATE TABLE IF NOT EXISTS planned_workouts (
   is_race_override             INTEGER,              -- 0/1 manual override; NULL = none; ingest NEVER writes this
   estimated_distance_m         REAL,
   estimated_duration_s         REAL,
-  steps_json                   TEXT,                 -- parsed step structure
+  steps_json                   TEXT,                 -- Garmin: parsed segments; ical: JSON array of description lines
+  source                       TEXT,                 -- 'garmin' | 'runna_ical' (stale cleanup is per-source)
 
   raw_json                     TEXT
 );
@@ -244,7 +246,8 @@ CREATE TABLE IF NOT EXISTS profile (
   updated_at                   TEXT,    -- ISO 8601, set on each write
   lt_speed_mps                 REAL,    -- lactate threshold speed, TRUE m/s (ingest-owned)
   lt_hr                        INTEGER, -- lactate threshold heart rate, bpm (ingest-owned)
-  lt_detected_date             TEXT     -- LT source calendarDate (ISO), for staleness
+  lt_detected_date             TEXT,    -- LT source calendarDate (ISO), for staleness
+  runna_ical_url               TEXT     -- Runna calendar-feed URL; ingest pulls the full plan from it
 );
 -- Seed the single empty row so callers always find one (idempotent).
 INSERT OR IGNORE INTO profile (id) VALUES (1);

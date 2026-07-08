@@ -1,11 +1,11 @@
-// Garmin Hub — read-only Express API over data/garmin.db.
+// Garmin Hub — Express API over the garminhub Postgres database.
 const path = require('path');
-// Load server/.env (holds ANTHROPIC_API_KEY) before requiring the coach client.
+// Load server/.env (ANTHROPIC_API_KEY, optional DATABASE_URL_RO/RW) before
+// requiring the db pools and coach client.
 require('dotenv').config({ path: path.resolve(__dirname, '.env') });
 const { spawn } = require('child_process');
 const express = require('express');
-const Database = require('better-sqlite3');
-const db = require('./db');
+const { db, writeDb } = require('./db');
 const { buildContext, renderContextDump } = require('./context');
 const { collapseRaceDuplicates } = require('./planned');
 const { generateBrief, generateDetailedReport, generateDayInsight, chatReply, planReply } = require('./coach');
@@ -13,11 +13,6 @@ const { pacerChat } = require('./pacer');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
-
-// Separate writable connection, used ONLY by the race-override endpoint below.
-// The read-only db (db.js) cannot write; writes here are scoped to a single
-// column (is_race_override) so they can never clobber ingest data.
-const writeDb = new Database(path.resolve(__dirname, '..', 'data', 'garmin.db'));
 
 // JSON body parsing + minimal CORS for the local dashboard (single-user app).
 app.use(express.json());
@@ -30,26 +25,20 @@ app.use((req, res, next) => {
 });
 
 // Curated column lists, derived once from the schema (everything but raw_json).
-const cols = (table) =>
-  db.prepare(`PRAGMA table_info(${table})`)
-    .all()
-    .map((c) => c.name)
+// Async, so they're awaited in start() below — routes never see them empty.
+const cols = async (table) =>
+  (await db.all(
+    `SELECT column_name FROM information_schema.columns
+     WHERE table_schema = 'public' AND table_name = $1
+     ORDER BY ordinal_position`, [table]))
+    .map((c) => c.column_name)
     .filter((n) => n !== 'raw_json');
 
-const ACTIVITY_COLS = cols('activities');
-const LAP_COLS = cols('laps');
+let ACTIVITY_COLS = [];
+let LAP_COLS = [];
 
-// Wrap a handler so any thrown/SQLite error becomes a 500 with a message.
-const handler = (fn) => (req, res) => {
-  try {
-    fn(req, res);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-};
-
-// Async variant for handlers that await (e.g. the Claude call).
-const asyncHandler = (fn) => async (req, res) => {
+// Wrap a handler so any thrown/rejected error becomes a 500 with a message.
+const handler = (fn) => async (req, res) => {
   try {
     await fn(req, res);
   } catch (err) {
@@ -60,71 +49,70 @@ const asyncHandler = (fn) => async (req, res) => {
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 
 // List activities, most recent first. ?limit (default 30), ?from, ?to on date.
-app.get('/api/activities', handler((req, res) => {
+app.get('/api/activities', handler(async (req, res) => {
   const limit = Number(req.query.limit) || 30;
   const where = [];
-  const params = {};
-  if (req.query.from) { where.push('start_time_local >= :from'); params.from = req.query.from; }
-  if (req.query.to) { where.push('start_time_local <= :to'); params.to = req.query.to; }
-  if (req.query.group) { where.push('activity_group = :group'); params.group = req.query.group; }
+  const params = [];
+  if (req.query.from) { params.push(req.query.from); where.push(`start_time_local >= $${params.length}`); }
+  if (req.query.to) { params.push(req.query.to); where.push(`start_time_local <= $${params.length}`); }
+  if (req.query.group) { params.push(req.query.group); where.push(`activity_group = $${params.length}`); }
   const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
-  const rows = db.prepare(
+  params.push(limit);
+  const rows = await db.all(
     `SELECT ${ACTIVITY_COLS.join(', ')} FROM activities
-     ${clause} ORDER BY start_time_local DESC LIMIT :limit`
-  ).all({ ...params, limit });
+     ${clause} ORDER BY start_time_local DESC LIMIT $${params.length}`, params);
   res.json(rows);
 }));
 
 // Single activity with its laps. ?raw=1 includes raw_json.
-app.get('/api/activities/:id', handler((req, res) => {
+app.get('/api/activities/:id', handler(async (req, res) => {
   const id = Number(req.params.id);
   const includeRaw = req.query.raw === '1';
   const select = includeRaw ? '*' : ACTIVITY_COLS.join(', ');
-  const activity = db.prepare(
-    `SELECT ${select} FROM activities WHERE activity_id = ?`
-  ).get(id);
+  const activity = await db.get(
+    `SELECT ${select} FROM activities WHERE activity_id = $1`, [id]);
   if (!activity) return res.status(404).json({ error: 'activity not found' });
   const lapSelect = includeRaw ? '*' : LAP_COLS.join(', ');
-  const laps = db.prepare(
-    `SELECT ${lapSelect} FROM laps WHERE activity_id = ? ORDER BY lap_index`
-  ).all(id);
+  const laps = await db.all(
+    `SELECT ${lapSelect} FROM laps WHERE activity_id = $1 ORDER BY lap_index`, [id]);
   res.json({ ...activity, laps });
 }));
 
 // Planned workouts ordered by date, with derived is_race and parsed steps.
-app.get('/api/planned', handler((req, res) => {
+app.get('/api/planned', handler(async (req, res) => {
   const where = [];
-  const params = {};
-  if (req.query.from) { where.push('calendar_date >= :from'); params.from = req.query.from; }
-  if (req.query.to) { where.push('calendar_date <= :to'); params.to = req.query.to; }
+  const params = [];
+  if (req.query.from) { params.push(req.query.from); where.push(`calendar_date >= $${params.length}`); }
+  if (req.query.to) { params.push(req.query.to); where.push(`calendar_date <= $${params.length}`); }
   const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
-  const rows = db.prepare(
+  const rows = await db.all(
     `SELECT schedule_id, workout_id, calendar_date, title, sport_type,
             is_race_auto, is_race_override,
             COALESCE(is_race_override, is_race_auto) AS is_race,
             estimated_distance_m, estimated_duration_s, steps_json
-     FROM planned_workouts ${clause} ORDER BY calendar_date`
-  ).all(params);
+     FROM planned_workouts ${clause} ORDER BY calendar_date`, params);
   // Collapse same-day race triplicates (Runna race + manual override + pacer)
   // into one row before shaping; the survivor carries a pacer_available flag.
+  // steps_json is jsonb — pg hands back the parsed array (or null) directly.
   const out = collapseRaceDuplicates(rows).map((r) => {
     const { steps_json, ...rest } = r;
-    return { ...rest, steps: steps_json ? JSON.parse(steps_json) : null };
+    return { ...rest, steps: steps_json ?? null };
   });
   res.json(out);
 }));
 
 // Recovery rows, newest first. ?limit (default 30), ?from, ?to on date.
-app.get('/api/recovery', handler((req, res) => {
+app.get('/api/recovery', handler(async (req, res) => {
   const limit = Number(req.query.limit) || 30;
   const where = [];
-  const params = {};
-  if (req.query.from) { where.push('calendar_date >= :from'); params.from = req.query.from; }
-  if (req.query.to) { where.push('calendar_date <= :to'); params.to = req.query.to; }
+  const params = [];
+  if (req.query.from) { params.push(req.query.from); where.push(`calendar_date >= $${params.length}`); }
+  if (req.query.to) { params.push(req.query.to); where.push(`calendar_date <= $${params.length}`); }
   const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
-  const rows = db.prepare(
-    `SELECT * FROM recovery ${clause} ORDER BY calendar_date DESC LIMIT :limit`
-  ).all({ ...params, limit });
+  params.push(limit);
+  const rows = await db.all(
+    `SELECT * FROM recovery ${clause} ORDER BY calendar_date DESC LIMIT $${params.length}`,
+    params);
   res.json(rows.map(({ raw_json, ...rest }) => rest));
 }));
 
@@ -134,12 +122,11 @@ app.get('/api/recovery', handler((req, res) => {
 // separate route from the recovery time-series rather than a per-day column.
 // The frontend never sees raw_json. The deviceId is a dynamic map key, so we
 // grab the first/only entry rather than hardcoding it.
-app.get('/api/training-balance', handler((req, res) => {
-  const row = db.prepare(
+app.get('/api/training-balance', handler(async (req, res) => {
+  const row = await db.get(
     `SELECT calendar_date, raw_json FROM recovery
-     WHERE raw_json IS NOT NULL ORDER BY calendar_date DESC LIMIT 1`
-  ).get();
-  const ts = row && JSON.parse(row.raw_json).training_status;
+     WHERE raw_json IS NOT NULL ORDER BY calendar_date DESC LIMIT 1`);
+  const ts = row && row.raw_json.training_status; // raw_json is jsonb: already an object
   const first = (m) => (m ? Object.values(m)[0] : null);
 
   const lb = first(ts?.mostRecentTrainingLoadBalance?.metricsTrainingLoadBalanceDTOMap);
@@ -171,24 +158,22 @@ app.get('/api/training-balance', handler((req, res) => {
 }));
 
 // Weekly mileage aggregate: totals per ISO week (Monday start), last ~12 weeks.
-app.get('/api/summary/weekly', handler((req, res) => {
+app.get('/api/summary/weekly', handler(async (req, res) => {
   // Runs only by default so mileage/pace aren't polluted by walks/football.
   // ?group= overrides the bucket (e.g. walk); defaults to 'run'.
   const group = req.query.group || 'run';
-  const weekStart =
-    "date(start_time_local, '-' || ((strftime('%w', start_time_local) + 6) % 7) || ' days')";
-  const rows = db.prepare(
-    `SELECT ${weekStart} AS week_start,
-            COUNT(*) AS run_count,
+  // date_trunc('week') is ISO Monday-start, matching the old SQLite expression.
+  const rows = await db.all(
+    `SELECT to_char(date_trunc('week', start_time_local), 'YYYY-MM-DD') AS week_start,
+            COUNT(*)::int AS run_count,
             SUM(distance_m) AS total_distance_m,
             SUM(duration_s) AS total_duration_s,
             SUM(duration_s) / (SUM(distance_m) / 1000.0) AS avg_pace_s_per_km
      FROM activities
-     WHERE start_time_local IS NOT NULL AND distance_m > 0 AND activity_group = :group
+     WHERE start_time_local IS NOT NULL AND distance_m > 0 AND activity_group = $1
      GROUP BY week_start
      ORDER BY week_start DESC
-     LIMIT 12`
-  ).all({ group });
+     LIMIT 12`, [group]);
   res.json(rows);
 }));
 
@@ -205,11 +190,10 @@ const fmtDuration = (s) => {
 
 // Garmin-sourced personal records (read-only), one per record type, with a
 // display string (time formatted, or distance in km) for the frontend.
-app.get('/api/personal-records', handler((req, res) => {
-  const rows = db.prepare(
+app.get('/api/personal-records', handler(async (req, res) => {
+  const rows = await db.all(
     `SELECT type_id, label, value, value_kind, activity_id, record_date
-     FROM personal_records ORDER BY type_id`
-  ).all();
+     FROM personal_records ORDER BY type_id`);
   res.json(rows.map((r) => ({
     ...r,
     value_display: r.value_kind === 'distance'
@@ -219,11 +203,10 @@ app.get('/api/personal-records', handler((req, res) => {
 }));
 
 // Current (most recent) Garmin race predictions, times formatted.
-app.get('/api/race-predictions', handler((req, res) => {
-  const row = db.prepare(
+app.get('/api/race-predictions', handler(async (req, res) => {
+  const row = await db.get(
     `SELECT calendar_date, time_5k_s, time_10k_s, time_half_s, time_marathon_s, fetched_at
-     FROM race_predictions ORDER BY calendar_date DESC LIMIT 1`
-  ).get();
+     FROM race_predictions ORDER BY calendar_date DESC LIMIT 1`);
   if (!row) return res.json(null);
   const pred = (label, seconds) => ({ label, seconds, display: fmtDuration(seconds) });
   res.json({
@@ -241,92 +224,97 @@ app.get('/api/race-predictions', handler((req, res) => {
 // Set/clear the manual race override for a planned workout. Body: { override }
 // where override is 1 (force race), 0 (force not-race), or null (revert to
 // auto detection). Writes ONLY is_race_override — never any other column.
-app.post('/api/planned/:schedule_id/race-override', handler((req, res) => {
+app.post('/api/planned/:schedule_id/race-override', handler(async (req, res) => {
   const scheduleId = Number(req.params.schedule_id);
   const { override } = req.body || {};
   if (![0, 1, null].includes(override)) {
     return res.status(400).json({ error: 'override must be 0, 1, or null' });
   }
-  const result = writeDb
-    .prepare('UPDATE planned_workouts SET is_race_override = ? WHERE schedule_id = ?')
-    .run(override, scheduleId);
-  if (result.changes === 0) {
+  const result = await writeDb.run(
+    'UPDATE planned_workouts SET is_race_override = $1 WHERE schedule_id = $2',
+    [override, scheduleId]);
+  if (result.rowCount === 0) {
     return res.status(404).json({ error: 'planned workout not found' });
   }
   res.json({ schedule_id: scheduleId, is_race_override: override });
 }));
 
 // Coaching profile (single row). Shoes/races/injuries are growable lists
-// stored as JSON; general_notes is plain text. GET returns parsed arrays;
-// POST stores them via the writable connection (same pattern as race-override).
-const parseList = (s) => { try { return s ? JSON.parse(s) : []; } catch { return []; } };
+// stored as jsonb; general_notes is plain text. GET returns the arrays as-is;
+// POST stores them via the writable pool (same pattern as race-override).
+// jsonb columns arrive parsed — normalise SQL NULL / non-array junk to [].
+const parseList = (v) => (Array.isArray(v) ? v : []);
 
-const readProfile = () => {
-  const row = db.prepare(
-    'SELECT shoes_json, races_json, injuries_json, routines_json, general_notes, updated_at FROM profile WHERE id = 1'
-  ).get() || {};
+const readProfile = async () => {
+  const row = await db.get(
+    'SELECT shoes_json, races_json, injuries_json, routines_json, general_notes, runna_ical_url, updated_at FROM profile WHERE id = 1'
+  ) || {};
   return {
     shoes: parseList(row.shoes_json),
     races: parseList(row.races_json),
     injuries: parseList(row.injuries_json),
     routines: parseList(row.routines_json),
     general_notes: row.general_notes || '',
+    runna_ical_url: row.runna_ical_url || '',
     updated_at: row.updated_at || null,
   };
 };
 
-app.get('/api/profile', handler((req, res) => {
-  res.json(readProfile());
+app.get('/api/profile', handler(async (req, res) => {
+  res.json(await readProfile());
 }));
 
-app.post('/api/profile', handler((req, res) => {
+app.post('/api/profile', handler(async (req, res) => {
   const b = req.body || {};
   const arr = (v) => (Array.isArray(v) ? v : []);
-  writeDb.prepare(
-    `UPDATE profile SET shoes_json = :shoes, races_json = :races,
-       injuries_json = :injuries, routines_json = :routines,
-       general_notes = :notes, updated_at = :updated_at
-     WHERE id = 1`
-  ).run({
-    shoes: JSON.stringify(arr(b.shoes)),
-    races: JSON.stringify(arr(b.races)),
-    injuries: JSON.stringify(arr(b.injuries)),
-    routines: JSON.stringify(arr(b.routines)),
-    notes: b.general_notes || '',
-    updated_at: new Date().toISOString(),
-  });
-  res.json(readProfile());
+  await writeDb.run(
+    `UPDATE profile SET shoes_json = $1, races_json = $2,
+       injuries_json = $3, routines_json = $4,
+       general_notes = $5, runna_ical_url = $6,
+       updated_at = $7
+     WHERE id = 1`,
+    [
+      JSON.stringify(arr(b.shoes)),
+      JSON.stringify(arr(b.races)),
+      JSON.stringify(arr(b.injuries)),
+      JSON.stringify(arr(b.routines)),
+      b.general_notes || '',
+      (b.runna_ical_url || '').trim(),
+      new Date().toISOString(),
+    ]);
+  res.json(await readProfile());
 }));
 
 // Assembled coaching context — the compact structured summary the AI coach
 // will consume. Inspect this to gauge shape/token-weight before wiring a model.
-app.get('/api/coach/context', handler((req, res) => {
-  res.json(buildContext(db));
+app.get('/api/coach/context', handler(async (req, res) => {
+  res.json(await buildContext(db));
 }));
 
 // Copy-context dump — the full coaching context rendered as a readable text
 // block with a priming prompt on top, ready to paste into an external LLM chat
 // for a longer conversation than the in-app widget is meant for. Read-only.
-app.get('/api/coach/context-dump', handler((req, res) => {
-  res.json({ dump: renderContextDump(db) });
+app.get('/api/coach/context-dump', handler(async (req, res) => {
+  res.json({ dump: await renderContextDump(db) });
 }));
 
 // Generate a fresh daily glance brief (Sonnet, cheap), store it in coach_notes
-// as a 'daily' note, and return it. Write — uses the writable connection. The
+// as a 'daily' note, and return it. Write — uses the writable pool. The
 // dashboard's brief carousel reads these; the deeper report is on-demand below.
-app.post('/api/coach/daily', asyncHandler(async (req, res) => {
+app.post('/api/coach/daily', handler(async (req, res) => {
   const { text, context, model } = await generateBrief(db);
   const createdAt = new Date().toISOString();
   const end = createdAt.slice(0, 10);
   const start = new Date(Date.now() - context.window_days * 86400000)
     .toISOString().slice(0, 10);
-  const result = writeDb.prepare(
+  const result = await writeDb.run(
     `INSERT INTO coach_notes
        (created_at, note_type, content, model, date_range_start, date_range_end)
-     VALUES (?, 'daily', ?, ?, ?, ?)`
-  ).run(createdAt, text, model, start, end);
+     VALUES ($1, 'daily', $2, $3, $4, $5)
+     RETURNING id`,
+    [createdAt, text, model, start, end]);
   res.json({
-    id: result.lastInsertRowid,
+    id: result.rows[0].id,
     created_at: createdAt,
     note_type: 'daily',
     content: text,
@@ -339,7 +327,7 @@ app.post('/api/coach/daily', asyncHandler(async (req, res) => {
 // On-demand detailed report (Opus). The depth tier behind the daily brief,
 // generated ONLY when the user clicks "Detailed report". Stateless — not
 // persisted. Returns { content, model }.
-app.post('/api/coach/report', asyncHandler(async (req, res) => {
+app.post('/api/coach/report', handler(async (req, res) => {
   const { text, model } = await generateDetailedReport(db);
   res.json({ content: text, model });
 }));
@@ -348,7 +336,7 @@ app.post('/api/coach/report', asyncHandler(async (req, res) => {
 // the date's state: completed run -> how it went, planned-only -> execution
 // tips, rest -> a static line (no model call). Stateless. Returns
 // { content, kind, model }.
-app.post('/api/coach/day/:date', asyncHandler(async (req, res) => {
+app.post('/api/coach/day/:date', handler(async (req, res) => {
   const { date } = req.params;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
     return res.status(400).json({ error: 'date must be YYYY-MM-DD' });
@@ -360,7 +348,7 @@ app.post('/api/coach/day/:date', asyncHandler(async (req, res) => {
 // Interactive chat with the coach (spends Sonnet credit). Body: { messages }
 // — the full conversation so far ([{role, content}, ...]). Stateless: nothing
 // is persisted. Returns { reply } with the assistant's text.
-app.post('/api/coach/chat', asyncHandler(async (req, res) => {
+app.post('/api/coach/chat', handler(async (req, res) => {
   const { messages } = req.body || {};
   if (!Array.isArray(messages) || messages.length === 0) {
     return res.status(400).json({ error: 'messages must be a non-empty array' });
@@ -382,7 +370,7 @@ app.post('/api/coach/chat', asyncHandler(async (req, res) => {
 const recentPushes = [];
 const RECENT_PUSHES_MAX = 20;
 
-app.post('/api/coach/plan', asyncHandler(async (req, res) => {
+app.post('/api/coach/plan', handler(async (req, res) => {
   const { messages } = req.body || {};
   if (!Array.isArray(messages) || messages.length === 0) {
     return res.status(400).json({ error: 'messages must be a non-empty array' });
@@ -393,15 +381,15 @@ app.post('/api/coach/plan', asyncHandler(async (req, res) => {
 
 // Recent coach notes, newest first. ?limit (default 10), ?note_type filters
 // to one kind (e.g. 'daily' for the dashboard hero carousel).
-app.get('/api/coach/notes', handler((req, res) => {
+app.get('/api/coach/notes', handler(async (req, res) => {
   const limit = Number(req.query.limit) || 10;
   const { note_type } = req.query;
-  const rows = db.prepare(
+  const rows = await db.all(
     `SELECT id, created_at, note_type, content, model, date_range_start, date_range_end
      FROM coach_notes
-     WHERE (:note_type IS NULL OR note_type = :note_type)
-     ORDER BY id DESC LIMIT :limit`
-  ).all({ limit, note_type: note_type || null });
+     WHERE ($1::text IS NULL OR note_type = $1::text)
+     ORDER BY id DESC LIMIT $2`,
+    [note_type || null, limit]);
   res.json(rows);
 }));
 
@@ -504,7 +492,7 @@ const runPacer = (mode, params, timeoutMs) =>
 // Conversational Q&A to gather pacer params (Sonnet). Body: { messages }.
 // Returns { reply, params } — params is non-null once the Q&A is complete and
 // the UI should move to a preview. Never pushes to Garmin.
-app.post('/api/pacer/chat', asyncHandler(async (req, res) => {
+app.post('/api/pacer/chat', handler(async (req, res) => {
   const { messages } = req.body || {};
   if (!Array.isArray(messages) || messages.length === 0) {
     return res.status(400).json({ error: 'messages must be a non-empty array' });
@@ -515,14 +503,14 @@ app.post('/api/pacer/chat', asyncHandler(async (req, res) => {
 }));
 
 // Build (no network) and return a readable preview of the pacer. Body: params.
-app.post('/api/pacer/preview', asyncHandler(async (req, res) => {
+app.post('/api/pacer/preview', handler(async (req, res) => {
   res.json(await runPacer('preview', req.body || {}, 20000));
 }));
 
 // Build AND push to Garmin (upload + schedule). The ONLY endpoint that writes
 // to Garmin — called only after the user approves the preview. Body: params.
 // Successful pushes are recorded for the planning coach (see recentPushes).
-app.post('/api/pacer/push', asyncHandler(async (req, res) => {
+app.post('/api/pacer/push', handler(async (req, res) => {
   const result = await runPacer('push', req.body || {}, 120000);
   recentPushes.push({
     name: result.name,
@@ -534,4 +522,15 @@ app.post('/api/pacer/push', asyncHandler(async (req, res) => {
   res.json(result);
 }));
 
-app.listen(PORT, () => console.log(`Garmin Hub API listening on port ${PORT}`));
+// Async init: the column lists must exist before any route can run, so they
+// are awaited BEFORE the server starts listening (no startup race).
+async function start() {
+  ACTIVITY_COLS = await cols('activities');
+  LAP_COLS = await cols('laps');
+  app.listen(PORT, () => console.log(`Garmin Hub API listening on port ${PORT}`));
+}
+
+start().catch((err) => {
+  console.error('Failed to start API:', err.message);
+  process.exit(1);
+});

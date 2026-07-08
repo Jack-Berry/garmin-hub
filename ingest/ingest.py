@@ -1,5 +1,6 @@
 #!/usr/local/bin/python3.13
-"""Garmin Hub ingest — pulls Garmin data and upserts into data/garmin.db.
+"""Garmin Hub ingest — pulls Garmin data and upserts into the garminhub
+Postgres database (connection from DATABASE_URL; see db/README.md).
 
 Idempotent (safe to re-run from cron): all writes are upserts. Token caching
 means MFA is only needed on first login / token expiry.
@@ -12,10 +13,10 @@ import os
 import re
 import json
 import time
-import sqlite3
+import hashlib
 import warnings
 from pathlib import Path
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 # --- Suppress the harmless LibreSSL-vs-OpenSSL warning (NotOpenSSLWarning) ---
 try:
@@ -26,6 +27,7 @@ except Exception:
 warnings.filterwarnings("ignore", message=r".*OpenSSL.*")
 
 from dotenv import load_dotenv
+import psycopg
 import garminconnect
 
 # =========================================================================
@@ -33,7 +35,8 @@ import garminconnect
 # =========================================================================
 ACTIVITY_COUNT = 30          # how many recent activities to pull
 PLANNED_WINDOW_BACK = 60     # days before today to scan for planned workouts
-PLANNED_WINDOW_FWD = 30      # days after today to scan for planned workouts
+PLANNED_WINDOW_FWD = 84      # days after today to scan (12 wks — the coach's
+                             # get_scheduled_workouts tool reaches this far)
 RECOVERY_WINDOW = 30         # days back from today to fetch recovery data
 RECOVERY_REFETCH = 3         # always re-fetch the most recent N days (fill in late)
 RECOVERY_DELAY_S = 0.5       # pause between per-date fetches (rate-limit courtesy)
@@ -53,8 +56,9 @@ PR_TYPES = {
 }
 
 INGEST_DIR = Path(__file__).resolve().parent
-REPO_ROOT = INGEST_DIR.parent
-DB_PATH = REPO_ROOT / "data" / "garmin.db"
+# Postgres DSN — override via DATABASE_URL (ingest/.env or the environment).
+# The rw role is DML-only; DDL is db/schema.pg.sql, applied by db/setup_local.sh.
+DEFAULT_DSN = "postgres://garminhub_rw:garminhub_rw@localhost:5432/garminhub"
 ENV_PATH = INGEST_DIR / ".env"
 TOKENSTORE = INGEST_DIR / ".garth"   # gitignored garth token cache
 
@@ -118,8 +122,7 @@ def activity_group(type_key):
     run      ← any *_running variant (running, treadmill_running, trail_running…)
     football ← Garmin's 'soccer' (or 'football')
     walk     ← any *walking variant
-    other    ← everything else
-    (Mirrored in migrate_activity_type.py for the one-off backfill.)"""
+    other    ← everything else"""
     k = (type_key or "").lower()
     if "running" in k:
         return "run"
@@ -133,24 +136,21 @@ def activity_group(type_key):
 def upsert(conn, table, pk_cols, row):
     """Generic INSERT ... ON CONFLICT(pk) DO UPDATE for a dict of columns.
 
-    Returns 'inserted' or 'updated' based on whether the PK already existed."""
+    Returns 'inserted' or 'updated': xmax = 0 on the returned row means the
+    INSERT arm ran (no prior row version), so no separate existence probe."""
     cols = list(row.keys())
-    placeholders = ", ".join("?" for _ in cols)
+    placeholders = ", ".join("%s" for _ in cols)
     col_list = ", ".join(cols)
     updates = ", ".join(f"{c}=excluded.{c}" for c in cols if c not in pk_cols)
     conflict = ", ".join(pk_cols)
 
-    where = " AND ".join(f"{c}=?" for c in pk_cols)
-    existed = conn.execute(
-        f"SELECT 1 FROM {table} WHERE {where}", [row[c] for c in pk_cols]
-    ).fetchone()
-
-    conn.execute(
+    cur = conn.execute(
         f"INSERT INTO {table} ({col_list}) VALUES ({placeholders}) "
-        f"ON CONFLICT({conflict}) DO UPDATE SET {updates}",
+        f"ON CONFLICT({conflict}) DO UPDATE SET {updates} "
+        f"RETURNING (xmax = 0)",
         [row[c] for c in cols],
     )
-    return "updated" if existed else "inserted"
+    return "inserted" if cur.fetchone()[0] else "updated"
 
 
 def prompt_mfa():
@@ -279,10 +279,10 @@ def ingest_activities(g, conn, summary):
         # Skip the splits fetch when this activity is unchanged and laps
         # already exist (cheap idempotency win for the common cron case).
         prior = conn.execute(
-            "SELECT duration_s FROM activities WHERE activity_id=?", (aid,)
+            "SELECT duration_s FROM activities WHERE activity_id=%s", (aid,)
         ).fetchone()
         have_laps = conn.execute(
-            "SELECT COUNT(*) FROM laps WHERE activity_id=?", (aid,)
+            "SELECT COUNT(*) FROM laps WHERE activity_id=%s", (aid,)
         ).fetchone()[0]
         unchanged = prior is not None and prior[0] == row["duration_s"] and have_laps > 0
 
@@ -350,11 +350,19 @@ def ingest_planned(g, conn, summary):
     start = today - timedelta(days=PLANNED_WINDOW_BACK)
     end = today + timedelta(days=PLANNED_WINDOW_FWD)
 
+    # Track every schedule_id the calendar returned this run, plus whether any
+    # month fetch failed — so stale-row cleanup below can safely delete future
+    # workouts Garmin no longer lists (a replaced Runna plan) WITHOUT nuking
+    # rows just because a transient fetch error hid them.
+    seen_ids = set()
+    fetch_failed = False
+
     for (yy, mm) in months_between(start, end):
         try:
             cal = g.get_scheduled_workouts(yy, mm)
         except Exception as e:
             summary["errors"].append(f"planned {yy}-{mm:02d}: {e}")
+            fetch_failed = True
             continue
 
         items = cal.get("calendarItems", []) if isinstance(cal, dict) else []
@@ -364,6 +372,7 @@ def ingest_planned(g, conn, summary):
             sched_id = item.get("id")
             if sched_id is None:
                 continue
+            seen_ids.add(sched_id)
 
             detail = None
             try:
@@ -399,10 +408,138 @@ def ingest_planned(g, conn, summary):
                                               pick(seg0, "estimatedDurationInSecs"),
                                               pick(item, "duration")),
                 "steps_json": dumps(segments) if segments else None,
+                "source": "garmin",
                 "raw_json": dumps(detail or item),
             }
             result = upsert(conn, "planned_workouts", ["schedule_id"], row)
             summary["planned"][result] += 1
+
+    # Stale-plan cleanup: drop FUTURE planned rows the calendar no longer lists
+    # (Runna replaced/rescheduled the plan). Past rows are left untouched — they
+    # are history. Skipped entirely if any month fetch failed, so a transient
+    # Garmin error can never mass-delete a still-valid plan. Scoped to this
+    # source only, so a Garmin fetch can never wipe ical rows (and vice versa).
+    if not fetch_failed:
+        summary["planned"]["deleted"] += _delete_stale(conn, "garmin", seen_ids)
+
+
+def _delete_stale(conn, source, seen_ids):
+    """Delete FUTURE planned_workouts rows of one source not in seen_ids."""
+    today_str = str(date.today())
+    if seen_ids:
+        marks = ", ".join("%s" for _ in seen_ids)
+        cur = conn.execute(
+            f"DELETE FROM planned_workouts WHERE calendar_date >= %s AND source = %s "
+            f"AND schedule_id NOT IN ({marks})",
+            [today_str, source, *seen_ids],
+        )
+    else:
+        cur = conn.execute(
+            "DELETE FROM planned_workouts WHERE calendar_date >= %s AND source = %s",
+            [today_str, source],
+        )
+    return cur.rowcount
+
+
+# =========================================================================
+# Pull 2b — Runna ical feed (the FULL plan; Garmin only syncs ~2 weeks)
+# =========================================================================
+_DIST_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(km|k)\b", re.IGNORECASE)
+
+
+def _ical_distance_m(*texts):
+    """Best-effort distance from free text ('7.5km run', '10K') -> metres."""
+    for t in texts:
+        m = _DIST_RE.search(t or "")
+        if m:
+            return float(m.group(1)) * 1000
+    return None
+
+
+def _ical_schedule_id(uid):
+    """Stable NEGATIVE int id from the event UID — negative so it can never
+    collide with Garmin's (positive) calendar item ids in the shared PK."""
+    return -int(hashlib.sha1(uid.encode()).hexdigest()[:15], 16)
+
+
+def _ical_steps(description):
+    """Description text -> JSON array of step lines (less structured than
+    Garmin's steps_json, by design). Drops blanks and link lines ("View in
+    the Runna app: https://…") — noise for the coach."""
+    lines = [ln.strip() for ln in (description or "").splitlines()]
+    lines = [ln for ln in lines if ln and not re.search(r"https?://", ln)]
+    return dumps(lines) if lines else None
+
+
+def ingest_runna_ical(g, conn, summary):
+    """Pull the full Runna plan from the profile's ical feed URL (if set).
+
+    Runs AFTER ingest_planned: any date the Garmin calendar already covers is
+    skipped (the Garmin row carries richer step JSON), so the ical rows only
+    fill in the future beyond Garmin's ~2-week sync horizon. Same window,
+    same per-source stale cleanup + fetch-failed guard as the Garmin pull."""
+    row = conn.execute("SELECT runna_ical_url FROM profile WHERE id = 1").fetchone()
+    url = (row[0] or "").strip() if row else ""
+    if not url:
+        return  # feature off — never touches ical rows, no cleanup
+    import requests
+    from icalendar import Calendar
+
+    today = date.today()
+    end = today + timedelta(days=PLANNED_WINDOW_FWD)
+
+    try:
+        resp = requests.get(re.sub(r"^webcal://", "https://", url), timeout=30)
+        resp.raise_for_status()
+        cal = Calendar.from_ical(resp.content)
+    except Exception as e:
+        summary["errors"].append(f"runna_ical: {e}")
+        return  # fetch failed — skip upserts AND cleanup (guard, per-source)
+
+    # Dates the Garmin calendar already covers (upserted just above in this
+    # run) — keep those rows, skip the ical duplicate. ::text so the set holds
+    # 'YYYY-MM-DD' strings (the column is a date; a datetime.date would never
+    # match cal_date below and the dedupe would silently stop working).
+    garmin_dates = {r[0] for r in conn.execute(
+        "SELECT DISTINCT calendar_date::text FROM planned_workouts WHERE source = 'garmin'"
+    )}
+
+    seen_ids = set()
+    for ev in cal.walk("VEVENT"):
+        dtstart = ev.get("dtstart")
+        if dtstart is None:
+            continue
+        d = dtstart.dt.date() if isinstance(dtstart.dt, datetime) else dtstart.dt
+        if d < today or d > end:
+            continue
+        uid = str(ev.get("uid") or f"{d}-{ev.get('summary')}")
+        title = str(ev.get("summary") or "").strip() or None
+        description = str(ev.get("description") or "")
+        cal_date = str(d)
+        if cal_date in garmin_dates:
+            continue  # Garmin row is richer — not marked seen, so a previously
+                      # ingested ical row for this date gets stale-cleaned below
+
+        sched_id = _ical_schedule_id(uid)
+        seen_ids.add(sched_id)
+        row = {
+            "schedule_id": sched_id,
+            "workout_id": None,
+            "calendar_date": cal_date,
+            "title": title,
+            "sport_type": "running",
+            "is_race_auto": is_race_keyword(title, description),
+            "estimated_distance_m": _ical_distance_m(title, description),
+            "estimated_duration_s": None,
+            "steps_json": _ical_steps(description),
+            "source": "runna_ical",
+            "raw_json": dumps({"uid": uid, "date": cal_date, "summary": title,
+                               "description": description}),
+        }
+        result = upsert(conn, "planned_workouts", ["schedule_id"], row)
+        summary["runna_ical"][result] += 1
+
+    summary["runna_ical"]["deleted"] += _delete_stale(conn, "runna_ical", seen_ids)
 
 
 # =========================================================================
@@ -420,8 +557,9 @@ def ingest_recovery(g, conn, summary):
 
     # Skip dates already stored, but always re-fetch the most recent few —
     # same-day/recent recovery metrics (sleep, readiness) fill in late.
+    # ::text to match the 'YYYY-MM-DD' strings in `dates` (column is a date).
     existing = {r[0] for r in
-                conn.execute("SELECT calendar_date FROM recovery").fetchall()}
+                conn.execute("SELECT calendar_date::text FROM recovery").fetchall()}
     recent = set(dates[:RECOVERY_REFETCH])
     todo = [d for d in dates if d not in existing or d in recent]
     print(f"Fetching recovery for {len(todo)} dates "
@@ -620,7 +758,7 @@ def ingest_lactate_threshold(g, conn, summary):
         return
 
     conn.execute(
-        "UPDATE profile SET lt_speed_mps = ?, lt_hr = ?, lt_detected_date = ? "
+        "UPDATE profile SET lt_speed_mps = %s, lt_hr = %s, lt_detected_date = %s "
         "WHERE id = 1",
         (float(shr["speed"]) * LT_SPEED_SCALE,
          pick(shr, "heartRate"), pick(shr, "calendarDate")),
@@ -637,7 +775,8 @@ def main():
     summary = {
         "activities": {"inserted": 0, "updated": 0},
         "laps": {"inserted": 0, "updated": 0},
-        "planned": {"inserted": 0, "updated": 0},
+        "planned": {"inserted": 0, "updated": 0, "deleted": 0},
+        "runna_ical": {"inserted": 0, "updated": 0, "deleted": 0},
         "recovery": {"inserted": 0, "updated": 0},
         "personal_records": {"inserted": 0, "updated": 0},
         "race_predictions": {"inserted": 0, "updated": 0},
@@ -645,13 +784,13 @@ def main():
         "errors": [],
     }
 
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("PRAGMA foreign_keys = ON;")
+    conn = psycopg.connect(os.getenv("DATABASE_URL", DEFAULT_DSN))
 
     g = login()
 
     for label, fn in (("activities", ingest_activities),
                       ("planned", ingest_planned),
+                      ("runna_ical", ingest_runna_ical),  # AFTER planned: dedupes against Garmin dates
                       ("recovery", ingest_recovery),
                       ("personal_records", ingest_personal_records),
                       ("race_predictions", ingest_race_predictions),
@@ -660,16 +799,20 @@ def main():
             fn(g, conn, summary)
             conn.commit()
         except Exception as e:
+            # psycopg aborts the transaction on a SQL error — roll back so this
+            # section's partial writes vanish and the next section starts clean.
+            conn.rollback()
             summary["errors"].append(f"{label} pull failed: {e}")
 
     conn.close()
 
     # --- Summary -----------------------------------------------------------
     print("\n=== Ingest summary ===")
-    for t in ("activities", "laps", "planned", "recovery",
+    for t in ("activities", "laps", "planned", "runna_ical", "recovery",
               "personal_records", "race_predictions", "lactate_threshold"):
         s = summary[t]
-        print(f"{t:12s} inserted={s['inserted']:4d}  updated={s['updated']:4d}")
+        extra = f"  deleted={s['deleted']:4d}" if "deleted" in s else ""
+        print(f"{t:12s} inserted={s['inserted']:4d}  updated={s['updated']:4d}{extra}")
     if summary["errors"]:
         print(f"\n{len(summary['errors'])} error(s):")
         for e in summary["errors"]:

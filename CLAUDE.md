@@ -6,50 +6,61 @@ A personal, single-user web app that ingests my Garmin running data and provides
 
 ## Architecture
 
-- **Ingest:** Python + `garminconnect` (0.3.6). Pulls data, writes to SQLite. Run by cron.
-- **Database:** SQLite, single file at `data/garmin.db`.
-- **API:** Node + Express. Read-only against the SQLite DB, with one narrowly-scoped write endpoint (race override — see API section). Serves JSON to the frontend and handles AI-coach calls.
+- **Ingest:** Python + `garminconnect` (0.3.6) + `psycopg` (3). Pulls data, upserts into Postgres. Run by cron.
+- **Database:** PostgreSQL (database `garminhub`; locally the Homebrew PG 14 service). `db/schema.pg.sql` is the canonical schema.
+- **API:** Node + Express + `pg`, fully async. Two pools mirror a deliberate read/write split (see API section). Serves JSON to the frontend and handles AI-coach calls.
 - **Frontend:** React (JavaScript, not TypeScript) + Tailwind + Recharts.
 - **AI layer:** Node calls the Anthropic Claude API (Opus, daily). Uses a separate API key in `.env`.
-- **Host:** Raspberry Pi, behind Cloudflare (same pattern as my other Pi apps).
+- **Host:** TBD — moving toward a proper hosted single-user deployment; provider not yet chosen. Until then, the local macOS launchd setup (see Build & deploy) is the running instance.
 
 ## Data flow
 
-`cron → ingest.py → SQLite ← Express API ← React dashboard`, with the API also calling the Claude API for coaching.
+`cron → ingest.py → Postgres ← Express API ← React dashboard`, with the API also calling the Claude API for coaching.
 
 ## Repo layout
 
 ```
 garmin-hub/
   ingest/   Python ingest + Garmin client + .env + .garth/ token cache
-  server/   Express API, db access, Claude client
+  server/   Express API, db access (pg pools), Claude client
   web/      React + Tailwind frontend
-  data/     garmin.db (gitignored)
+  db/       schema.pg.sql (canonical), setup_local.sh, README (roles + env vars)
+  attic/    retired SQLite-era artifacts (see attic/README.md) — nothing here runs
   CLAUDE.md
 ```
 
 ## Database
 
-SQLite, eight tables. Design principle: typed columns for everything with coaching value, plus a `raw_json` column per Garmin-sourced table as a fidelity safety net. Query/chart against typed columns; `raw_json` is the fallback for anything not promoted to a column. (Our own tables — `coach_notes`, `profile` — have no `raw_json`.)
+PostgreSQL, eight tables (`db/schema.pg.sql` is canonical). Design principle: typed columns for everything with coaching value, plus a `raw_json` **jsonb** column per Garmin-sourced table as a fidelity safety net. Query/chart against typed columns; `raw_json` is the fallback for anything not promoted to a column (and is queryable with jsonb operators). (Our own tables — `coach_notes`, `profile` — have no `raw_json`.)
+
+Migrated from SQLite (July 2026) — key facts:
+
+- **Types are real:** all `*_json`/`raw_json` columns are `jsonb` (pg/psycopg return parsed objects — never `JSON.parse` a column value); dates are `timestamp` (`start_time_local`, `lt_detected_date` — local wall-clock, no zone), `date` (`calendar_date` columns, `fetched_at`, `record_date`, `date_range_*`), and `timestamptz` (`created_at`, `updated_at`).
+- **String contract preserved:** `server/db.js` overrides the pg type parsers so date/timestamp columns come back as the legacy strings (`YYYY-MM-DD`, `YYYY-MM-DD HH:MM:SS`, ISO-Z) — the API's JSON shapes never changed. Don't remove those parsers casually.
+- **BIGINT ids (5):** `activities.activity_id`, `laps.activity_id`, `personal_records.activity_id` (activity ids ~23.5B), `planned_workouts.schedule_id` (negative 60-bit ical hashes) and `planned_workouts.workout_id` all overflow or crowd int4.
+- **Two DB roles enforce the read/write split at the database layer:** `garminhub_ro` (SELECT only — the API's read pool) and `garminhub_rw` (DML only, no DDL — the API's write pool + the Python ingest). Connection strings: Node reads `DATABASE_URL_RO` / `DATABASE_URL_RW`, Python ingest reads `DATABASE_URL`, and `PG_ADMIN_URL` is the DDL connection for `ingest/init_db.py` (schema re-apply). Local defaults for all of these are in code; see `db/README.md`.
+- First-time setup: `bash db/setup_local.sh` (roles + database + schema, idempotent).
 
 - **`activities`** — one row per completed activity (PK `activity_id`). Run metrics, HR + zones, cadence, power + zones, running dynamics, training load/effect, VO2max, full elevation, calories, geo lat/long for weather backfill, fastest splits. Logic-bearing columns:
   - `activity_type` — raw Garmin `activityType.typeKey` (e.g. `running`, `treadmill_running`).
-  - `activity_group` — derived coarse bucket for filtering: any `*running*` → `run`, `soccer`/`football` → `football`, any `*walking*` → `walk`, else `other`. Set by ingest; mirrored in `migrate_activity_type.py` for the one-off backfill.
+  - `activity_group` — derived coarse bucket for filtering: any `*running*` → `run`, `soccer`/`football` → `football`, any `*walking*` → `walk`, else `other`. Set by ingest.
 - **`laps`** — splits per activity (PK `activity_id` + `lap_index`). Per-lap metrics incl. `intensity_type` (active vs recovery) for matching executed intervals to planned ones.
-- **`planned_workouts`** — one row per Runna planned workout (PK `schedule_id`, the calendar item id). Logic-bearing columns:
+- **`planned_workouts`** — one row per planned workout (PK `schedule_id` — the Garmin calendar item id, or a **negative** SHA1-hash of the event UID for ical rows, so the two id spaces can't collide). Logic-bearing columns:
+  - `source` — `garmin` | `runna_ical`. Garmin sync covers ~2 weeks with rich step JSON; the Runna ical feed fills in the rest of the plan. Stale cleanup is scoped per-source.
   - `is_race_auto` — 0/1, keyword match on title/description for "race"/"parkrun". Owned and overwritten by ingest on every run.
   - `is_race_override` — 0/1 manual override; NULL = none. **Ingest NEVER writes this** — it survives re-ingest.
   - Effective race status = `COALESCE(is_race_override, is_race_auto)`, derived by callers (see the `/api/planned` query).
-  - `steps_json` — parsed step/segment structure.
+  - `steps_json` — jsonb. Garmin rows: parsed step/segment structure; ical rows: an array of description-text lines (`parseSteps` in `context.js` passes string arrays through as-is).
 - **`recovery`** — one row per `calendar_date` (PK). Consolidates ~7 daily Garmin wellness payloads into one typed row: HRV (+ baseline), resting HR, sleep (stages, score), training readiness (score/level/feedback + factor breakdown), training status, VO2max, all-day stress, body battery.
-- **`coach_notes`** — AI coaching output (PK autoincrement `id`). `note_type` (`daily`/`weekly`/`ondemand`), `content`, `model`, date range. No `raw_json`.
-- **`profile`** — single-row (PK `id = 1`) coaching profile. Growable lists stored as JSON text: `shoes_json`, `races_json`, `injuries_json`, `routines_json` (the "other regular activities" — activity/day/intensity, added in 6c), plus `general_notes` — all user-edited via the API's profile endpoints. **Exception:** three lactate-threshold columns — `lt_speed_mps` (LT speed, true m/s), `lt_hr` (LT heart rate, bpm), `lt_detected_date` (source calendarDate) — are **ingest-owned** (written by `ingest.py`; added by migration `migrate_lactate_threshold.py`) and feed the Stage 8 pace system. No `raw_json`.
+- **`coach_notes`** — AI coaching output (PK `id`, identity/auto-generated). `note_type` (`daily`/`weekly`/`ondemand`), `content`, `model`, date range. No `raw_json`.
+- **`profile`** — single-row (PK `id = 1`, CHECK-enforced) coaching profile. Growable lists stored as jsonb: `shoes_json`, `races_json`, `injuries_json`, `routines_json` (the "other regular activities" — activity/day/intensity, added in 6c), plus `general_notes` — all user-edited via the API's profile endpoints. **Exception:** three lactate-threshold columns — `lt_speed_mps` (LT speed, true m/s), `lt_hr` (LT heart rate, bpm), `lt_detected_date` (source timestamp) — are **ingest-owned** (written by `ingest.py`) and feed the Stage 8 pace system. No `raw_json`.
 - **`personal_records`** — Garmin-sourced personal bests (one row per record type). Read-only, refreshed by ingest.
 - **`race_predictions`** — Garmin's current predicted race times (5K/10K/half/marathon) per `calendar_date`. Read-only, refreshed by ingest.
 
 ### Activity-group filtering (important)
 
 Running displays are runs-only. `activity_group` is the filter:
+
 - **Weekly summary / pace trend** — runs only (`activity_group = 'run'`), so walks and football don't pollute mileage and pace.
 - **Walks** — ingested for recovery context but excluded from running displays.
 - **Football** — shown, but excluded from pace analysis.
@@ -58,9 +69,10 @@ Running displays are runs-only. `activity_group` is the filter:
 
 `ingest/ingest.py`. Idempotent (safe to re-run from cron): all writes are upserts (`INSERT … ON CONFLICT(pk) DO UPDATE`), no duplicates.
 
-- **Run/auth:** runs via `/usr/local/bin/python3.13` (Homebrew Python 3.13 — **NOT** Apple's system 3.9). garth token cache lives in `ingest/.garth/` (gitignored), so MFA is only prompted on first login / token expiry.
+- **Run/auth:** runs via `/usr/local/bin/python3.13` (Homebrew Python 3.13 — **NOT** Apple's system 3.9). garth token cache lives in `ingest/.garth/` (gitignored), so MFA is only prompted on first login / token expiry. DB connection: `DATABASE_URL` (rw role; local default in code). Per-pull-section transactions: each section commits on success and **rolls back on error**, so one failed pull can't poison the rest.
 - **Activities:** pulls the recent N activities (+ laps per activity). Skips the splits fetch when an activity is unchanged and its laps already exist (cheap idempotency win for the common cron case).
-- **Planned workouts:** fetched via `get_scheduled_workouts(year, month)` (calendar-based) over a back/forward window, then `get_scheduled_workout_by_id(id)` for full step detail. Calendar items have mixed `itemType`; planned workouts are `itemType == "workout"`, keyed by date + `workoutId`, with `id` as the schedule id.
+- **Planned workouts:** fetched via `get_scheduled_workouts(year, month)` (calendar-based) over a back/forward window (60 days back / 84 days — 12 weeks — forward, matching the coach's `get_scheduled_workouts` tool reach), then `get_scheduled_workout_by_id(id)` for full step detail. Calendar items have mixed `itemType`; planned workouts are `itemType == "workout"`, keyed by date + `workoutId`, with `id` as the schedule id. **Stale-plan cleanup:** after the fetch, future `planned_workouts` rows no longer on the calendar are deleted (a replaced Runna plan leaves no ghosts) — **scoped per-source** (`source = 'garmin'`, so it can never wipe ical rows) and skipped entirely if any month fetch failed, so a transient error can never mass-delete a valid plan. Past rows are never touched.
+- **Runna ical feed (full plan):** Garmin only syncs ~2 weeks of Runna; the ical feed exposes the whole plan. If `profile.runna_ical_url` is set (Settings → "Runna calendar feed"), `ingest_runna_ical` fetches it (`icalendar` lib) and maps events over today → +84 days to `planned_workouts` rows with `source = 'runna_ical'` (distance regexed from the title; description lines minus URL lines stored in `steps_json`). **Dedupe:** runs AFTER the Garmin pull — any date a `garmin` row covers is skipped (richer step JSON wins), and the skipped event is deliberately not marked seen so a previously-ingested ical row for that date gets stale-cleaned away. Ical stale cleanup mirrors the Garmin one: per-source, future-only, skipped when the feed fetch fails; if the URL is unset the pull is a no-op (existing ical rows are left alone).
 - **Recovery:** pulls ~7 Garmin wellness endpoints per day over a 30-day window. Skips dates already stored **except** the most recent 3 (same-day/recent metrics like sleep and readiness fill in late). Throttled between fetches; on a 429/rate-limit it backs off and retries the date once.
 
 ### Race detection (don't trust Garmin's flag)
@@ -69,10 +81,10 @@ Garmin's own `race` boolean is unreliable — it's `false` even for workouts tit
 
 ## API
 
-`server/server.js`. The `db.js` connection is **read-only**; every DB write goes through a separate writable connection (`writeDb`) and is scoped so it can never clobber ingest-owned data. The narrowly-scoped DB writes:
+`server/server.js`. All DB access is **async** (`pg` pools via `server/db.js`): reads go through the `db` pool (the SELECT-only `garminhub_ro` role — read-only is enforced by Postgres itself), writes through the `writeDb` pool (`garminhub_rw`), scoped so they can never clobber ingest-owned data. The curated column lists (everything but `raw_json`) come from `information_schema.columns` and are **awaited at startup before `app.listen`** — don't move that init after routes can fire. The narrowly-scoped DB writes:
 
 - `POST /api/planned/:schedule_id/race-override` — body `{ override }` where override is `1` (force race), `0` (force not-race), or `null` (revert to auto). Writes **only** `is_race_override`.
-- `POST /api/profile` — replaces the single `profile` row (shoes/races/injuries/routines/notes). `GET /api/profile` returns parsed arrays.
+- `POST /api/profile` — replaces the single `profile` row (shoes/races/injuries/routines/notes/runna_ical_url). `GET /api/profile` returns parsed arrays.
 - `POST /api/coach/daily` — generates the glance brief and inserts a `daily` row into `coach_notes`.
 
 The AI-coach and pacer routes also spawn Python or call Claude (see AI coach / Pacer below); `POST /api/pacer/push` is the only endpoint that writes to **Garmin**. `POST /api/ingest/refresh` spawns `ingest.py` on demand (in-process lock stops concurrent runs).
@@ -142,6 +154,7 @@ Build proceeds in stages; don't build ahead of the current one.
     - **API:** `POST /api/coach/plan` (Opus). `planReply` (`coach.js`) drives it with `PLANNING_SYSTEM` (the composer persona: assess-before-propose, the archetype catalogue, the blocks-spec shape, the guard bounds) + `buildPlanningContext` (`context.js`, wraps `buildContext` with `planning.zones` / `planning.goal_paces` / `planning.guard` / `planning.pushed_recently`). Returns `{ reply, spec, done, specError }`. Preview/push still go through `/api/pacer/preview` and `/api/pacer/push` (the latter the only Garmin write); pushes are recorded in an in-memory `recentPushes` list so the coach doesn't double-book a just-pushed session.
     - **Frontend:** `web/src/ChatWidget.jsx` gains a planning mode — accent border while active, and a fresh thread on entry (chat and planning can't share history / system prompt). A returned spec renders an inline preview (`web/src/PacerPreview.jsx`, lifted out of the old pacer modal) with a "Push to Garmin" button; a successful push **auto-advances** to the next agreed session.
     - **Reliability fixes:** phantom-push guard (a bare "all done" with no real push does NOT end planning — only an actual `api.pacerPush` result sets `pushed`); no re-presentation of an already-pushed session; spec-emitted history markers (`[spec emitted: …]` — the app strips fenced specs from history, so the model doesn't believe it never presented one); and a one-shot **repair loop** in `planReply` when a turn tries to present a spec but none extracts (truncation / invalid JSON).
+  - **8d — scheduled-workout tool.** ✅ Done. The coach can see the future plan beyond the injected context's 14-day horizon via a `get_scheduled_workouts` Claude tool (chat + planning mode, `coach.js`): on demand it reads `planned_workouts` up to 12 weeks ahead (clamped) and returns a compact one-line-per-workout summary with steps (`scheduledSummary` in `context.js`), labelled "UPCOMING — not yet completed". `createResolvingTools` handles the tool round-trips server-side; the client only sees the final reply. No new table or endpoint — `planned_workouts` + `GET /api/planned?from=&to=` already cover it. Note: Runna only syncs ~2 weeks ahead, so far-future weeks legitimately return empty until Runna publishes them.
 
 ## Build & deploy (local macOS) — READ THIS
 
@@ -153,7 +166,9 @@ Local always-on test deployment via launchd (`deploy/local-macos/`, see its `REA
 
 ## Known rough edges (consolidate later)
 
-- **Migrations:** `init_db.py` only does `CREATE TABLE IF NOT EXISTS` — it **cannot add columns to existing tables**. Any schema change to an existing table needs an ALTER-based migration script (see `migrate_is_race.py`, `migrate_activity_type.py`). This ad-hoc one-script-per-change approach should be consolidated into a proper migration mechanism eventually.
+- **Migrations:** `db/schema.pg.sql` is canonical, applied via `CREATE TABLE IF NOT EXISTS` (`db/setup_local.sh` / `ingest/init_db.py`) — so it **cannot alter existing tables**. A schema change to an existing table = an `ALTER TABLE` run against the live DB **plus** the matching edit to `schema.pg.sql` (so fresh setups agree). The SQLite-era one-script-per-change `migrate_*.py` files are retired to `attic/`. Still no formal migration tool; adopt one if schema churn picks up.
+- **TODO — ical schedule-id precision.** Ical rows use negative 60-bit hash ids, which exceed JS's 2^53 integer precision — `server/db.js` parses int8 to `Number`, so those ids round in API responses (a race-override on an ical row can 404). Pre-existing since SQLite (better-sqlite3 did the same), documented in `db.js`. Clean fix: string ids over the wire, or a smaller hash.
+- **TODO — PG14 EOL (late 2026).** The local Homebrew Postgres is 14.x, which reaches end-of-life in November 2026. Nothing in the schema/code is version-sensitive (works on 14–17) — pick a current major when the hosted deployment lands.
 - **TODO — planned-vs-actual splits UI.** The backend plumbing is **done**: `buildDayFocus` (`context.js`) already includes the completed activity's per-lap splits (`laps`) and the planned workout's parsed steps, so the coach can judge an interval/pacer/race session split-by-split. What remains is **frontend**: a per-split planned-vs-actual view for interval/pacer/race days (the data's there, the UI isn't).
 - **TODO — repeat groups not built.** The builder flattens every block and emits intervals as a flat rep/rest list; Garmin's real `RepeatGroupDTO` is **not** emitted. **Doc contradiction to resolve before building it:** `WORKOUT_BLUEPRINT.md` (§Decisions) says repeat-groups are a YES; but `PLANNING_SYSTEM` in `coach.js` hard-instructs the coach that there are NO repeat constructs (every rep written out). Reconcile these two before implementing repeats.
 - **TODO — race-pacer bookends.** The race pacer (archetype 12) should **not** bake in warmup/cooldown — those are run in-race / separately, not part of the pushed pacer. Warmup/cooldown are currently coach-decided per session with no pacer-specific exception.

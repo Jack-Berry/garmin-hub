@@ -5,11 +5,8 @@
 *.pem
 *.key
 
-# --- Database ---
-data/*.db
-data/*.db-journal
-data/*.db-wal
-data/*.db-shm
+# --- Database (live DB is Postgres; attic holds the pre-migration SQLite file) ---
+attic/*.db
 *.sqlite
 *.sqlite3
 
@@ -45,5 +42,5 @@ build/
 .vscode/
 .idea/
 
-# --- Temporary local test guide (delete when moving to Pi) ---
+# --- Temporary local test guide (delete when a hosted deployment lands) ---
 LOCAL_TEST_GUIDE.md

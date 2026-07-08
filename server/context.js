@@ -9,8 +9,19 @@ const { resolveGoalPaces } = require('./goalpaces');
 // builder's negative-split shape load, so the advisory copy can't drift.
 const GUARD_BOUNDS = require('../ingest/guard_bounds.json');
 
-// Profile lists are stored as JSON text; parse defensively.
-const parseList = (s) => { try { return s ? JSON.parse(s) : []; } catch { return []; } };
+// Profile lists are jsonb — pg hands back parsed arrays; normalise SQL NULL /
+// non-array junk to [].
+const parseList = (v) => (Array.isArray(v) ? v : []);
+
+// YYYY-MM-DD strings computed in JS and passed as query params — replaces
+// SQLite's date('now', ...) calls and keeps their exact semantics:
+// utcDate mirrors date('now') (UTC); localDate mirrors date('now','localtime').
+const utcDate = (offsetDays = 0) =>
+  new Date(Date.now() + offsetDays * 86400000).toISOString().slice(0, 10);
+const localDate = (offsetDays = 0) => {
+  const d = new Date(Date.now() + offsetDays * 86400000);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
 
 // Weekday label (matches the profile routine `day` values) for a YYYY-MM-DD.
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -108,21 +119,26 @@ const stepStr = (step) => {
   return parts.join(' ');
 };
 
-const parseSteps = (stepsJson) => {
-  if (!stepsJson) return null;
+// steps_json is jsonb — `segments` arrives as a parsed array (or null).
+const parseSteps = (segments) => {
+  if (!Array.isArray(segments)) return null;
   try {
-    const segments = JSON.parse(stepsJson);
+    // Runna-ical rows store steps as plain description lines (an array of
+    // strings) rather than Garmin's segment structure — pass those through.
+    if (segments.every((s) => typeof s === 'string')) {
+      return segments.length ? segments : null;
+    }
     const steps = segments.flatMap((s) => s.workoutSteps || []).map(stepStr);
     return steps.length ? steps : null;
   } catch {
-    return null;
+    return null; // unexpected segment shape must not take the caller down
   }
 };
 
-function buildContext(db) {
-  const profileRow = db.prepare(
+async function buildContext(db) {
+  const profileRow = await db.get(
     'SELECT shoes_json, races_json, injuries_json, routines_json, general_notes FROM profile WHERE id = 1'
-  ).get() || {};
+  ) || {};
   const profile = {
     shoes: parseList(profileRow.shoes_json)
       .filter((s) => s && s.name)
@@ -152,20 +168,28 @@ function buildContext(db) {
   };
 
   // --- Recent runs (last 14 days, runs only) ---
-  const runRows = db.prepare(
-    `SELECT activity_id, date(start_time_local) AS date, distance_m, duration_s, avg_hr,
+  const runRows = await db.all(
+    `SELECT activity_id, start_time_local::date AS date, distance_m, duration_s, avg_hr,
             hr_zone1_s, hr_zone2_s, hr_zone3_s, hr_zone4_s, hr_zone5_s,
             activity_training_load, training_effect_label, aerobic_training_effect,
             elevation_gain_m
      FROM activities
      WHERE activity_group = 'run' AND distance_m > 0
-       AND start_time_local >= date('now', '-14 days')
-     ORDER BY start_time_local DESC`
-  ).all();
+       AND start_time_local >= $1
+     ORDER BY start_time_local DESC`, [utcDate(-14)]);
 
-  const lapStmt = db.prepare(
-    'SELECT distance_m, duration_s, intensity_type FROM laps WHERE activity_id = ? ORDER BY lap_index'
-  );
+  // All laps for the whole run set in ONE query (the old per-run lookup was a
+  // fine prepared-statement loop under SQLite but an N+1 of awaits under pg).
+  const lapRows = runRows.length ? await db.all(
+    `SELECT activity_id, distance_m, duration_s, intensity_type
+     FROM laps WHERE activity_id = ANY($1::bigint[])
+     ORDER BY activity_id, lap_index`,
+    [runRows.map((r) => r.activity_id)]) : [];
+  const lapsByActivity = new Map();
+  for (const l of lapRows) {
+    if (!lapsByActivity.has(l.activity_id)) lapsByActivity.set(l.activity_id, []);
+    lapsByActivity.get(l.activity_id).push(l);
+  }
 
   const recent_runs = runRows.map((r) => {
     const km = +(r.distance_m / 1000).toFixed(2);
@@ -182,20 +206,19 @@ function buildContext(db) {
       elev_m: r.elevation_gain_m != null ? Math.round(r.elevation_gain_m) : null,
     };
     if (km >= 10) run.note = 'long run';
-    const wi = workIntervalSummary(lapStmt.all(r.activity_id));
+    const wi = workIntervalSummary(lapsByActivity.get(r.activity_id) || []);
     if (wi) run.work_intervals = wi;
     return run;
   });
 
   // --- Recovery (last 14 days): latest snapshot + 14d trend averages ---
-  const recRows = db.prepare(
+  const recRows = await db.all(
     `SELECT calendar_date, hrv_last_night, hrv_status,
             hrv_baseline_balanced_low, hrv_baseline_balanced_upper,
             resting_hr, sleep_score, readiness_score, readiness_level
      FROM recovery
-     WHERE calendar_date >= date('now', '-14 days')
-     ORDER BY calendar_date DESC`
-  ).all();
+     WHERE calendar_date >= $1
+     ORDER BY calendar_date DESC`, [utcDate(-14)]);
 
   const avg = (key) => {
     const vals = recRows.map((r) => r[key]).filter((v) => v != null);
@@ -226,14 +249,13 @@ function buildContext(db) {
   // is_race_auto / is_race_override come along raw so collapseRaceDuplicates can
   // fold the same-day race triplicate (Runna race + manual override + pacer)
   // into one entry — otherwise the coach sees and counts the race three times.
-  const planRows = db.prepare(
+  const planRows = await db.all(
     `SELECT calendar_date, title, estimated_distance_m,
             is_race_auto, is_race_override,
             COALESCE(is_race_override, is_race_auto) AS is_race, steps_json
      FROM planned_workouts
-     WHERE calendar_date >= date('now') AND calendar_date <= date('now', '+14 days')
-     ORDER BY calendar_date`
-  ).all();
+     WHERE calendar_date >= $1 AND calendar_date <= $2
+     ORDER BY calendar_date`, [utcDate(0), utcDate(14)]);
 
   const upcoming = collapseRaceDuplicates(planRows).map((p) => ({
     date: p.calendar_date,
@@ -245,14 +267,13 @@ function buildContext(db) {
   }));
 
   // --- Weekly mileage (runs only), newest first ---
-  const weekStart =
-    "date(start_time_local, '-' || ((strftime('%w', start_time_local) + 6) % 7) || ' days')";
-  const weekRows = db.prepare(
-    `SELECT ${weekStart} AS week_start, SUM(distance_m) AS m
+  // date_trunc('week') is ISO Monday-start, matching the old SQLite expression.
+  const weekRows = await db.all(
+    `SELECT to_char(date_trunc('week', start_time_local), 'YYYY-MM-DD') AS week_start,
+            SUM(distance_m) AS m
      FROM activities
      WHERE activity_group = 'run' AND distance_m > 0 AND start_time_local IS NOT NULL
-     GROUP BY week_start ORDER BY week_start DESC LIMIT 5`
-  ).all();
+     GROUP BY week_start ORDER BY week_start DESC LIMIT 5`);
   const weekly_km = weekRows.map((w) => +(w.m / 1000).toFixed(1));
 
   // --- Derived signals + flags (computed here, not left to the model) ---
@@ -290,19 +311,17 @@ function buildContext(db) {
   // --- Personal records (Garmin bests) + current race predictions ---
   // Compact strings so "goal: PB" is meaningful and the coach knows current
   // fitness. Time PRs as M:SS / H:MM:SS; Longest Run as km.
-  const prRows = db.prepare(
-    'SELECT label, value, value_kind FROM personal_records ORDER BY type_id'
-  ).all();
+  const prRows = await db.all(
+    'SELECT label, value, value_kind FROM personal_records ORDER BY type_id');
   const personal_records = prRows.map((r) =>
     r.value_kind === 'distance'
       ? `${r.label} ${+(r.value / 1000).toFixed(2)}km`
       : `${r.label} ${hms(r.value)}`
   );
 
-  const predRow = db.prepare(
+  const predRow = await db.get(
     `SELECT calendar_date, time_5k_s, time_10k_s, time_half_s, time_marathon_s
-     FROM race_predictions ORDER BY calendar_date DESC LIMIT 1`
-  ).get();
+     FROM race_predictions ORDER BY calendar_date DESC LIMIT 1`);
   const race_predictions = predRow
     ? {
         as_of: predRow.calendar_date,
@@ -332,22 +351,20 @@ function buildContext(db) {
 // run and/or planned workout on `date` with a `kind`: 'completed' (a run was
 // logged that day), 'planned' (only a plan, nothing run yet), or 'rest'. Reuses
 // the same lap/step helpers as buildContext so the detail stays consistent.
-function buildDayFocus(db, date) {
-  const actRow = db.prepare(
-    `SELECT activity_id, name, date(start_time_local) AS date, distance_m, duration_s,
+async function buildDayFocus(db, date) {
+  const actRow = await db.get(
+    `SELECT activity_id, name, start_time_local::date AS date, distance_m, duration_s,
             avg_hr, max_hr, hr_zone1_s, hr_zone2_s, hr_zone3_s, hr_zone4_s, hr_zone5_s,
             avg_cadence_spm, avg_power, aerobic_training_effect, anaerobic_training_effect,
             training_effect_label, activity_training_load, elevation_gain_m
      FROM activities
-     WHERE activity_group = 'run' AND distance_m > 0 AND date(start_time_local) = ?
-     ORDER BY start_time_local DESC LIMIT 1`
-  ).get(date);
+     WHERE activity_group = 'run' AND distance_m > 0 AND start_time_local::date = $1
+     ORDER BY start_time_local DESC LIMIT 1`, [date]);
 
-  const planRow = db.prepare(
+  const planRow = await db.get(
     `SELECT title, estimated_distance_m,
             COALESCE(is_race_override, is_race_auto) AS is_race, steps_json
-     FROM planned_workouts WHERE calendar_date = ? LIMIT 1`
-  ).get(date);
+     FROM planned_workouts WHERE calendar_date = $1 LIMIT 1`, [date]);
 
   const planned = planRow ? {
     title: planRow.title,
@@ -359,18 +376,17 @@ function buildDayFocus(db, date) {
   // Recurring profile activity scheduled for this weekday, with its render-time
   // state resolved the same way the WeekStrip does: done if a matching
   // activity_group was logged, else missed (past) / expected (today or future).
-  const profRow = db.prepare('SELECT routines_json FROM profile WHERE id = 1').get() || {};
+  const profRow = await db.get('SELECT routines_json FROM profile WHERE id = 1') || {};
   const routineRow = parseList(profRow.routines_json)
     .find((r) => r && r.activity && r.day === dowOf(date));
   let routine = null;
   if (routineRow) {
     const group = routineGroup(routineRow.activity);
-    const logged = db.prepare(
+    const logged = await db.get(
       `SELECT name, distance_m, duration_s, avg_hr FROM activities
-       WHERE activity_group = ? AND date(start_time_local) = ?
-       ORDER BY start_time_local DESC LIMIT 1`
-    ).get(group, date);
-    const today = db.prepare("SELECT date('now', 'localtime') AS d").get().d;
+       WHERE activity_group = $1 AND start_time_local::date = $2
+       ORDER BY start_time_local DESC LIMIT 1`, [group, date]);
+    const today = localDate();
     routine = {
       activity: routineRow.activity,
       intensity: routineRow.intensity ?? null,
@@ -387,9 +403,9 @@ function buildDayFocus(db, date) {
     const km = +(actRow.distance_m / 1000).toFixed(2);
     const zoneMin = [actRow.hr_zone1_s, actRow.hr_zone2_s, actRow.hr_zone3_s, actRow.hr_zone4_s, actRow.hr_zone5_s]
       .map((s) => Math.round((s || 0) / 60));
-    const laps = db.prepare(
-      'SELECT distance_m, duration_s, intensity_type FROM laps WHERE activity_id = ? ORDER BY lap_index'
-    ).all(actRow.activity_id);
+    const laps = await db.all(
+      'SELECT distance_m, duration_s, intensity_type FROM laps WHERE activity_id = $1 ORDER BY lap_index',
+      [actRow.activity_id]);
     const run = {
       date: actRow.date,
       name: actRow.name,
@@ -428,8 +444,8 @@ const DUMP_PREAMBLE =
 
 // Render the assembled context as a human/LLM-friendly text block (not JSON) for
 // pasting into an external chat. Same content the coach gets, lightly prettified.
-function renderContextDump(db) {
-  const c = buildContext(db);
+async function renderContextDump(db) {
+  const c = await buildContext(db);
   const out = [DUMP_PREAMBLE, ''];
   const section = (title) => out.push('', `=== ${title} ===`);
 
@@ -510,11 +526,11 @@ function renderContextDump(db) {
 // `recentPushes` is the server's in-memory list of sessions pushed to Garmin
 // this server session — they won't appear in `upcoming` until the next ingest,
 // so they're surfaced separately to stop the coach double-booking them.
-function buildPlanningContext(db, recentPushes = []) {
-  const context = buildContext(db);
+async function buildPlanningContext(db, recentPushes = []) {
+  const context = await buildContext(db);
 
-  const row = db.prepare('SELECT lt_speed_mps, races_json FROM profile WHERE id = 1').get() || {};
-  const records = db.prepare('SELECT label, value, value_kind FROM personal_records').all();
+  const row = await db.get('SELECT lt_speed_mps, races_json FROM profile WHERE id = 1') || {};
+  const records = await db.all('SELECT label, value, value_kind FROM personal_records');
   const races = parseList(row.races_json);
   const lt = row.lt_speed_mps;
   const lt_ready = !!lt;
@@ -585,4 +601,32 @@ function buildPlanningContext(db, recentPushes = []) {
   return context;
 }
 
-module.exports = { buildContext, buildPlanningContext, buildDayFocus, renderContextDump };
+// Compact scheduled-workout summary for a date range — powers the coach's
+// on-demand get_scheduled_workouts tool (coach.js). Reads planned_workouts
+// (the Runna calendar sync) and returns one line per workout plus its parsed
+// steps, using the same step formatting as `upcoming`. Same-day race
+// duplicates are collapsed so a race is listed once. Clearly labelled as
+// upcoming/not-yet-completed so the model never mistakes it for history.
+async function scheduledSummary(db, from, to) {
+  const rows = await db.all(
+    `SELECT calendar_date, title, estimated_distance_m,
+            is_race_auto, is_race_override,
+            COALESCE(is_race_override, is_race_auto) AS is_race, steps_json
+     FROM planned_workouts
+     WHERE calendar_date >= $1 AND calendar_date <= $2
+     ORDER BY calendar_date`, [from, to]);
+  const items = collapseRaceDuplicates(rows);
+  if (!items.length) return `No scheduled workouts between ${from} and ${to}.`;
+
+  const lines = [`Scheduled workouts ${from} to ${to} (UPCOMING — not yet completed):`];
+  for (const p of items) {
+    const km = p.estimated_distance_m ? ` — ${+(p.estimated_distance_m / 1000).toFixed(2)}km` : '';
+    const race = p.is_race ? '  [RACE]' : '';
+    lines.push(`${p.calendar_date} — ${p.title || 'workout'}${km}${race}`);
+    const steps = parseSteps(p.steps_json);
+    if (steps && steps.length) lines.push(`    steps: ${steps.join(' | ')}`);
+  }
+  return lines.join('\n');
+}
+
+module.exports = { buildContext, buildPlanningContext, buildDayFocus, renderContextDump, scheduledSummary, localDate };

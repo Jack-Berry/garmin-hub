@@ -1,31 +1,34 @@
 #!/usr/bin/env python3.13
-"""Initialise data/garmin.db from schema.sql. Idempotent — safe to re-run."""
+"""(Re-)apply the garminhub Postgres schema from db/schema.pg.sql. Idempotent.
 
-import sqlite3
+DDL needs an admin/owner connection — the app's rw role is deliberately
+DML-only — so this connects via PG_ADMIN_URL (default: the local unix socket,
+where the OS user is the Homebrew superuser). First-time setup (roles +
+database + schema) is db/setup_local.sh; this script only re-applies the
+schema to an existing database.
+
+The SQLite-era migrate_*.py scripts are retired to attic/ — already
+applied, their effects baked into db/schema.pg.sql.
+"""
+
+import os
 from pathlib import Path
 
+import psycopg
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SCHEMA = REPO_ROOT / "ingest" / "schema.sql"
-DB_PATH = REPO_ROOT / "data" / "garmin.db"
+SCHEMA = REPO_ROOT / "db" / "schema.pg.sql"
+ADMIN_DSN = os.getenv("PG_ADMIN_URL", "dbname=garminhub")
 
 
 def main():
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        conn.execute("PRAGMA foreign_keys = ON;")
-        conn.executescript(SCHEMA.read_text())
-        conn.commit()
-        tables = [
-            r[0]
-            for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;"
-            )
-        ]
-        print(f"Initialised {DB_PATH}")
-        print("Tables:", ", ".join(tables))
-    finally:
-        conn.close()
+    with psycopg.connect(ADMIN_DSN) as conn:  # commits on clean exit
+        conn.execute(SCHEMA.read_text())
+        tables = [r[0] for r in conn.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = 'public' ORDER BY table_name")]
+    print(f"Applied {SCHEMA.name}")
+    print("Tables:", ", ".join(tables))
 
 
 if __name__ == "__main__":

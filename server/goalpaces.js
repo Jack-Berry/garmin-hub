@@ -186,10 +186,11 @@ module.exports = { resolveGoalPaces, goalForDistance, DISTANCES };
 // resolved goal. Preview only; nothing consumes this module yet.
 // ===========================================================================
 if (require.main === module) {
-  const db = require('./db');
-  const prof = db.prepare('SELECT races_json FROM profile WHERE id = 1').get();
-  const races = JSON.parse((prof && prof.races_json) || '[]');
-  const records = db.prepare('SELECT label, value, value_kind FROM personal_records').all();
+  (async () => {
+  const { db } = require('./db');
+  const prof = await db.get('SELECT races_json FROM profile WHERE id = 1');
+  const races = Array.isArray(prof?.races_json) ? prof.races_json : [];
+  const records = await db.all('SELECT label, value, value_kind FROM personal_records');
 
   const resolved = resolveGoalPaces(races, records);
   const pad = (s, n) => String(s).padEnd(n);
@@ -220,4 +221,6 @@ if (require.main === module) {
     );
   }
   console.log('');
+  await db.end();
+  })().catch((e) => { console.error(e.message); process.exit(1); });
 }

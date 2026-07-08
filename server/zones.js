@@ -108,8 +108,9 @@ module.exports = { computeZones, RATIOS };
 // current lt_speed_mps. Preview only; nothing consumes this module yet.
 // ===========================================================================
 if (require.main === module) {
-  const db = require('./db');
-  const row = db.prepare('SELECT lt_speed_mps FROM profile WHERE id = 1').get();
+  (async () => {
+  const { db } = require('./db');
+  const row = await db.get('SELECT lt_speed_mps FROM profile WHERE id = 1');
   const lt = row && row.lt_speed_mps;
   if (!lt) {
     console.error('No lt_speed_mps on profile — run ingest first.');
@@ -130,4 +131,6 @@ if (require.main === module) {
     );
   }
   console.log('');
+  await db.end();
+  })().catch((e) => { console.error(e.message); process.exit(1); });
 }

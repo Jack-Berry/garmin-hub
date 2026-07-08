@@ -3,15 +3,21 @@
 //   - brief        : cheap 2-3 sentence daily glance (Sonnet)
 //   - detailed     : full multi-section daily report, on demand (Opus)
 //   - day insight  : on-demand per-day run report / planned tips (Sonnet)
-const Anthropic = require('@anthropic-ai/sdk');
-const { buildContext, buildPlanningContext, buildDayFocus } = require('./context');
+const Anthropic = require("@anthropic-ai/sdk");
+const {
+  buildContext,
+  buildPlanningContext,
+  buildDayFocus,
+  scheduledSummary,
+  localDate,
+} = require("./context");
 
 // Opus for the deep, on-demand detailed report only — depth is worth the cost
 // when explicitly requested.
-const MODEL = 'claude-opus-4-8';
+const MODEL = "claude-opus-4-8";
 // Sonnet for everything frequent/interactive: chat, the daily brief, and the
 // per-day insights. Cheaper and fast enough for a glance.
-const CHAT_MODEL = 'claude-sonnet-4-6';
+const CHAT_MODEL = "claude-sonnet-4-6";
 
 // Static framing for the chat coach — the interactive sibling of the daily
 // insight. Same analyst-not-generator role; conversational rather than essay.
@@ -20,6 +26,8 @@ const CHAT_SYSTEM = `You are this athlete's running coach and analyst, answering
 You have their full recent training context injected below as JSON: recent runs (including interval work-reps), recovery (HRV, resting HR, sleep, readiness), upcoming planned workouts, personal records, current Garmin race predictions, derived signals/flags, and their profile (shoes, goals, injuries/constraints). Use it — answer specifically with real numbers (paces, HR, HRV, mileage, dates) rather than generic advice. The athlete should never have to re-explain their training.
 
 You do NOT prescribe full workouts or write training plans — they use Runna for that. But you CAN answer practical questions: which shoes for a session, whether a goal is realistic given current fitness, why a run felt hard, what the recovery data suggests, how recent paces compare to goal paces.
+
+The injected context only covers roughly the next 14 days of planned workouts. When the athlete asks about scheduled sessions, races or their plan further out than that, call the get_scheduled_workouts tool (up to 12 weeks ahead) to read the real sessions rather than saying you can't see them.
 
 Be concise and conversational — this is a chat, not an essay. Short, direct answers. No headers or long bullet lists unless genuinely useful.`;
 
@@ -34,8 +42,10 @@ The builder FLATTENS your blocks in order and runs each one exactly once. There 
 
 ## What planning mode is, and is not
 
+The injected \`upcoming\` list covers roughly the next 14 days. If you need to see scheduled sessions or a race further out (a Runna block extending past that window), call the get_scheduled_workouts tool (up to 12 weeks ahead) rather than guessing.
+
 In normal chat you defer all workout planning to Runna. In planning mode that boundary shifts, but only partway:
-- You DO compose and push INDIVIDUAL sessions (a tempo, an interval set, a long run, a race pacer) as concrete, ready-to-run workouts.
+- You DO compose and push INDIVIDUAL sessions (a tempo, an interval set, a long run, a race pacer) as concrete, ready-to-run workouts. You may also create short term bridges (e.g. a maintenance week) if the athlete wants a gap filled, but you do NOT build multi-week blocks or periodised plans.
 - You do NOT build periodised multi-week training blocks, and you do NOT model cumulative load across a block. That remains Runna's job. If the athlete wants a gap filled (e.g. a maintenance week away from Runna), propose a sensible SET of individual sessions, but frame them as standalone sessions, not a load-managed plan.
 
 ## Assess before you propose (this governs the proposal)
@@ -222,20 +232,107 @@ const getClient = () => (client ||= new Anthropic());
 
 // Join the text blocks of a messages response into one trimmed string.
 const extractText = (response) =>
-  response.content.filter((b) => b.type === 'text').map((b) => b.text).join('').trim();
+  response.content
+    .filter((b) => b.type === "text")
+    .map((b) => b.text)
+    .join("")
+    .trim();
+
+// --- On-demand scheduled-workout tool -----------------------------------
+// The injected context only carries the next ~14 days of planned workouts, to
+// keep it compact. This tool lets the coach reach further into the Runna plan
+// (up to 12 weeks) when the conversation calls for it, instead of widening the
+// static context for every call. Backed by planned_workouts (see context.js).
+const SCHEDULED_TOOL = {
+  name: "get_scheduled_workouts",
+  description:
+    "Fetch the athlete's FUTURE scheduled workouts — the sessions Runna has synced to " +
+    "their Garmin calendar, up to 12 weeks ahead, with full step and pace detail. These " +
+    "are upcoming and NOT yet completed. The injected context already covers roughly the " +
+    "next 14 days; call this when the conversation turns to plans, races or sessions " +
+    'beyond that (e.g. "what does week 8 look like", "when\'s my next long run", ' +
+    '"what\'s my plan next month"). Returns one compact line per workout plus its steps.',
+  input_schema: {
+    type: "object",
+    properties: {
+      start_date: {
+        type: "string",
+        description:
+          "Inclusive start date, YYYY-MM-DD. Clamped to today if earlier.",
+      },
+      end_date: {
+        type: "string",
+        description:
+          "Inclusive end date, YYYY-MM-DD. Clamped to at most 12 weeks from today.",
+      },
+    },
+    required: ["start_date", "end_date"],
+  },
+};
+const MAX_TOOL_ROUNDS = 4;
+
+// Execute get_scheduled_workouts: clamp the requested range to [today, today+12
+// weeks] and return a compact text summary from planned_workouts.
+async function runScheduledTool(db, input) {
+  const today = localDate();
+  const cap = localDate(84);
+  let from = (input && input.start_date) || today;
+  let to = (input && input.end_date) || cap;
+  if (from < today) from = today;
+  if (to > cap) to = cap;
+  if (to < from) return `No scheduled workouts between ${from} and ${to}.`;
+  return scheduledSummary(db, from, to);
+}
+
+// Run a messages.create call, resolving any get_scheduled_workouts tool calls in
+// a round-trip loop, and return the final (non-tool_use) response. `convo` is the
+// working message array — mutated with the internal tool round-trips, which stay
+// server-side (the client only ever sees the final reply text).
+async function createResolvingTools(db, params, convo) {
+  for (let i = 0; i < MAX_TOOL_ROUNDS; i++) {
+    const response = await getClient().messages.create({
+      ...params,
+      tools: [SCHEDULED_TOOL],
+      messages: convo,
+    });
+    if (response.stop_reason !== "tool_use") return response;
+    convo.push({ role: "assistant", content: response.content });
+    convo.push({
+      role: "user",
+      // The tool executor is async now — resolve every tool_use block before
+      // the results turn is pushed (a pending Promise must never be sent).
+      content: await Promise.all(
+        response.content
+          .filter((b) => b.type === "tool_use")
+          .map(async (b) => ({
+            type: "tool_result",
+            tool_use_id: b.id,
+            content:
+              b.name === "get_scheduled_workouts"
+                ? await runScheduledTool(db, b.input)
+                : `Unknown tool ${b.name}.`,
+          })),
+      ),
+    });
+  }
+  // Round cap hit — one final call with no tools so it must answer in prose.
+  return getClient().messages.create({ ...params, messages: convo });
+}
 
 // Glance brief (Sonnet). Returns { text, context, model } so the caller can
 // persist it with the context's date range (same note shape as before).
 async function generateBrief(db) {
-  const context = buildContext(db);
+  const context = await buildContext(db);
   const response = await getClient().messages.create({
     model: CHAT_MODEL,
     max_tokens: 300,
-    system: [{ type: 'text', text: BRIEF_SYSTEM }],
-    messages: [{
-      role: 'user',
-      content: `Today's training context as JSON. Write today's check-in.\n\n${JSON.stringify(context)}`,
-    }],
+    system: [{ type: "text", text: BRIEF_SYSTEM }],
+    messages: [
+      {
+        role: "user",
+        content: `Today's training context as JSON. Write today's check-in.\n\n${JSON.stringify(context)}`,
+      },
+    ],
   });
   return { text: extractText(response), context, model: CHAT_MODEL };
 }
@@ -243,15 +340,23 @@ async function generateBrief(db) {
 // Detailed multi-section report (Opus), generated on demand. Stateless — the
 // caller returns it directly without persisting.
 async function generateDetailedReport(db) {
-  const context = buildContext(db);
+  const context = await buildContext(db);
   const response = await getClient().messages.create({
     model: MODEL,
     max_tokens: 1024,
-    system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
-    messages: [{
-      role: 'user',
-      content: `Here is today's training context as JSON. Write today's detailed coaching report.\n\n${JSON.stringify(context)}`,
-    }],
+    system: [
+      {
+        type: "text",
+        text: SYSTEM_PROMPT,
+        cache_control: { type: "ephemeral" },
+      },
+    ],
+    messages: [
+      {
+        role: "user",
+        content: `Here is today's training context as JSON. Write today's detailed coaching report.\n\n${JSON.stringify(context)}`,
+      },
+    ],
   });
   return { text: extractText(response), model: MODEL };
 }
@@ -260,43 +365,53 @@ async function generateDetailedReport(db) {
 // run gets a "how it went" analysis, a planned-only day gets execution tips, and
 // a rest day returns a static line with no model call. Returns { text, kind, model }.
 async function generateDayInsight(db, date) {
-  const focus = buildDayFocus(db, date);
-  if (focus.kind === 'rest') {
-    return { text: 'Rest day. Nothing planned and no run logged.', kind: 'rest', model: null };
-  }
-  // A missed recurring session needs no model call — a static line is enough.
-  if (focus.kind === 'routine' && focus.routine.state === 'missed') {
+  const focus = await buildDayFocus(db, date);
+  if (focus.kind === "rest") {
     return {
-      text: `Looks like you skipped ${focus.routine.activity} today. No matching session was logged.`,
-      kind: 'routine', model: null,
+      text: "Rest day. Nothing planned and no run logged.",
+      kind: "rest",
+      model: null,
     };
   }
-  const context = buildContext(db);
-  const isRoutine = focus.kind === 'routine';
-  const system = isRoutine ? DAY_ROUTINE_SYSTEM
-    : focus.kind === 'completed' ? DAY_COMPLETED_SYSTEM : DAY_PLANNED_SYSTEM;
+  // A missed recurring session needs no model call — a static line is enough.
+  if (focus.kind === "routine" && focus.routine.state === "missed") {
+    return {
+      text: `Looks like you skipped ${focus.routine.activity} today. No matching session was logged.`,
+      kind: "routine",
+      model: null,
+    };
+  }
+  const context = await buildContext(db);
+  const isRoutine = focus.kind === "routine";
+  const system = isRoutine
+    ? DAY_ROUTINE_SYSTEM
+    : focus.kind === "completed"
+      ? DAY_COMPLETED_SYSTEM
+      : DAY_PLANNED_SYSTEM;
   const verb = isRoutine
-    ? (focus.routine.state === 'done'
-        ? `Comment on today's completed ${focus.routine.activity} session and how it fits the running week.`
-        : `Give tips for today's ${focus.routine.activity} session (intensity ${focus.routine.intensity ?? '?'}/10) and how to balance it with running.`)
-    : focus.kind === 'completed'
-      ? 'Analyse how this session went.'
-      : 'Give tips for executing this planned workout.';
+    ? focus.routine.state === "done"
+      ? `Comment on today's completed ${focus.routine.activity} session and how it fits the running week.`
+      : `Give tips for today's ${focus.routine.activity} session (intensity ${focus.routine.intensity ?? "?"}/10) and how to balance it with running.`
+    : focus.kind === "completed"
+      ? "Analyse how this session went."
+      : "Give tips for executing this planned workout.";
   const response = await getClient().messages.create({
     model: CHAT_MODEL,
     max_tokens: 600,
     system: [
-      { type: 'text', text: system },
+      { type: "text", text: system },
       {
-        type: 'text',
+        type: "text",
         text: `Backdrop training context as JSON:\n\n${JSON.stringify(context)}`,
-        cache_control: { type: 'ephemeral' },
+        cache_control: { type: "ephemeral" },
       },
     ],
-    messages: [{
-      role: 'user',
-      content: `${verb} Focus day: ${date}.\n\nFocus as JSON:\n${JSON.stringify(focus)}`,
-    }],
+    messages: [
+      {
+        role: "user",
+        content: `${verb} Focus day: ${date}.\n\nFocus as JSON:\n${JSON.stringify(focus)}`,
+      },
+    ],
   });
   return { text: extractText(response), kind: focus.kind, model: CHAT_MODEL };
 }
@@ -307,20 +422,23 @@ async function generateDayInsight(db, date) {
 // injected as a cacheable system prompt on every call so every reply is
 // grounded in current training data. Returns the assistant reply text.
 async function chatReply(db, messages) {
-  const context = buildContext(db);
-  const response = await getClient().messages.create({
-    model: CHAT_MODEL,
-    max_tokens: 800,
-    system: [
-      { type: 'text', text: CHAT_SYSTEM },
-      {
-        type: 'text',
-        text: `Current training context as JSON:\n\n${JSON.stringify(context)}`,
-        cache_control: { type: 'ephemeral' },
-      },
-    ],
-    messages,
-  });
+  const context = await buildContext(db);
+  const response = await createResolvingTools(
+    db,
+    {
+      model: CHAT_MODEL,
+      max_tokens: 800,
+      system: [
+        { type: "text", text: CHAT_SYSTEM },
+        {
+          type: "text",
+          text: `Current training context as JSON:\n\n${JSON.stringify(context)}`,
+          cache_control: { type: "ephemeral" },
+        },
+      ],
+    },
+    [...messages],
+  );
   return extractText(response);
 }
 
@@ -333,7 +451,9 @@ function extractSpec(text) {
     try {
       const spec = JSON.parse(m[1].trim());
       if (Array.isArray(spec?.blocks) && spec.blocks.length) return spec;
-    } catch { /* not this fence — keep scanning */ }
+    } catch {
+      /* not this fence — keep scanning */
+    }
   }
   return null;
 }
@@ -346,8 +466,12 @@ const specAttempted = (text) => /```|"blocks"\s*:/.test(text);
 // The sentinel only counts on its own final line (mentioning it mid-prose,
 // e.g. while explaining the flow, must not end the plan).
 const planComplete = (text) => {
-  const lines = text.trim().split('\n').map((l) => l.trim()).filter(Boolean);
-  return lines.length > 0 && lines[lines.length - 1] === '[[PLAN_COMPLETE]]';
+  const lines = text
+    .trim()
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  return lines.length > 0 && lines[lines.length - 1] === "[[PLAN_COMPLETE]]";
 };
 
 // Planning-mode turn (Opus). `messages` is the full conversation so far
@@ -358,23 +482,24 @@ const planComplete = (text) => {
 // /api/pacer/preview and /api/pacer/push. `recentPushes` feeds
 // planning.pushed_recently (see buildPlanningContext).
 async function planReply(db, messages, recentPushes = []) {
-  const context = buildPlanningContext(db, recentPushes);
-  const call = (msgs) =>
-    getClient().messages.create({
-      model: MODEL,
-      // Room for a fully written-out 15+ block spec plus assessment prose —
-      // a truncated spec loses its closing fence and extracts as nothing.
-      max_tokens: 4000,
-      system: [
-        { type: 'text', text: PLANNING_SYSTEM },
-        {
-          type: 'text',
-          text: `Current planning context as JSON:\n\n${JSON.stringify(context)}`,
-          cache_control: { type: 'ephemeral' },
-        },
-      ],
-      messages: msgs,
-    });
+  const context = await buildPlanningContext(db, recentPushes);
+  const params = {
+    model: MODEL,
+    // Room for a fully written-out 15+ block spec plus assessment prose —
+    // a truncated spec loses its closing fence and extracts as nothing.
+    max_tokens: 4000,
+    system: [
+      { type: "text", text: PLANNING_SYSTEM },
+      {
+        type: "text",
+        text: `Current planning context as JSON:\n\n${JSON.stringify(context)}`,
+        cache_control: { type: "ephemeral" },
+      },
+    ],
+  };
+  // Fresh convo copy per call so the internal tool round-trips don't leak
+  // between the initial turn and the repair retry.
+  const call = (msgs) => createResolvingTools(db, params, [...msgs]);
 
   let response = await call(messages);
   let raw = extractText(response);
@@ -383,33 +508,42 @@ async function planReply(db, messages, recentPushes = []) {
   // Repair loop (one retry): the turn tried to present a spec but none could
   // be extracted — truncation or invalid JSON. Tell the coach exactly what
   // went wrong and let it re-emit, instead of silently showing spec-less prose.
-  if (!spec && (response.stop_reason === 'max_tokens' || specAttempted(raw))) {
-    const reason = response.stop_reason === 'max_tokens'
-      ? 'it was cut off before the closing fence — keep the prose brief'
-      : 'it is not strictly valid JSON with a non-empty "blocks" array (no comments, no trailing commas, one fenced ```json block)';
+  if (!spec && (response.stop_reason === "max_tokens" || specAttempted(raw))) {
+    const reason =
+      response.stop_reason === "max_tokens"
+        ? "it was cut off before the closing fence — keep the prose brief"
+        : 'it is not strictly valid JSON with a non-empty "blocks" array (no comments, no trailing commas, one fenced ```json block)';
     response = await call([
       ...messages,
-      { role: 'assistant', content: raw },
+      { role: "assistant", content: raw },
       {
-        role: 'user',
+        role: "user",
         content: `[App notice: your last reply appeared to present a session, but no valid spec could be extracted — ${reason}. Re-emit the complete session as a single fenced json spec.]`,
       },
     ]);
     raw = extractText(response);
     spec = extractSpec(raw);
   }
-  const specError = !spec &&
-    (response.stop_reason === 'max_tokens' || specAttempted(raw));
+  const specError =
+    !spec && (response.stop_reason === "max_tokens" || specAttempted(raw));
 
   const done = planComplete(raw);
   // Strip ALL fences and every sentinel occurrence from the visible reply —
   // a second or mislabelled fence must never render raw in the chat.
   let reply = raw
-    .replace(/```\w*\s*[\s\S]*?```/g, '')
-    .replace(/\[\[PLAN_COMPLETE\]\]/g, '')
+    .replace(/```\w*\s*[\s\S]*?```/g, "")
+    .replace(/\[\[PLAN_COMPLETE\]\]/g, "")
     .trim();
-  if (!reply) reply = done ? 'Plan complete.' : 'Here is the session for your approval.';
+  if (!reply)
+    reply = done ? "Plan complete." : "Here is the session for your approval.";
   return { reply, spec, done, specError };
 }
 
-module.exports = { generateBrief, generateDetailedReport, generateDayInsight, chatReply, planReply, MODEL };
+module.exports = {
+  generateBrief,
+  generateDetailedReport,
+  generateDayInsight,
+  chatReply,
+  planReply,
+  MODEL,
+};

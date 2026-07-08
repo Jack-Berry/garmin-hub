@@ -1,7 +1,7 @@
 {
   "name": "garmin-hub-server",
   "version": "1.0.0",
-  "description": "Read-only Express API over the Garmin Hub SQLite DB",
+  "description": "Express API over the Garmin Hub Postgres DB",
   "private": true,
   "type": "commonjs",
   "main": "server.js",
@@ -10,8 +10,8 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.69.0",
-    "better-sqlite3": "^11.3.0",
     "dotenv": "^16.4.5",
-    "express": "^4.21.0"
+    "express": "^4.21.0",
+    "pg": "^8.22.0"
   }
 }
