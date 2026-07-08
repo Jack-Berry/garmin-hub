@@ -9,6 +9,7 @@
   "rest_dist_max_m": 1000.0,
   "segment_min_m": 100.0,
   "max_steps": 150,
+  "repeat_count_max": 30,
   "negative_split": {
     "start_offset_s": 4.0,
     "end_offset_s": -4.0,

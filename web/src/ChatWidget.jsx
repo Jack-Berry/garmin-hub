@@ -3,6 +3,7 @@ import { api } from './api';
 import { Icon, Markdown } from './ui';
 import { shortDate } from './format';
 import { PacerPreview } from './PacerPreview';
+import { PlanReview } from './PlanReview';
 
 // Floating chat coach — a discreet bottom-right widget that answers training
 // questions using the same context engine as the daily insight. Conversation
@@ -10,13 +11,17 @@ import { PacerPreview } from './PacerPreview';
 // panel is cleared. The client sends the full message array each turn; the
 // server is stateless.
 //
-// Two modes share the panel:
+// Three modes share the panel:
 //   'chat'     — the Sonnet analyst (default, unchanged).
 //   'planning' — routes turns to /api/coach/plan. When a turn returns a spec,
 //                we preview it inline (api.pacerPreview) and offer a per-turn
 //                "Push to Garmin" button (api.pacerPush) — the pacer flow lifted
 //                into the conversation. The panel gets an accent border while
 //                active; it auto-exits when the coach signals `done`.
+//   'composer' — Stage 9b: routes turns to /api/coach/compose. A returned plan
+//                (already guard-validated per session, server-side) renders as
+//                a week-by-week PlanReview with a Save button (api.savePlan —
+//                a DB write only, no Garmin). Wider panel while active.
 // Assistant messages may carry { spec, preview, previewError, pushed, specError,
 // duplicate, apiContent } for the inline preview attached to that turn.
 // `apiContent` is what goes to the API instead of `content`: turns that carried
@@ -37,11 +42,12 @@ const toPayload = (msgs) =>
 
 export default function ChatWidget() {
   const [open, setOpen] = useState(false);
-  const [mode, setMode] = useState('chat'); // 'chat' | 'planning'
-  const [messages, setMessages] = useState([]); // [{role, content, spec?, preview?, previewError?, pushed?}]
+  const [mode, setMode] = useState('chat'); // 'chat' | 'planning' | 'composer'
+  const [messages, setMessages] = useState([]); // [{role, content, spec?, preview?, previewError?, pushed?, plan?, savedPlan?}]
   const [input, setInput] = useState('');
   const [pending, setPending] = useState(false);
   const [pushingIdx, setPushingIdx] = useState(null);
+  const [savingIdx, setSavingIdx] = useState(null);
   const [error, setError] = useState(null);
   // Copy-context state: 'idle' | 'copying' | 'copied' | 'error'. `fallbackText`
   // holds the dump when the clipboard API is unavailable, so it can be shown in
@@ -52,6 +58,7 @@ export default function ChatWidget() {
   const inputRef = useRef(null);
 
   const planning = mode === 'planning';
+  const composer = mode === 'composer';
 
   // Auto-grow the input with its content: reset to the natural (rows=3) height,
   // then fit scrollHeight. The max-h class caps it around 8 rows, after which
@@ -93,21 +100,13 @@ export default function ChatWidget() {
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages, pending, open]);
 
-  // A chat and a planning thread can't share history (different system prompts),
-  // so entering planning starts fresh — same spirit as the accepted "refresh
-  // wipes the conversation" limitation.
-  const startPlanning = () => {
+  // Chat / planning / composer threads can't share history (different system
+  // prompts), so entering a mode starts fresh — same spirit as the accepted
+  // "refresh wipes the conversation" limitation. Exiting manually also clears;
+  // nothing half-commits (pushes and the plan save are atomic and confirmed).
+  const enterMode = (m) => {
     if (pending) return;
-    setMode('planning');
-    setMessages([]);
-    setError(null);
-  };
-
-  // Manual bail: back to the analyst with a clean thread. Nothing half-commits —
-  // each push was atomic and separately confirmed.
-  const exitPlanning = () => {
-    if (pending) return;
-    setMode('chat');
+    setMode(m);
     setMessages([]);
     setError(null);
   };
@@ -179,6 +178,81 @@ export default function ChatWidget() {
     }
   };
 
+  // Run one composer turn (Stage 9b). The server already guard-validated every
+  // session of a returned plan; if any are invalid, relay the errors back to
+  // the coach ONCE (same pattern as the planning guard-failure relay) so it
+  // re-emits a corrected plan without the athlete copying error text around.
+  const runComposeTurn = async (nextMessages, canRelayInvalid = true) => {
+    setError(null);
+    setPending(true);
+    try {
+      const { reply, plan, planError } = await api.compose(toPayload(nextMessages));
+      let assistant = { role: 'assistant', content: reply };
+      let invalidNote = null;
+      if (plan) {
+        const invalid = plan.sessions.filter((s) => !s.valid);
+        const first = plan.sessions[0]?.date, last = plan.sessions[plan.sessions.length - 1]?.date;
+        assistant.plan = plan;
+        // Marker for the model's history (fences are stripped server-side).
+        assistant.apiContent =
+          `${reply}\n\n[plan emitted: ${plan.sessions.length} sessions, ${first} to ${last}${invalid.length ? `, ${invalid.length} invalid` : ''}]`;
+        if (invalid.length) {
+          invalidNote = {
+            role: 'user',
+            system: true,
+            content: `[Plan validation failed for ${invalid.length} session(s): ${invalid
+              .map((s) => `"${s.name || s.date}" — ${s.error}`)
+              .join('; ')}. Fix exactly what each error names and re-emit the complete corrected plan.]`,
+          };
+        }
+      } else if (planError) {
+        assistant = { ...assistant, planError: true };
+      }
+      const withReply = invalidNote
+        ? [...nextMessages, assistant, invalidNote]
+        : [...nextMessages, assistant];
+      setMessages(withReply);
+      if (invalidNote && canRelayInvalid) await runComposeTurn(withReply, false);
+    } catch (e) {
+      setError(e.message || 'Something went wrong');
+    } finally {
+      setPending(false);
+    }
+  };
+
+  // Save the plan attached to message `i` — a DB write only (no Garmin; that's
+  // a later stage). On success, stamp the turn, note it for the transcript, and
+  // drop back to the analyst (the plan now shows up via the normal dashboard).
+  const savePlan = async (i) => {
+    const msg = messages[i];
+    if (!composer || !msg?.plan || savingIdx != null || pending) return;
+    setSavingIdx(i);
+    setError(null);
+    try {
+      // Review-only fields stay client-side; the server re-validates the specs.
+      // Plan-level metadata (name/goal/summary/weeks) rides along for the
+      // plans parent row (Stage 9c).
+      const sessions = msg.plan.sessions.map(({ valid, error, preview, ...s }) => s);
+      const res = await api.savePlan({
+        name: msg.plan.name, goal_race: msg.plan.goal_race,
+        summary: msg.plan.summary, weeks: msg.plan.weeks, sessions,
+      });
+      setMessages([
+        ...messages.map((m, j) => (j === i ? { ...m, savedPlan: res } : m)),
+        {
+          role: 'user',
+          system: true,
+          content: `[Plan saved: ${res.sessions} sessions, ${res.from} to ${res.to}. It now drives the dashboard and coach; push it to Garmin from the dashboard's "Activate plan" card.]`,
+        },
+      ]);
+      setMode('chat');
+    } catch (e) {
+      setError(e.message || 'Save failed');
+    } finally {
+      setSavingIdx(null);
+    }
+  };
+
   const send = async () => {
     const text = input.trim();
     if (!text || pending) return;
@@ -187,6 +261,10 @@ export default function ChatWidget() {
     setInput('');
     if (planning) {
       await runPlanTurn(next);
+      return;
+    }
+    if (composer) {
+      await runComposeTurn(next);
       return;
     }
     setError(null);
@@ -263,18 +341,20 @@ export default function ChatWidget() {
 
   return (
     <div
-      className={`fixed bottom-5 right-5 z-40 flex h-[500px] w-[360px] max-w-[calc(100vw-2.5rem)] flex-col overflow-hidden rounded-2xl border bg-surface-1 shadow-xl ${
-        planning ? 'border-acc' : 'border-line'
-      }`}
+      className={`fixed bottom-5 right-5 z-40 flex flex-col overflow-hidden rounded-2xl border bg-surface-1 shadow-xl ${
+        composer
+          ? 'h-[620px] w-[560px]'
+          : 'h-[500px] w-[360px]'
+      } max-w-[calc(100vw-2.5rem)] ${planning || composer ? 'border-acc' : 'border-line'}`}
     >
       <header className="flex items-center justify-between border-b border-line px-4 py-3">
         <div>
           <h2 className="font-display text-[0.9375rem] font-bold uppercase tracking-[0.1em] text-ink">
             Coach
           </h2>
-          {planning ? (
+          {planning || composer ? (
             <p className="mt-0.5 font-body text-nano uppercase tracking-[0.18em] text-acc">
-              Planning mode
+              {planning ? 'Planning mode' : 'Plan composer'}
             </p>
           ) : (
             <p className="mt-0.5 font-body text-nano uppercase tracking-[0.18em] text-ink-muted">
@@ -283,23 +363,31 @@ export default function ChatWidget() {
           )}
         </div>
         <div className="flex items-center gap-1">
-          {planning ? (
+          {planning || composer ? (
             <button
-              onClick={exitPlanning}
+              onClick={() => enterMode('chat')}
               disabled={pending}
               className="rounded-lg border border-line px-2 py-1 text-xs text-ink-secondary transition hover:bg-surface-2 disabled:opacity-50"
             >
-              Exit planning
+              {planning ? 'Exit planning' : 'Exit composer'}
             </button>
           ) : (
             <>
               <button
-                onClick={startPlanning}
+                onClick={() => enterMode('planning')}
                 disabled={pending}
                 title="Plan and push a workout to Garmin"
                 className="inline-flex items-center gap-1 rounded-lg border border-line px-2 py-1 text-xs text-ink-secondary transition hover:bg-surface-2 disabled:opacity-50"
               >
                 <Icon name="stopwatch" /> Plan
+              </button>
+              <button
+                onClick={() => enterMode('composer')}
+                disabled={pending}
+                title="Compose an adapted multi-week plan (replaces the Runna block content)"
+                className="inline-flex items-center gap-1 rounded-lg border border-line px-2 py-1 text-xs text-ink-secondary transition hover:bg-surface-2 disabled:opacity-50"
+              >
+                <Icon name="calendar" /> Adapt
               </button>
               <button
                 onClick={copyContext}
@@ -339,7 +427,9 @@ export default function ChatWidget() {
           <p className="mt-2 text-center text-xs text-ink-muted">
             {planning
               ? 'Planning mode — describe the week or session you want, and the coach will propose it, then build and push each session for your approval.'
-              : 'Ask about your training — paces, recovery, whether a goal is realistic, why a run felt hard.'}
+              : composer
+                ? 'Plan composer — the coach reads your Runna block and proposes an adapted plan (same skeleton, its own sessions). You review week by week, then save it to your calendar.'
+                : 'Ask about your training — paces, recovery, whether a goal is realistic, why a run felt hard.'}
           </p>
         )}
         {messages.map((m, i) => (
@@ -362,6 +452,23 @@ export default function ChatWidget() {
                     The coach tried to present a session but its spec couldn't be read.
                     Ask it to re-send the session.
                   </p>
+                )}
+                {m.planError && (
+                  <p className="mt-2 text-xs text-sem-red">
+                    The coach tried to present a plan but it couldn't be read.
+                    Ask it to re-send the plan.
+                  </p>
+                )}
+                {m.plan && (
+                  <div className="mt-2 w-full">
+                    <PlanReview
+                      plan={m.plan}
+                      active={composer}
+                      saving={savingIdx === i}
+                      saved={m.savedPlan}
+                      onSave={() => savePlan(i)}
+                    />
+                  </div>
                 )}
                 {m.previewError && (
                   <p className="mt-2 text-xs text-sem-red">Couldn't build preview: {m.previewError}</p>
@@ -434,7 +541,11 @@ export default function ChatWidget() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onKeyDown}
-            placeholder={planning ? 'Reply, or say "too fast" / "skip this"…' : 'Ask your coach… (Shift+Enter for a new line)'}
+            placeholder={
+              planning ? 'Reply, or say "too fast" / "skip this"…'
+              : composer ? 'Describe the adaptation you want, or reply to the outline…'
+              : 'Ask your coach… (Shift+Enter for a new line)'
+            }
             className="max-h-[178px] flex-1 resize-none overflow-y-auto rounded-lg border border-line bg-surface-2 px-3 py-2 text-sm text-ink shadow-sm outline-none transition placeholder:text-ink-muted focus:border-acc focus:ring-2 focus:ring-acc/20"
           />
           <button

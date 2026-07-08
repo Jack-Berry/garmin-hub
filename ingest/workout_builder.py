@@ -48,11 +48,14 @@ STEP_TYPES = {
     "cooldown": {"stepTypeId": 2, "stepTypeKey": "cooldown", "displayOrder": 2},
     "interval": {"stepTypeId": 3, "stepTypeKey": "interval", "displayOrder": 3},
     "rest": {"stepTypeId": 5, "stepTypeKey": "rest", "displayOrder": 5},
+    "repeat": {"stepTypeId": 6, "stepTypeKey": "repeat", "displayOrder": 6},
 }
 END_DISTANCE = {"conditionTypeId": 3, "conditionTypeKey": "distance",
                 "displayOrder": 3, "displayable": True}
 END_TIME = {"conditionTypeId": 2, "conditionTypeKey": "time",
             "displayOrder": 2, "displayable": True}
+END_ITERATIONS = {"conditionTypeId": 7, "conditionTypeKey": "iterations",
+                  "displayOrder": 7, "displayable": False}
 UNIT_KM = {"unitId": 2, "unitKey": "kilometer", "factor": 100000.0}
 TARGET_PACE = {"workoutTargetTypeId": 6, "workoutTargetTypeKey": "pace.zone",
                "displayOrder": 6}
@@ -178,14 +181,15 @@ def expand_block(block):
 
 
 # --- Garmin step / workout assembly -------------------------------------------
-def _step(order, type_key, end_value_m, target=None):
-    """Build one ExecutableStepDTO. target = (faster_s, slower_s) or None."""
+def _step(order, type_key, end_value_m, target=None, child_step_id=None):
+    """Build one ExecutableStepDTO. target = (faster_s, slower_s) or None.
+    child_step_id ties a step to its enclosing repeat group (None = top level)."""
     s = {
         "type": "ExecutableStepDTO",
         "stepId": None,           # Garmin assigns on upload
         "stepOrder": order,
         "stepType": STEP_TYPES[type_key],
-        "childStepId": None,
+        "childStepId": child_step_id,
         "description": None,
         "endCondition": END_DISTANCE,
         "endConditionValue": float(end_value_m),
@@ -219,7 +223,7 @@ def _step(order, type_key, end_value_m, target=None):
     return s
 
 
-def _rest_step(order, end_kind, value):
+def _rest_step(order, end_kind, value, child_step_id=None):
     """Un-paced Garmin rest step. Matches Runna's proven rest shape exactly:
     stepType rest (id 5), no target, weight nulled. preferredEndConditionUnit is
     null for a TIME rest (Runna's captured shape); a DISTANCE rest mirrors our
@@ -234,7 +238,7 @@ def _rest_step(order, end_kind, value):
         "stepId": None,           # Garmin assigns on upload
         "stepOrder": order,
         "stepType": STEP_TYPES["rest"],
-        "childStepId": None,
+        "childStepId": child_step_id,
         "description": None,
         "endCondition": end_cond,
         "endConditionValue": float(value),
@@ -262,9 +266,53 @@ def _rest_step(order, end_kind, value):
     }
 
 
+def _repeat_group(order, group_idx, n, child_steps):
+    """Garmin RepeatGroupDTO, mirroring a Runna-captured repeat exactly:
+    stepType repeat (id 6), endCondition iterations (id 7), numberOfIterations,
+    smartRepeat false, skipLastRestStep null (the final iteration's rest RUNS —
+    Runna's proven on-device behaviour). The group and its children share
+    childStepId = group_idx (1 for the first group in the workout, 2 for the
+    second, ...); stepOrder stays globally sequential across the whole tree."""
+    return {
+        "type": "RepeatGroupDTO",
+        "stepId": None,           # Garmin assigns on upload
+        "stepOrder": order,
+        "stepType": STEP_TYPES["repeat"],
+        "childStepId": group_idx,
+        "smartRepeat": False,
+        "endCondition": END_ITERATIONS,
+        "endConditionValue": float(n),
+        "numberOfIterations": int(n),
+        "skipLastRestStep": None,
+        "endConditionCompare": None,
+        "preferredEndConditionUnit": None,
+        "workoutSteps": child_steps,
+    }
+
+
+def _seg_step(order, seg, child_step_id=None):
+    """One expanded segment -> (step dict, est seconds, running metres)."""
+    if isinstance(seg, dict) and seg.get("rest"):
+        step = _rest_step(order, seg["end_kind"], seg["value"], child_step_id)
+        if seg["end_kind"] == "time":
+            return step, seg["value"], 0.0                # seconds, 0 metres
+        return step, seg["value"] / 1000.0 * EASY_PACE_S, seg["value"]
+    dist, faster_s, slower_s, center_s = seg
+    step = _step(order, "interval", dist, target=(faster_s, slower_s),
+                 child_step_id=child_step_id)
+    return step, dist / 1000.0 * center_s, dist
+
+
 def build_pacer_blocks(blocks, warmup_m=None, cooldown_m=None, name=None):
-    """Build a Garmin pacer workout from an explicit ordered list of blocks."""
+    """Build a Garmin pacer workout from an explicit ordered list of blocks.
+
+    A repeat block — {kind: "repeat", count: N, blocks: [...]} — becomes ONE
+    RepeatGroupDTO whose children are the expansion of its child blocks (so a
+    1km rep at 500m segments contributes two 500m child steps, run each
+    iteration). Estimates count every iteration; the payload stores the group
+    once. All other blocks flatten exactly as before."""
     steps, order, est_secs, total_dist = [], 1, 0.0, 0.0
+    n_groups = 0
 
     if warmup_m:
         steps.append(_step(order, "warmup", warmup_m))
@@ -273,20 +321,27 @@ def build_pacer_blocks(blocks, warmup_m=None, cooldown_m=None, name=None):
         total_dist += warmup_m
 
     for block in blocks:
+        if block.get("kind") == "repeat":
+            n_groups += 1
+            group_order, order = order, order + 1
+            child_steps, iter_secs, iter_dist = [], 0.0, 0.0
+            for child in block["blocks"]:
+                for seg in expand_block(child):
+                    step, secs, dist = _seg_step(order, seg, child_step_id=n_groups)
+                    child_steps.append(step)
+                    order += 1
+                    iter_secs += secs
+                    iter_dist += dist
+            steps.append(_repeat_group(group_order, n_groups,
+                                       block["count"], child_steps))
+            est_secs += iter_secs * block["count"]
+            total_dist += iter_dist * block["count"]
+            continue
         for seg in expand_block(block):
-            if isinstance(seg, dict) and seg.get("rest"):
-                steps.append(_rest_step(order, seg["end_kind"], seg["value"]))
-                order += 1
-                if seg["end_kind"] == "time":
-                    est_secs += seg["value"]                      # seconds, 0 metres
-                else:
-                    est_secs += seg["value"] / 1000.0 * EASY_PACE_S
-                    total_dist += seg["value"]                    # distance rest covers ground
-                continue
-            dist, faster_s, slower_s, center_s = seg
-            steps.append(_step(order, "interval", dist, target=(faster_s, slower_s)))
+            step, secs, dist = _seg_step(order, seg)
+            steps.append(step)
             order += 1
-            est_secs += dist / 1000.0 * center_s
+            est_secs += secs
             total_dist += dist
 
     if cooldown_m:
@@ -334,25 +389,36 @@ def build_pacer(distance_m, target, strategy="negative", segment_m=SEGMENT_DEFAU
 
 # --- Inspection ---------------------------------------------------------------
 def summarise(workout):
-    """One-line-per-step human view, for eyeballing against the template."""
+    """One-line-per-step human view, for eyeballing against the template.
+    Repeat groups print a header line and their children indented."""
     print(f"# {workout['workoutName']}  "
           f"(~{workout['estimatedDurationInSecs']}s, "
           f"{workout['estimatedDistanceInMeters']:.0f}m)")
-    for s in workout["workoutSegments"][0]["workoutSteps"]:
+
+    def show(s, pad=""):
+        if s["type"] == "RepeatGroupDTO":
+            print(f"{pad}  step {s['stepOrder']:2d} repeat   "
+                  f"x{s['numberOfIterations']}")
+            for c in s["workoutSteps"]:
+                show(c, pad + "  ")
+            return
         t1, t2 = s["targetValueOne"], s["targetValueTwo"]
         if s["stepType"]["stepTypeKey"] == "rest":
             # rest end value is seconds (time) or metres (distance) — label it right.
             unit = "s" if s["endCondition"]["conditionTypeKey"] == "time" else "m"
-            print(f"  step {s['stepOrder']:2d} {'rest':8s} "
+            print(f"{pad}  step {s['stepOrder']:2d} {'rest':8s} "
                   f"{s['endConditionValue']:6.0f}{unit}  rest")
-            continue
+            return
         if t1:
             tgt = (f"{fmt_pace(1000 / t1)}-{fmt_pace(1000 / t2)}/km  "
                    f"(t1={t1:.7f} t2={t2:.7f})")
         else:
             tgt = "no target"
-        print(f"  step {s['stepOrder']:2d} {s['stepType']['stepTypeKey']:8s} "
+        print(f"{pad}  step {s['stepOrder']:2d} {s['stepType']['stepTypeKey']:8s} "
               f"{s['endConditionValue']:6.0f}m  {tgt}")
+
+    for s in workout["workoutSegments"][0]["workoutSteps"]:
+        show(s)
     print()
 
 
@@ -366,3 +432,11 @@ if __name__ == "__main__":
         {"length_m": 2000, "segment_m": 500, "target": "3:50/km", "strategy": "flat"},
         {"length_m": 200, "segment_m": 200, "target": "3:20/km", "strategy": "flat"},
     ], name="Composed Pacer"))
+
+    print("Repeat mode — 8x400m @ 3:50/km, 60s rests, as one repeat group:")
+    summarise(build_pacer_blocks([
+        {"kind": "repeat", "count": 8, "blocks": [
+            {"length_m": 400, "segment_m": 400, "target": "3:50/km", "strategy": "flat"},
+            {"kind": "rest", "rest_s": 60},
+        ]},
+    ], warmup_m=1500, cooldown_m=1000, name="8x400 Repeats"))

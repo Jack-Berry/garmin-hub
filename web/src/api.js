@@ -22,7 +22,13 @@ async function post(path, body) {
     headers: { 'Content-Type': 'application/json', 'X-Api-Key': SECRET },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`POST ${path} → ${res.status} ${res.statusText}`);
+  if (!res.ok) {
+    // Surface the server's error body (guard rejections, Garmin failures) —
+    // status alone reads as "500 Internal Server Error", which tells the
+    // athlete (and the coach's repair relay) nothing.
+    const detail = await res.json().then((b) => b.error).catch(() => null);
+    throw new Error(`POST ${path} → ${res.status} ${detail || res.statusText}`);
+  }
   return res.json();
 }
 
@@ -42,6 +48,10 @@ export const api = {
   racePredictions: () => get('/api/race-predictions'),
   chat: (messages) => post('/api/coach/chat', { messages }),
   plan: (messages) => post('/api/coach/plan', { messages }),
+  compose: (messages) => post('/api/coach/compose', { messages }),
+  savePlan: (plan) => post('/api/plan/save', { plan }),
+  planCurrent: () => get('/api/plan/current'),
+  planPushNext: (planId) => post(`/api/plan/${planId}/push-next`, {}),
   contextDump: () => get('/api/coach/context-dump'),
   coachNotes: (params = {}) => get(`/api/coach/notes${qs(params)}`),
   generateDaily: () => post('/api/coach/daily', {}),

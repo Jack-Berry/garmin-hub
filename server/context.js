@@ -589,6 +589,7 @@ async function buildPlanningContext(db, recentPushes = []) {
       rest_dist_max_m: GUARD_BOUNDS.rest_dist_max_m,
       segment_min_m: GUARD_BOUNDS.segment_min_m,
       max_steps: GUARD_BOUNDS.max_steps,
+      repeat_count_max: GUARD_BOUNDS.repeat_count_max,
       // Negative-split shape: what strategy "negative" actually builds, so
       // the coach can pre-check the floor (tank segments run up to
       // tank_max_faster_s s/km faster than the block target).
@@ -629,7 +630,11 @@ async function scheduledSummary(db, from, to) {
   for (const p of items) {
     const km = p.estimated_distance_m ? ` — ${+(p.estimated_distance_m / 1000).toFixed(2)}km` : '';
     const race = p.is_race ? '  [RACE]' : '';
-    lines.push(`${p.calendar_date} — ${p.title || 'workout'}${km}${race}`);
+    // App-owned rows are tagged so the Stage 9b composer can tell Runna's
+    // skeleton from sessions the app already planned (garmin/runna_ical rows
+    // are both "the Runna plan" and stay untagged).
+    const app = p.source === 'app' ? '  [app-planned]' : '';
+    lines.push(`${p.calendar_date} — ${p.title || 'workout'}${km}${race}${app}`);
     const steps = parseSteps(p.steps_json);
     if (steps && steps.length) lines.push(`    steps: ${steps.join(' | ')}`);
   }

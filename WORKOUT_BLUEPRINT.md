@@ -17,6 +17,8 @@ The AI's job: pick the archetype, fill in the parameters (distance, paces, rep c
 - `strategy` — `flat` (hold the band) or `negative` (ramp faster through the block).
 - `band_s` — ± seconds/km tolerance EACH SIDE of target (band_s 2 = a 4 s/km wide window).
 
+**Repeat group** — uniform repeated work as one block: `{kind: "repeat", count: N, blocks: [<one iteration's paced/rest blocks>]}`. The builder emits a real Garmin `RepeatGroupDTO` (`numberOfIterations: N` + child steps — the watch shows "8x" like a Runna session); every iteration runs the child blocks in order. The rest lives **inside** the group and repeats with the rep — the final iteration's rest runs too (`skipLastRestStep` left null, exactly Runna's captured on-device shape). A child paced block still expands by its `segment_m` (a 1km rep at 500m segments = two 500m child steps per iteration). No nesting; no `strategy: "negative"` inside (the ramp would restart every iteration); count 2–`repeat_count_max` (guard_bounds.json). Use it when the SAME rep/rest structure repeats (intervals, threshold reps, fartlek pairs); sequences whose pieces differ (pyramid, surges) are listed out block by block — and the pacer (#12) is never wrapped in one.
+
 **Warmup / cooldown** — optional bookend steps, easy pace, wrap any workout.
 
 **Rest vs recovery** — Garmin has a real `rest` step (stepTypeId 5, no pace target), ending on either **time** (seconds) or **distance** (metres). A rest block — `{kind: "rest", rest_s}` (time) or `{kind: "rest", length_m}` (distance) — emits that real rest step; it is **not** a slow running block. (A deliberate slow _recovery jog_ between efforts can still be modelled as a slow paced block if you want the athlete running — but a true rest/standstill is now a real Garmin rest step.)
@@ -73,20 +75,20 @@ blocks: [ { length_m: <short dist>, segment_m: <coarse>, target: very_easy, stra
 
 ### 4. Intervals
 
-**Trains:** VO2max / speed. **Structure:** warmup + N×[hard rep, real rest] + cooldown, no trailing rest. **Segments:** each hard rep is ONE block (`segment_m == length_m`); recoveries are real rest steps.
+**Trains:** VO2max / speed. **Structure:** warmup + ONE repeat group of N×[hard rep, real rest] + cooldown. **Segments:** each hard rep is ONE block (`segment_m == length_m`); recoveries are real rest steps, repeating with the rep (final rest included — Runna's shape).
 
 ```
 warmup_m: <e.g. 1500>
 blocks: [
-  { length_m: <rep>, segment_m: <rep>, target: 5k_pace, strategy: flat }, // hard rep, one block
-  { kind: "rest", rest_s: <e.g. 60> },                                     // real rest (time), OR
-  { kind: "rest", length_m: <e.g. 200> },                                  //   real rest (distance)
-  ... rep, rest, ... N reps with N-1 rests between them, no trailing rest ...
+  { kind: "repeat", count: <N>, blocks: [
+    { length_m: <rep>, segment_m: <rep>, target: 5k_pace, strategy: flat }, // hard rep, one block
+    { kind: "rest", rest_s: <e.g. 60> }                                      // real rest (time or distance)
+  ]}
 ]
 cooldown_m: <e.g. 1000>
 ```
 
-e.g. "7×400m at 5k pace, 200m recovery" = 7 rep blocks + 6 rest blocks (13 blocks, no trailing rest).
+e.g. "7×400m at 5k pace, 200m recovery" = one repeat group, count 7, children [400m rep, 200m rest].
 
 ### 5. Tempo
 
@@ -100,14 +102,15 @@ cooldown_m: 1000
 
 ### 6. Threshold (reps)
 
-**Trains:** threshold via longer cruise reps with short rests. **Structure:** warmup + N×[threshold rep, short real rest] + cooldown, no trailing rest. Like intervals but longer reps, shorter rests, threshold (not 5k) pace. **Segments:** each rep is ONE block (`segment_m == length_m`) — a rep is a single effort, not chopped. (Continuous threshold running is a _tempo_, archetype 5, which gets 500m; a rep does not.)
+**Trains:** threshold via longer cruise reps with short rests. **Structure:** warmup + ONE repeat group of N×[threshold rep, short real rest] + cooldown. Like intervals but longer reps, shorter rests, threshold (not 5k) pace. **Segments:** each rep is ONE block (`segment_m == length_m`) — a rep is a single effort, not chopped. (Continuous threshold running is a _tempo_, archetype 5, which gets 500m; a rep does not.)
 
 ```
 warmup_m: 1500
 blocks: [
-  { length_m: 1600, segment_m: 1600, target: threshold, strategy: flat }, // rep, one block
-  { kind: "rest", rest_s: 60 },                                           // short real rest
-  ... rep, rest, ... ×N, no trailing rest ...
+  { kind: "repeat", count: <N>, blocks: [
+    { length_m: 1600, segment_m: 1600, target: threshold, strategy: flat }, // rep, one block
+    { kind: "rest", rest_s: 60 }                                             // short real rest
+  ]}
 ]
 cooldown_m: 1000
 ```
@@ -125,7 +128,7 @@ Key points the system must understand:
 
 Example (a real one the user has done): warmup 2km ≤5:10 → **7× [300m @ 4:00, 300m @ 4:50] run continuously** (all paced blocks) → `{kind: "rest", rest_s: 90}` → cooldown 2km easy. The 7 reps are unbroken; the only rest is the single 90s rest step after all of them.
 
-This is a natural fit for a **repeat group** (see §6 headroom): "Set, repeat 7×: [300m hard, 300m float]" then a rest step then cooldown — exactly how Garmin/Runna display it.
+Built as a repeat group: `{kind: "repeat", count: 7, blocks: [300m hard, 300m float]}` then the single rest step, then cooldown — exactly how Garmin/Runna display it. (Both children are paced, so no rest repeats inside the group — the continuity principle survives the repeat construct.)
 
 ### 8. Progression
 
@@ -155,7 +158,7 @@ Can have multiple hotspots (steady → surge → steady → surge → steady).
 
 ### 10. Pyramid
 
-**Trains:** varied intervals. **Structure:** reps that grow then shrink (e.g. 200-400-800-400-200), each separated by a real rest step, no trailing rest. **Segments:** each rep is ONE block (`segment_m == length_m`); recoveries are real rest steps.
+**Trains:** varied intervals. **Structure:** reps that grow then shrink (e.g. 200-400-800-400-200), each separated by a real rest step, no trailing rest. Every rep differs, so this is listed out block by block — NOT a repeat group. **Segments:** each rep is ONE block (`segment_m == length_m`); recoveries are real rest steps.
 
 ```
 warmup_m: 1500
@@ -189,7 +192,7 @@ blocks: [ { length_m: <race dist>, segment_m: 500, target: goal_pace, strategy: 
 - Segment length is workout-driven. **500m is a default ONLY for the pacer (#12), changeable on request.** Not a global default.
 - Hill reps excluded (not pace-based).
 - **Fartlek** = continuous alternating pace (hard/float, no stopping), rest only at the end. Described by principle, not rigid template.
-- **Repeat-groups + time-based rests: YES** — the builder will be extended to emit Garmin `RepeatGroupDTO` and time-based end conditions for intervals & fartlek (cleaner, more fluid watch display, matches Runna). **The pacer (#12) stays flattened** — each 500m must be its own step for the Engo gauge; repeats don't apply there.
+- **Repeat-groups: IMPLEMENTED** — `{kind: "repeat", count: N, blocks: [...]}` emits a real Garmin `RepeatGroupDTO` (`numberOfIterations` + child steps, mirroring a Runna-captured workout exactly; see §Core concepts for the full semantics). Rests repeat inside the group, final rest included. Used for intervals (#4), threshold reps (#6) and fartlek (#7); pyramid (#10) and surges (#9) stay listed out (their pieces differ). **The pacer (#12) stays flattened** — each 500m must be its own step for the Engo gauge; repeats don't apply there. (Time-based rests were already real Garmin rest steps.)
 - **Warmup/cooldown: coach decides per workout** — no fixed default. The coach picks sensible bookends for the session type and user context (typically 1.5–2km each, but its call).
 
 ## Reliability / testing plan (this is a big step — build it safely)

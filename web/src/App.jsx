@@ -7,6 +7,7 @@ import PlannedWorkouts from './sections/PlannedWorkouts';
 import SettingsModal from './SettingsModal';
 import PacerModal from './PacerModal';
 import ChatWidget from './ChatWidget';
+import PlanActivation from './PlanActivation';
 import { Icon } from './ui';
 import { AccentProvider } from './accent';
 
@@ -99,6 +100,9 @@ export default function App() {
 
         <main key={refreshKey} className="mx-auto max-w-5xl space-y-5 px-6 py-6">
           <Hero />
+          {/* Saved-plan activation (Stage 9c): push to Garmin + the guided
+              cancel-Runna step. Renders only while there's choreography left. */}
+          <PlanActivation />
           {/* Lower dashboard — a full-width Recovery band on top, then Recent
               activities (wide, table) beside Upcoming planned (narrow, list).
               The two columns top-align and collapse to a single column on

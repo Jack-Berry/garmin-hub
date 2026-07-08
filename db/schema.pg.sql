@@ -171,6 +171,23 @@ CREATE TABLE IF NOT EXISTS planned_workouts (
 CREATE INDEX IF NOT EXISTS idx_planned_workouts_calendar_date
   ON planned_workouts (calendar_date);
 
+-- Adapted-plan parents (Stage 9c). One row per saved plan; planned_workouts
+-- app rows point here via plan_id. Holds the plan-level metadata the composer
+-- generates (name/goal/summary/weeks) plus the push lifecycle: 'draft' on
+-- save, 'active' once every session has been pushed to Garmin. Per-session
+-- push state lives on planned_workouts (workout_id NULL = not yet pushed).
+CREATE TABLE IF NOT EXISTS plans (
+  plan_id                      text PRIMARY KEY,    -- matches planned_workouts.plan_id
+  name                         text,
+  goal_race                    text,
+  summary                      text,
+  weeks_json                   jsonb,               -- composer weeks[] verbatim (start/focus lines)
+  date_from                    date,
+  date_to                      date,
+  status                       text NOT NULL DEFAULT 'draft',  -- 'draft' | 'active'
+  created_at                   timestamptz
+);
+
 CREATE TABLE IF NOT EXISTS recovery (
   calendar_date                date PRIMARY KEY,
 

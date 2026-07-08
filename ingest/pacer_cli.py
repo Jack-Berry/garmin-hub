@@ -4,9 +4,12 @@
 JSON-in (stdin) / JSON-out (stdout). Two deterministic modes — the AI never
 calls this, only approved structured params do:
 
-  preview  build the workout (NO network) and emit a readable segment breakdown.
-  push     build, upload, and schedule on Garmin; emit the workout id. THE ONLY
-           mode that writes to Garmin.
+  preview   build the workout (NO network) and emit a readable segment breakdown.
+  push      build, upload, and schedule on Garmin; emit the workout id. THE ONLY
+            mode that writes to Garmin.
+  validate  batch-check {"sessions": [...]} (Stage 9b plan generation): every
+            session runs the same guard+build as preview, per-session ok/error
+            results, NO network. One spawn validates a whole plan.
 
 Both take the SAME params object, so the workout pushed is exactly the one
 previewed (deterministic rebuild). Garmin login/upload chatter is sent to stderr
@@ -16,6 +19,7 @@ so stdout stays pure JSON for the Node caller to parse.
         | /usr/local/bin/python3.13 ingest/pacer_cli.py preview
 """
 
+import re
 import sys
 import json
 from pathlib import Path
@@ -38,7 +42,8 @@ WARMCOOL_MAX_M = BOUNDS["warmcool_max_m"]    # warmup / cooldown ceiling, each
 REST_TIME_MAX_S = BOUNDS["rest_time_max_s"]  # longer isn't a rest, it's a mistake
 REST_DIST_MAX_M = BOUNDS["rest_dist_max_m"]  # longer is a running block, not a rest
 SEGMENT_MIN_M = BOUNDS["segment_min_m"]      # finer than this is a silly gauge step
-MAX_STEPS = BOUNDS["max_steps"]              # total Garmin steps incl. rests/bookends
+MAX_STEPS = BOUNDS["max_steps"]              # steps in the pushed payload (see note)
+REPEAT_COUNT_MAX = BOUNDS["repeat_count_max"]   # iterations cap per repeat group
 NEG_MIN_SEGMENTS = BOUNDS["negative_split"]["min_segments"]  # ramp needs room
 
 
@@ -50,13 +55,103 @@ class GuardError(ValueError):
         self.block, self.check, self.value = block, check, value
 
 
+def _validate_rest(b, i, label):
+    """Rest-block checks. Returns the running metres it contributes (a time
+    rest adds 0, so running-distance totals are never inflated by standing)."""
+    rest_s, length = b.get("rest_s"), b.get("length_m")
+    if rest_s is not None:
+        if not isinstance(rest_s, (int, float)) or rest_s <= 0:
+            raise GuardError(f"{label}: rest_s must be > 0", block=i,
+                             check="rest_s", value=rest_s)
+        if rest_s > REST_TIME_MAX_S:
+            raise GuardError(f"{label}: rest_s ({rest_s:g}s) exceeds "
+                             f"{REST_TIME_MAX_S:g}s", block=i,
+                             check="rest_time_max", value=rest_s)
+        return 0.0
+    if not isinstance(length, (int, float)) or length <= 0:
+        raise GuardError(f"{label}: rest length_m must be > 0", block=i,
+                         check="rest_length_m", value=length)
+    if length > REST_DIST_MAX_M:
+        raise GuardError(f"{label}: rest length_m ({length:g}m) exceeds "
+                         f"{REST_DIST_MAX_M:g}m", block=i,
+                         check="rest_dist_max", value=length)
+    return float(length)
+
+
+def _validate_paced(b, i, label):
+    """Paced-block checks (segment / band / expanded pace bounds). Returns
+    (running metres, expanded step count)."""
+    length = b.get("length_m")
+    if not isinstance(length, (int, float)) or length <= 0:
+        raise GuardError(f"{label}: length_m must be > 0", block=i,
+                         check="length_m", value=length)
+
+    segment = b.get("segment_m", wb.SEGMENT_DEFAULT_M)
+    if not isinstance(segment, (int, float)) or segment <= 0:
+        raise GuardError(f"{label}: segment_m must be > 0", block=i,
+                         check="segment_m", value=segment)
+    if segment < SEGMENT_MIN_M:
+        raise GuardError(f"{label}: segment_m ({segment:g}) under the "
+                         f"{SEGMENT_MIN_M:g}m minimum", block=i,
+                         check="segment_min", value=segment)
+    if segment > length:
+        raise GuardError(f"{label}: segment_m ({segment:g}) exceeds "
+                         f"length_m ({length:g})", block=i,
+                         check="segment_le_length", value=segment)
+
+    band = b.get("band_s")
+    if band is not None and (not isinstance(band, (int, float)) or band <= 0):
+        raise GuardError(f"{label}: band_s must be > 0 (± s/km each side)",
+                         block=i, check="band_s", value=band)
+
+    # Resolve the actual per-segment profile the builder will emit and
+    # bound-check BOTH edges of every segment (the fast edge is the
+    # dangerous one; the slow edge catches not-a-pace-workout targets).
+    try:
+        segs = wb.expand_block(b)
+    except (KeyError, ValueError, TypeError):
+        raise GuardError(f"{label}: target missing or unparseable",
+                         block=i, check="target_parse", value=b.get("target"))
+    if b.get("strategy") == "negative" and len(segs) < NEG_MIN_SEGMENTS:
+        raise GuardError(
+            f"{label}: strategy 'negative' needs at least "
+            f"{NEG_MIN_SEGMENTS} segments to ramp (got {len(segs)}) — "
+            f"use a finer segment_m", block=i,
+            check="negative_min_segments", value=len(segs))
+    ramp_label = ("negative ramp" if b.get("strategy") == "negative" else "flat")
+    for j, (dist, faster_s, slower_s, center_s) in enumerate(segs):
+        if slower_s < faster_s:
+            raise GuardError(
+                f"{label}: expanded segment {j} band is inverted "
+                f"(slow bound faster than fast bound)", block=i,
+                check="band_inverted", value=(faster_s, slower_s))
+        for edge, val in (("fast edge", faster_s), ("slow edge", slower_s)):
+            if not (PACE_FLOOR_S <= val <= PACE_CEIL_S):
+                raise GuardError(
+                    f"{label}: expanded segment {j} {edge} "
+                    f"{wb.fmt_pace(val)}/km outside "
+                    f"[{wb.fmt_pace(PACE_FLOOR_S)}–{wb.fmt_pace(PACE_CEIL_S)}]/km "
+                    f"({ramp_label})",
+                    block=i, check="pace_bounds", value=val)
+    return float(length), len(segs)
+
+
 def validate_blocks(blocks, warmup_m, cooldown_m):
     """Hard gate on a blocks spec before build_pacer_blocks / Garmin. Returns
     the blocks unchanged on success; raises GuardError on the first failure.
 
     Pace bounds are checked against the EXPANDED profile (wb.expand_block), not
     just the block target: negative-split tank segments run faster than the
-    block target, so we bound-check what actually gets built."""
+    block target, so we bound-check what actually gets built. Repeat groups —
+    {kind: "repeat", count, blocks} — are recursed one level: every child gets
+    the same rest/paced checks, distance counts every iteration, and nesting /
+    per-iteration ramps / all-rest groups are rejected.
+
+    Step counting: n_steps counts the steps in the pushed PAYLOAD — a repeat
+    group is 1 (the group) + its children ONCE, not iterations x children,
+    because that is the shape Garmin's own step ceiling applies to (the group
+    is stored once with an iteration count). Unrolled volume is bounded
+    separately by total distance and REPEAT_COUNT_MAX."""
     if not isinstance(blocks, list) or not blocks:
         raise GuardError("blocks must be a non-empty list", check="blocks_present")
 
@@ -67,86 +162,56 @@ def validate_blocks(blocks, warmup_m, cooldown_m):
             raise GuardError(f"blocks[{i}]: not an object", block=i,
                              check="block_type", value=b)
 
-        # Rest blocks have no pace — skip pace bounds, sanity-check magnitude.
-        # A time rest adds 0 running metres, so `total` stays running distance
-        # (a time-rest-heavy session is never wrongly rejected as "too short").
         if b.get("kind") == "rest":
-            rest_s, length = b.get("rest_s"), b.get("length_m")
-            if rest_s is not None:
-                if not isinstance(rest_s, (int, float)) or rest_s <= 0:
-                    raise GuardError(f"blocks[{i}]: rest_s must be > 0", block=i,
-                                     check="rest_s", value=rest_s)
-                if rest_s > REST_TIME_MAX_S:
-                    raise GuardError(f"blocks[{i}]: rest_s ({rest_s:g}s) exceeds "
-                                     f"{REST_TIME_MAX_S:g}s", block=i,
-                                     check="rest_time_max", value=rest_s)
-            else:
-                if not isinstance(length, (int, float)) or length <= 0:
-                    raise GuardError(f"blocks[{i}]: rest length_m must be > 0", block=i,
-                                     check="rest_length_m", value=length)
-                if length > REST_DIST_MAX_M:
-                    raise GuardError(f"blocks[{i}]: rest length_m ({length:g}m) exceeds "
-                                     f"{REST_DIST_MAX_M:g}m", block=i,
-                                     check="rest_dist_max", value=length)
-                total += float(length)
+            total += _validate_rest(b, i, f"blocks[{i}]")
             n_steps += 1
             continue
 
-        length = b.get("length_m")
-        if not isinstance(length, (int, float)) or length <= 0:
-            raise GuardError(f"blocks[{i}]: length_m must be > 0", block=i,
-                             check="length_m", value=length)
-
-        segment = b.get("segment_m", wb.SEGMENT_DEFAULT_M)
-        if not isinstance(segment, (int, float)) or segment <= 0:
-            raise GuardError(f"blocks[{i}]: segment_m must be > 0", block=i,
-                             check="segment_m", value=segment)
-        if segment < SEGMENT_MIN_M:
-            raise GuardError(f"blocks[{i}]: segment_m ({segment:g}) under the "
-                             f"{SEGMENT_MIN_M:g}m minimum", block=i,
-                             check="segment_min", value=segment)
-        if segment > length:
-            raise GuardError(f"blocks[{i}]: segment_m ({segment:g}) exceeds "
-                             f"length_m ({length:g})", block=i,
-                             check="segment_le_length", value=segment)
-
-        band = b.get("band_s")
-        if band is not None and (not isinstance(band, (int, float)) or band <= 0):
-            raise GuardError(f"blocks[{i}]: band_s must be > 0 (± s/km each side)",
-                             block=i, check="band_s", value=band)
-
-        # Resolve the actual per-segment profile the builder will emit and
-        # bound-check BOTH edges of every segment (the fast edge is the
-        # dangerous one; the slow edge catches not-a-pace-workout targets).
-        try:
-            segs = wb.expand_block(b)
-        except (KeyError, ValueError, TypeError):
-            raise GuardError(f"blocks[{i}]: target missing or unparseable",
-                             block=i, check="target_parse", value=b.get("target"))
-        if b.get("strategy") == "negative" and len(segs) < NEG_MIN_SEGMENTS:
-            raise GuardError(
-                f"blocks[{i}]: strategy 'negative' needs at least "
-                f"{NEG_MIN_SEGMENTS} segments to ramp (got {len(segs)}) — "
-                f"use a finer segment_m", block=i,
-                check="negative_min_segments", value=len(segs))
-        ramp_label = ("negative ramp" if b.get("strategy") == "negative" else "flat")
-        for j, (dist, faster_s, slower_s, center_s) in enumerate(segs):
-            if slower_s < faster_s:
-                raise GuardError(
-                    f"blocks[{i}]: expanded segment {j} band is inverted "
-                    f"(slow bound faster than fast bound)", block=i,
-                    check="band_inverted", value=(faster_s, slower_s))
-            for edge, val in (("fast edge", faster_s), ("slow edge", slower_s)):
-                if not (PACE_FLOOR_S <= val <= PACE_CEIL_S):
+        if b.get("kind") == "repeat":
+            count = b.get("count")
+            if not isinstance(count, int) or isinstance(count, bool) or count < 2:
+                raise GuardError(f"blocks[{i}]: repeat count must be an integer "
+                                 f">= 2", block=i, check="repeat_count", value=count)
+            if count > REPEAT_COUNT_MAX:
+                raise GuardError(f"blocks[{i}]: repeat count ({count}) exceeds "
+                                 f"{REPEAT_COUNT_MAX}", block=i,
+                                 check="repeat_count_max", value=count)
+            children = b.get("blocks")
+            if not isinstance(children, list) or not children:
+                raise GuardError(f"blocks[{i}]: repeat blocks must be a non-empty "
+                                 f"list", block=i, check="repeat_blocks", value=children)
+            iter_dist, group_steps, has_paced = 0.0, 1, False
+            for j, c in enumerate(children):
+                label = f"blocks[{i}].blocks[{j}]"
+                if not isinstance(c, dict):
+                    raise GuardError(f"{label}: not an object", block=i,
+                                     check="block_type", value=c)
+                if c.get("kind") == "repeat":
+                    raise GuardError(f"{label}: repeat groups cannot nest",
+                                     block=i, check="repeat_nested")
+                if c.get("kind") == "rest":
+                    iter_dist += _validate_rest(c, i, label)
+                    group_steps += 1
+                    continue
+                if c.get("strategy") == "negative":
                     raise GuardError(
-                        f"blocks[{i}]: expanded segment {j} {edge} "
-                        f"{wb.fmt_pace(val)}/km outside "
-                        f"[{wb.fmt_pace(PACE_FLOOR_S)}–{wb.fmt_pace(PACE_CEIL_S)}]/km "
-                        f"({ramp_label})",
-                        block=i, check="pace_bounds", value=val)
+                        f"{label}: strategy 'negative' inside a repeat group "
+                        f"(the ramp would restart every iteration) — use flat",
+                        block=i, check="negative_in_repeat")
+                m, ns = _validate_paced(c, i, label)
+                iter_dist += m
+                group_steps += ns
+                has_paced = True
+            if not has_paced:
+                raise GuardError(f"blocks[{i}]: repeat group needs at least one "
+                                 f"paced block", block=i, check="repeat_no_paced")
+            total += iter_dist * count
+            n_steps += group_steps
+            continue
 
-        total += float(length)
-        n_steps += len(segs)
+        m, ns = _validate_paced(b, i, f"blocks[{i}]")
+        total += m
+        n_steps += ns
 
     for label, val in (("warmup_m", warmup_m), ("cooldown_m", cooldown_m)):
         if val is None:
@@ -201,32 +266,45 @@ def build(params):
                                  cooldown_m=cooldown_m, name=name)
 
 
-def breakdown(workout):
-    """Built workout -> a flat, display-ready segment list (one per step)."""
-    segs = []
-    for s in workout["workoutSegments"][0]["workoutSteps"]:
-        # Rest steps carry seconds (time) or metres (distance) in endConditionValue
-        # — a time rest must NOT land in distance_m. Emit a distinct marker.
-        if s["stepType"]["stepTypeKey"] == "rest":
-            seg = {"type": "rest", "pace_label": None}
-            if s["endCondition"]["conditionTypeKey"] == "time":
-                seg["duration_s"] = round(s["endConditionValue"])
-            else:
-                seg["distance_m"] = round(s["endConditionValue"])
-            segs.append(seg)
-            continue
-        t1, t2 = s["targetValueOne"], s["targetValueTwo"]
-        seg = {
-            "type": s["stepType"]["stepTypeKey"],
-            "distance_m": round(s["endConditionValue"]),
-        }
-        if t1:
-            faster, slower = 1000.0 / t1, 1000.0 / t2
-            seg["pace_label"] = f"{wb.fmt_pace(faster)}–{wb.fmt_pace(slower)}/km"
+def _seg_view(s):
+    """One ExecutableStepDTO -> display dict (rest / interval / warmup / cooldown)."""
+    # Rest steps carry seconds (time) or metres (distance) in endConditionValue
+    # — a time rest must NOT land in distance_m. Emit a distinct marker.
+    if s["stepType"]["stepTypeKey"] == "rest":
+        seg = {"type": "rest", "pace_label": None}
+        if s["endCondition"]["conditionTypeKey"] == "time":
+            seg["duration_s"] = round(s["endConditionValue"])
         else:
-            seg["pace_label"] = None  # warmup / cooldown: easy, no target
-        segs.append(seg)
-    return segs
+            seg["distance_m"] = round(s["endConditionValue"])
+        return seg
+    t1, t2 = s["targetValueOne"], s["targetValueTwo"]
+    seg = {
+        "type": s["stepType"]["stepTypeKey"],
+        "distance_m": round(s["endConditionValue"]),
+    }
+    if t1:
+        faster, slower = 1000.0 / t1, 1000.0 / t2
+        seg["pace_label"] = f"{wb.fmt_pace(faster)}–{wb.fmt_pace(slower)}/km"
+    else:
+        seg["pace_label"] = None  # warmup / cooldown: easy, no target
+    return seg
+
+
+def breakdown(workout):
+    """Built workout -> display-ready step list. Repeat groups stay GROUPED —
+    {type: "repeat", count, steps: [children once]} — so a preview reads
+    "8x [400m, 60s rest]" instead of an unrolled wall of steps (unreadable at
+    plan scale, Stage 9b). Totals still count every iteration (the builder's
+    estimates already do)."""
+    out = []
+    for s in workout["workoutSegments"][0]["workoutSteps"]:
+        if s["type"] == "RepeatGroupDTO":
+            out.append({"type": "repeat",
+                        "count": int(s["numberOfIterations"]),
+                        "steps": [_seg_view(c) for c in s["workoutSteps"]]})
+        else:
+            out.append(_seg_view(s))
+    return out
 
 
 def cmd_preview(params):
@@ -237,6 +315,37 @@ def cmd_preview(params):
         "est_duration_s": w["estimatedDurationInSecs"],
         "segments": breakdown(w),
     }
+
+
+def cmd_validate(params):
+    """Batch guard check for a multi-session plan (Stage 9b). Takes
+    {"sessions": [<spec>, ...]} — each the exact shape preview/push consume —
+    and runs EVERY session through the same build path, collecting per-session
+    results instead of dying on the first failure (a plan review must show
+    which sessions are bad, not just that one is). No network. A date is
+    required here because a persisted session must be pushable later."""
+    sessions = params.get("sessions")
+    if not isinstance(sessions, list) or not sessions:
+        raise ValueError("validate requires a non-empty 'sessions' list")
+    out = []
+    for s in sessions:
+        try:
+            if not isinstance(s, dict):
+                raise GuardError("session is not an object", check="session_type")
+            date = s.get("date")
+            if not isinstance(date, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+                raise GuardError("session date missing or not YYYY-MM-DD",
+                                 check="date", value=date)
+            w = build(s)
+            out.append({"ok": True, "name": w["workoutName"],
+                        "total_distance_m": round(w["estimatedDistanceInMeters"]),
+                        "est_duration_s": w["estimatedDurationInSecs"],
+                        "segments": breakdown(w)})
+        except GuardError as e:
+            out.append({"ok": False, "error": str(e)})
+        except Exception as e:
+            out.append({"ok": False, "error": f"build failed: {e}"})
+    return {"sessions": out}
 
 
 def cmd_push(params):
@@ -277,11 +386,12 @@ def cmd_push(params):
 
 
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] not in ("preview", "push"):
-        sys.exit("usage: pacer_cli.py {preview|push}  (params as JSON on stdin)")
+    modes = {"preview": cmd_preview, "push": cmd_push, "validate": cmd_validate}
+    if len(sys.argv) < 2 or sys.argv[1] not in modes:
+        sys.exit("usage: pacer_cli.py {preview|push|validate}  (params as JSON on stdin)")
     params = json.loads(sys.stdin.read() or "{}")
     try:
-        out = cmd_preview(params) if sys.argv[1] == "preview" else cmd_push(params)
+        out = modes[sys.argv[1]](params)
     except GuardError as e:
         sys.exit(f"pacer guard rejected spec: {e}")
     except Exception as e:
