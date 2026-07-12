@@ -20,7 +20,7 @@ const mondayOf = (d) => {
 
 const km = (m) => `${(m / 1000).toFixed(1)} km`;
 
-export function PlanReview({ plan, active, saving, saved, onSave }) {
+export function PlanReview({ plan, active, saving, saved, onSave, onActivate }) {
   const [openIdx, setOpenIdx] = useState(null);
   const sessions = plan.sessions || [];
   const invalid = sessions.filter((s) => !s.valid);
@@ -113,8 +113,19 @@ export function PlanReview({ plan, active, saving, saved, onSave }) {
           )}
         </span>
         {saved ? (
-          <span className="text-xs text-ink-secondary">
-            Saved ✓ <span className="font-mono">{saved.plan_id}</span>
+          // Saved = a dormant draft. Activation is OFFERED here (9d-3), never
+          // auto-started — declining costs nothing; the dashboard card is the
+          // later route.
+          <span className="flex items-center gap-3 text-xs text-ink-secondary">
+            <span>Saved ✓ <span className="font-mono">{saved.plan_id}</span></span>
+            {onActivate && (
+              <button
+                onClick={onActivate}
+                className="rounded-lg bg-acc px-3 py-1.5 text-sm font-medium text-acc-ink transition hover:opacity-90"
+              >
+                Activate now
+              </button>
+            )}
           </span>
         ) : active ? (
           <button

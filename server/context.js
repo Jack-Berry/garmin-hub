@@ -249,15 +249,19 @@ async function buildContext(db) {
   // is_race_auto / is_race_override come along raw so collapseRaceDuplicates can
   // fold the same-day race triplicate (Runna race + manual override + pacer)
   // into one entry — otherwise the coach sees and counts the race three times.
+  // Draft plans are dormant (9d-2): their sessions never appear here, and
+  // plan_status feeds the active-only precedence gate.
   const planRows = await db.all(
-    `SELECT calendar_date, title, estimated_distance_m, source,
-            is_race_auto, is_race_override,
-            COALESCE(is_race_override, is_race_auto) AS is_race, steps_json
-     FROM planned_workouts
-     WHERE calendar_date >= $1 AND calendar_date <= $2
-     ORDER BY calendar_date`, [utcDate(0), utcDate(14)]);
+    `SELECT p.calendar_date, p.title, p.estimated_distance_m, p.source,
+            p.is_race_auto, p.is_race_override,
+            COALESCE(p.is_race_override, p.is_race_auto) AS is_race, p.steps_json,
+            pl.status AS plan_status
+     FROM planned_workouts p LEFT JOIN plans pl ON pl.plan_id = p.plan_id
+     WHERE p.calendar_date >= $1 AND p.calendar_date <= $2 AND p.removed_at IS NULL
+       AND pl.status IS DISTINCT FROM 'draft'
+     ORDER BY p.calendar_date`, [utcDate(0), utcDate(14)]);
 
-  // App-plan precedence (an app row owns its date) before the race collapse.
+  // App-plan precedence (a live app row owns its date) before the race collapse.
   const upcoming = collapseRaceDuplicates(applyAppPlanPrecedence(planRows)).map((p) => ({
     date: p.calendar_date,
     title: p.title,
@@ -366,11 +370,17 @@ async function buildDayFocus(db, date) {
      WHERE activity_group = 'run' AND distance_m > 0 AND start_time_local::date = $1
      ORDER BY start_time_local DESC LIMIT 1`, [date]);
 
+  // Draft gate + live-app preference (9d-2): draft sessions never surface, and
+  // the app row only outranks the Runna row when it's actually live (active
+  // plan or one-off push) — the same rule as applyAppPlanPrecedence.
   const planRow = await db.get(
-    `SELECT title, estimated_distance_m,
-            COALESCE(is_race_override, is_race_auto) AS is_race, steps_json
-     FROM planned_workouts WHERE calendar_date = $1
-     ORDER BY (source = 'app') DESC NULLS LAST LIMIT 1`, [date]);
+    `SELECT p.title, p.estimated_distance_m,
+            COALESCE(p.is_race_override, p.is_race_auto) AS is_race, p.steps_json
+     FROM planned_workouts p LEFT JOIN plans pl ON pl.plan_id = p.plan_id
+     WHERE p.calendar_date = $1 AND p.removed_at IS NULL
+       AND pl.status IS DISTINCT FROM 'draft'
+     ORDER BY (p.source = 'app' AND (pl.status IS NULL OR pl.status = 'active'))
+              DESC NULLS LAST LIMIT 1`, [date]);
 
   const planned = planRow ? {
     title: planRow.title,
@@ -606,6 +616,76 @@ async function buildPlanningContext(db, recentPushes = []) {
     // (the DB only learns about them on the next ingest). Never double-book.
     pushed_recently: recentPushes,
   };
+
+  // Active-plan sessions (Stage 9d) — what the planning coach can edit via the
+  // move/delete/nudge directives. Today onward only (the edit freeze line);
+  // soft-deleted sessions excluded. `spec` is steps_json verbatim — the
+  // buildable spec — so a nudge starts from the session's real current
+  // content. Null when no plan is active (then there is nothing to edit).
+  const activePlan = await db.get(
+    `SELECT plan_id, name FROM plans WHERE status = 'active'
+     ORDER BY created_at DESC LIMIT 1`);
+  context.planning.active_plan = activePlan ? {
+    plan_id: activePlan.plan_id,
+    name: activePlan.name,
+    sessions: (await db.all(
+      `SELECT schedule_id::text AS schedule_id, calendar_date, title,
+              workout_id, steps_json, rationale
+       FROM planned_workouts
+       WHERE source = 'app' AND plan_id = $1 AND removed_at IS NULL
+         AND calendar_date >= $2
+       ORDER BY calendar_date`, [activePlan.plan_id, localDate()]))
+      .map((s) => ({
+        schedule_id: s.schedule_id,
+        date: s.calendar_date,
+        title: s.title,
+        pushed: s.workout_id != null,
+        rationale: s.rationale,
+        spec: s.steps_json,
+      })),
+  } : null;
+
+  // Plan lifecycle surface (9d-2): every non-discarded saved plan with its
+  // status and push state, so the coach can tell a DRAFT (saved in the hub
+  // only — dormant, nothing on Garmin, hidden from the dashboard/upcoming/
+  // scheduled views until activated) from the ACTIVE plan (live on Garmin)
+  // and finished history. Drafts appear ONLY here. The newest draft also
+  // carries a compact session list so the coach can pull it up and describe
+  // it on request without any tool call.
+  const planParents = await db.all(
+    `SELECT pl.plan_id, pl.name, pl.goal_race, pl.status, pl.date_from, pl.date_to,
+            count(p.schedule_id)::int AS session_count,
+            count(p.workout_id)::int AS pushed_count
+     FROM plans pl
+     LEFT JOIN planned_workouts p
+       ON p.plan_id = pl.plan_id AND p.source = 'app' AND p.removed_at IS NULL
+     WHERE pl.status != 'discarded'
+     GROUP BY pl.plan_id ORDER BY pl.created_at DESC`);
+  const plans = planParents.map((p) => ({
+    plan_id: p.plan_id,
+    name: p.name,
+    goal_race: p.goal_race,
+    status: p.status,
+    span: `${p.date_from} to ${p.date_to}`,
+    session_count: p.session_count,
+    pushed_count: p.pushed_count,
+    on_garmin: p.pushed_count > 0,
+  }));
+  const draft = plans.find((p) => p.status === 'draft');
+  if (draft) {
+    draft.sessions = (await db.all(
+      `SELECT calendar_date, title, estimated_distance_m, steps_json->>'type' AS type
+       FROM planned_workouts
+       WHERE source = 'app' AND plan_id = $1 AND removed_at IS NULL
+       ORDER BY calendar_date`, [draft.plan_id]))
+      .map((s) => ({
+        date: s.calendar_date,
+        title: s.title,
+        type: s.type,
+        km: s.estimated_distance_m ? +(s.estimated_distance_m / 1000).toFixed(1) : null,
+      }));
+  }
+  context.planning.plans = plans;
   return context;
 }
 
@@ -616,13 +696,18 @@ async function buildPlanningContext(db, recentPushes = []) {
 // duplicates are collapsed so a race is listed once. Clearly labelled as
 // upcoming/not-yet-completed so the model never mistakes it for history.
 async function scheduledSummary(db, from, to) {
+  // Draft gate (9d-2): drafts are dormant — the coach's scheduled view shows
+  // the calendar as it really is (Runna until an app plan is ACTIVATED); the
+  // draft itself is surfaced separately via planning.plans.
   const rows = await db.all(
-    `SELECT calendar_date, title, estimated_distance_m, source,
-            is_race_auto, is_race_override,
-            COALESCE(is_race_override, is_race_auto) AS is_race, steps_json
-     FROM planned_workouts
-     WHERE calendar_date >= $1 AND calendar_date <= $2
-     ORDER BY calendar_date`, [from, to]);
+    `SELECT p.calendar_date, p.title, p.estimated_distance_m, p.source,
+            p.is_race_auto, p.is_race_override,
+            COALESCE(p.is_race_override, p.is_race_auto) AS is_race, p.steps_json,
+            pl.status AS plan_status
+     FROM planned_workouts p LEFT JOIN plans pl ON pl.plan_id = p.plan_id
+     WHERE p.calendar_date >= $1 AND p.calendar_date <= $2 AND p.removed_at IS NULL
+       AND pl.status IS DISTINCT FROM 'draft'
+     ORDER BY p.calendar_date`, [from, to]);
   const items = collapseRaceDuplicates(applyAppPlanPrecedence(rows));
   if (!items.length) return `No scheduled workouts between ${from} and ${to}.`;
 

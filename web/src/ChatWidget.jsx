@@ -4,6 +4,7 @@ import { Icon, Markdown } from './ui';
 import { shortDate } from './format';
 import { PacerPreview } from './PacerPreview';
 import { PlanReview } from './PlanReview';
+import { ActivationFlow } from './PlanActivation';
 
 // Floating chat coach — a discreet bottom-right widget that answers training
 // questions using the same context engine as the daily insight. Conversation
@@ -48,7 +49,13 @@ export default function ChatWidget() {
   const [pending, setPending] = useState(false);
   const [pushingIdx, setPushingIdx] = useState(null);
   const [savingIdx, setSavingIdx] = useState(null);
+  const [applyingIdx, setApplyingIdx] = useState(null); // edit directive mid-apply
   const [error, setError] = useState(null);
+  // Save→activate modal (9d-3): plan_id of a just-saved draft the athlete chose
+  // to activate in-flow. Save stays non-committal — the modal OPENS only on the
+  // explicit "Activate now" click, never automatically, and inside it pushing
+  // still requires its own confirm button (same gate as the dashboard card).
+  const [activateFor, setActivateFor] = useState(null);
   // Copy-context state: 'idle' | 'copying' | 'copied' | 'error'. `fallbackText`
   // holds the dump when the clipboard API is unavailable, so it can be shown in
   // a selectable area for manual copy.
@@ -121,10 +128,33 @@ export default function ChatWidget() {
     setError(null);
     setPending(true);
     try {
-      const { reply, spec, done, specError } = await api.plan(toPayload(nextMessages));
+      const { reply, spec, edit, done, specError } = await api.plan(toPayload(nextMessages));
       let assistant = { role: 'assistant', content: reply };
       let failNote = null;
-      if (spec) {
+      if (edit) {
+        // Stage 9d edit directive (move/delete/replace on an active-plan
+        // session). Rendered as a confirmation card; nothing happens until the
+        // athlete confirms (applyEdit). A replace previews through the same
+        // guard-backed preview endpoint as a fresh spec, with the same
+        // guard-failure relay so the coach can fix a doomed nudge itself.
+        assistant.edit = edit;
+        assistant.apiContent =
+          `${reply}\n\n[edit emitted: ${edit.edit} ${edit.schedule_id || edit.plan_id}${edit.to_date ? ` to ${edit.to_date}` : ''}]`;
+        if (edit.edit === 'replace') {
+          try {
+            const preview = await api.pacerPreview(edit.spec);
+            assistant = { ...assistant, preview };
+          } catch (e) {
+            const msg = e.message || 'Preview failed';
+            assistant = { ...assistant, previewError: msg };
+            failNote = {
+              role: 'user',
+              system: true,
+              content: `[Preview failed: ${msg} — the revised spec was rejected by the guard before the athlete saw it. Fix exactly what the error names and re-emit the corrected edit directive.]`,
+            };
+          }
+        }
+      } else if (spec) {
         // Marker for the model's history — see toPayload/apiContent above.
         assistant.apiContent =
           `${reply}\n\n[spec emitted: ${spec.name || 'session'} for ${spec.date || 'unscheduled'}]`;
@@ -242,7 +272,7 @@ export default function ChatWidget() {
         {
           role: 'user',
           system: true,
-          content: `[Plan saved: ${res.sessions} sessions, ${res.from} to ${res.to}. It now drives the dashboard and coach; push it to Garmin from the dashboard's "Activate plan" card.]`,
+          content: `[Plan saved as a DRAFT: ${res.sessions} sessions, ${res.from} to ${res.to}. It is dormant — nothing is on Garmin and the existing calendar stays live — until the athlete activates it: offered right here via "Activate now", or later from the dashboard's "Activate plan" card.]`,
         },
       ]);
       setMode('chat');
@@ -319,6 +349,57 @@ export default function ChatWidget() {
     }
   };
 
+  // Apply the edit directive attached to message `i` (Stage 9d) — the confirm
+  // step for move/delete/replace. A move without `force` may come back as a
+  // collision flag instead of a result: stamp it on the message so the card
+  // re-renders as "still move here?" and the same button retries with force.
+  // Success stamps `applied` (edits never apply twice) and appends a system
+  // note so the coach reads the reconcile as done and never re-emits the edit.
+  const applyEdit = async (i, force = false) => {
+    const msg = messages[i];
+    if (!planning || !msg?.edit || msg.applied || applyingIdx != null || pending) return;
+    setApplyingIdx(i);
+    setError(null);
+    try {
+      const e = msg.edit;
+      let res;
+      if (e.edit === 'move') {
+        res = await api.moveSession(e.schedule_id, e.to_date, force);
+        if (res.collision) {
+          setMessages(messages.map((m, j) => (j === i ? { ...m, collision: res.collision } : m)));
+          return;
+        }
+      } else if (e.edit === 'delete') {
+        res = await api.removeSession(e.schedule_id);
+      } else if (e.edit === 'discard_plan') {
+        res = await api.discardPlan(e.plan_id);
+      } else {
+        res = await api.replaceSession(e.schedule_id, e.spec);
+      }
+      const extra =
+        (res.warning ? ` Note: ${res.warning}` : '') +
+        (res.recorded === false
+          ? ' WARNING: Garmin was updated but the hub failed to record it — refresh before editing further.'
+          : '');
+      const note =
+        e.edit === 'move'
+          ? `[Moved: ${res.moved.title} from ${res.moved.from} to ${res.moved.to} — Garmin and the plan are reconciled.${extra}]`
+          : e.edit === 'delete'
+            ? `[Removed: ${res.removed.title} on ${res.removed.date} — off the plan and off Garmin.${extra}]`
+            : e.edit === 'discard_plan'
+              ? `[Draft discarded: "${res.name || res.discarded}" and its ${res.sessions} sessions are deleted. Nothing was on Garmin; the calendar is unchanged.]`
+              : `[Updated: ${res.updated.name} on ${res.updated.date} — the revised session is on Garmin.${extra}]`;
+      setMessages([
+        ...messages.map((m, j) => (j === i ? { ...m, applied: res } : m)),
+        { role: 'user', system: true, content: note },
+      ]);
+    } catch (err) {
+      setError(err.message || 'Edit failed');
+    } finally {
+      setApplyingIdx(null);
+    }
+  };
+
   const onKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -384,7 +465,7 @@ export default function ChatWidget() {
               <button
                 onClick={() => enterMode('composer')}
                 disabled={pending}
-                title="Compose an adapted multi-week plan (replaces the Runna block content)"
+                title="Compose a multi-week plan (adapts your Runna block, or builds from scratch)"
                 className="inline-flex items-center gap-1 rounded-lg border border-line px-2 py-1 text-xs text-ink-secondary transition hover:bg-surface-2 disabled:opacity-50"
               >
                 <Icon name="calendar" /> Adapt
@@ -428,7 +509,7 @@ export default function ChatWidget() {
             {planning
               ? 'Planning mode — describe the week or session you want, and the coach will propose it, then build and push each session for your approval.'
               : composer
-                ? 'Plan composer — the coach reads your Runna block and proposes an adapted plan (same skeleton, its own sessions). You review week by week, then save it to your calendar.'
+                ? 'Plan composer — the coach reads your calendar and proposes a multi-week plan: an adaptation of your Runna block (same skeleton, its own sessions), or one from scratch when there’s nothing to adapt (a bridge, a gap-fill). You review week by week, then save it.'
                 : 'Ask about your training — paces, recovery, whether a goal is realistic, why a run felt hard.'}
           </p>
         )}
@@ -467,6 +548,7 @@ export default function ChatWidget() {
                       saving={savingIdx === i}
                       saved={m.savedPlan}
                       onSave={() => savePlan(i)}
+                      onActivate={() => setActivateFor(m.savedPlan?.plan_id ?? null)}
                     />
                   </div>
                 )}
@@ -480,7 +562,47 @@ export default function ChatWidget() {
                     is a deliberate revision.
                   </p>
                 )}
-                {m.preview && (
+                {m.edit && (
+                  <div className="mt-2 w-full space-y-2">
+                    {m.edit.edit === 'replace' && m.preview && (
+                      <PacerPreview preview={m.preview} date={m.edit.spec.date} />
+                    )}
+                    {m.applied ? (
+                      <p className="text-xs text-ink-secondary">
+                        {m.edit.edit === 'move' ? 'Moved ✓'
+                          : m.edit.edit === 'delete' ? 'Removed ✓'
+                          : m.edit.edit === 'discard_plan' ? 'Draft discarded ✓'
+                          : 'Updated ✓'}
+                      </p>
+                    ) : !planning ? (
+                      <p className="text-xs text-ink-muted">Not applied — planning ended.</p>
+                    ) : (
+                      <>
+                        {m.collision && (
+                          <p className="text-xs text-sem-red">
+                            {shortDate(m.collision.date)} {m.collision.reasons.join('; ')} — still
+                            move it there?
+                          </p>
+                        )}
+                        {(m.edit.edit !== 'replace' || m.preview) && (
+                          <button
+                            onClick={() => applyEdit(i, !!m.collision)}
+                            disabled={applyingIdx != null || pending}
+                            className="rounded-lg bg-acc px-3 py-2 text-sm font-medium text-acc-ink transition hover:opacity-90 disabled:opacity-50"
+                          >
+                            {applyingIdx === i ? 'Applying…'
+                              : m.collision ? 'Move anyway'
+                              : m.edit.edit === 'move' ? `Move to ${shortDate(m.edit.to_date)}`
+                              : m.edit.edit === 'delete' ? 'Remove from plan & Garmin'
+                              : m.edit.edit === 'discard_plan' ? 'Discard draft'
+                              : 'Update on Garmin'}
+                          </button>
+                        )}
+                      </>
+                    )}
+                  </div>
+                )}
+                {m.preview && !m.edit && (
                   <div className="mt-2 w-full space-y-2">
                     <PacerPreview preview={m.preview} date={m.spec.date} />
                     {m.pushed ? (
@@ -557,6 +679,27 @@ export default function ChatWidget() {
           </button>
         </div>
       </div>
+
+      {activateFor && (
+        // Save→activate modal (9d-3): the same activation flow as the dashboard
+        // card, in-flow after a save. Closing it at any point is safe — the flow
+        // is entirely server-state-derived, so the dashboard card picks up
+        // exactly where this left off (it is the resume path).
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-lg rounded-2xl border border-line bg-surface-1 p-5 shadow-xl">
+            <div className="mb-1 flex justify-end">
+              <button
+                onClick={() => setActivateFor(null)}
+                aria-label="Close activation"
+                className="rounded-lg border border-line px-2.5 py-1 text-sm text-ink-secondary transition hover:bg-surface-2"
+              >
+                ✕
+              </button>
+            </div>
+            <ActivationFlow variant="modal" expectPlanId={activateFor} />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

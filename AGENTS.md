@@ -10,23 +10,23 @@ A personal, single-user web app that ingests my Garmin running data and provides
 - **Database:** PostgreSQL (database `garminhub`; locally the Homebrew PG 14 service). `db/schema.pg.sql` is the canonical schema.
 - **API:** Node + Express + `pg`, fully async. Two pools mirror a deliberate read/write split (see API section). Serves JSON to the frontend and handles AI-coach calls.
 - **Frontend:** React (JavaScript, not TypeScript) + Tailwind + Recharts. Fetch state flows through `useFetch` + the shared `StateWrap` wrapper — every section must render visible loading/error states, never silently fall through to empty data (the hero once rendered a confident fake "rest week" while the API was down).
-- **AI layer:** Node calls the Anthropic Claude API (Opus, daily). Uses a separate API key in `.env`.
+- **AI layer:** Node calls the Anthropic Codex API (Opus, daily). Uses a separate API key in `.env`.
 - **Host:** TBD — moving toward a proper hosted single-user deployment; provider not yet chosen. Until then, the local macOS launchd setup (see Build & deploy) is the running instance.
 
 ## Data flow
 
-`cron → ingest.py → Postgres ← Express API ← React dashboard`, with the API also calling the Claude API for coaching.
+`cron → ingest.py → Postgres ← Express API ← React dashboard`, with the API also calling the Codex API for coaching.
 
 ## Repo layout
 
 ```
 garmin-hub/
   ingest/   Python ingest + Garmin client + .env + .garth/ token cache
-  server/   Express API, db access (pg pools), Claude client
+  server/   Express API, db access (pg pools), Codex client
   web/      React + Tailwind frontend
   db/       schema.pg.sql (canonical), setup_local.sh, README (roles + env vars)
   attic/    retired SQLite-era artifacts (see attic/README.md) — nothing here runs
-  CLAUDE.md
+  AGENTS.md
 ```
 
 ## Database
@@ -98,7 +98,7 @@ Garmin's own `race` boolean is unreliable — it's `false` even for workouts tit
 
 - `POST /api/plan/session/:schedule_id/move` / `.../remove` / `.../replace` — Stage 9d single-session edits on the **active** plan's today-onward sessions (past = frozen; drafts aren't edited, they're re-composed). All three funnel through the one Garmin-reconcile primitive (`pacer_cli.py reconcile` — see Pacer) plus shared row bookkeeping incl. ghost cleanup (deleting the `source='garmin'` row ingest re-created for the old push, keyed by `workout_id`). `move` takes `{ to_date, force? }` — without `force` a collision on the target date (another workout, or a `profile.routines` day like football) returns `{ collision }` and does nothing; the UI confirms and retries with `force:true`. It re-validates the stored spec on principle, then reconciles Garmin. `remove` soft-deletes (`removed_at`) + deletes the Garmin workout. `replace` (the nudge) takes `{ spec }` (same date enforced — a date change is a move), full guard re-run, then upload-new-then-delete-old. All share the push-next in-process lock; Garmin-then-DB failures degrade to `recorded:false` like 9a/9c.
 
-The AI-coach and pacer routes also spawn Python or call Claude (see AI coach / Pacer below); `POST /api/pacer/push`, `POST /api/plan/:plan_id/push-next` (both through `pacer_cli.py push`) and the three Stage 9d session-edit endpoints (through `pacer_cli.py reconcile`) are the only endpoints that write to **Garmin**. `POST /api/ingest/refresh` spawns `ingest.py` on demand (in-process lock stops concurrent runs).
+The AI-coach and pacer routes also spawn Python or call Codex (see AI coach / Pacer below); `POST /api/pacer/push`, `POST /api/plan/:plan_id/push-next` (both through `pacer_cli.py push`) and the three Stage 9d session-edit endpoints (through `pacer_cli.py reconcile`) are the only endpoints that write to **Garmin**. `POST /api/ingest/refresh` spawns `ingest.py` on demand (in-process lock stops concurrent runs).
 
 **Prompt-cache stability (real money):** `buildContext` / `buildPlanningContext` output is injected as a `cache_control`'d system block on every coach call, so it must be **byte-stable across calls** — a per-call timestamp in it busts the cache every request. That's why the context carries a day-granular `today` (the coach needs it to resolve "Saturday" to a date), not an ISO timestamp; never add per-call values (timestamps, randomness) to those payloads. `renderContextDump` stamps its timestamp at render time, outside any cached path.
 
@@ -167,7 +167,7 @@ Build proceeds in stages; don't build ahead of the current one.
     - **API:** `POST /api/coach/plan` (Opus). `planReply` (`coach.js`) drives it with `PLANNING_SYSTEM` (the composer persona: assess-before-propose, the archetype catalogue, the blocks-spec shape, the guard bounds) + `buildPlanningContext` (`context.js`, wraps `buildContext` with `planning.zones` / `planning.goal_paces` / `planning.guard` / `planning.pushed_recently`). Returns `{ reply, spec, done, specError }`. Preview/push still go through `/api/pacer/preview` and `/api/pacer/push` (the latter the only Garmin write); pushes are recorded in an in-memory `recentPushes` list so the coach doesn't double-book a just-pushed session.
     - **Frontend:** `web/src/ChatWidget.jsx` gains a planning mode — accent border while active, and a fresh thread on entry (chat and planning can't share history / system prompt). A returned spec renders an inline preview (`web/src/PacerPreview.jsx`, lifted out of the old pacer modal) with a "Push to Garmin" button; a successful push **auto-advances** to the next agreed session.
     - **Reliability fixes:** phantom-push guard (a bare "all done" with no real push does NOT end planning — only an actual `api.pacerPush` result sets `pushed`); no re-presentation of an already-pushed session; spec-emitted history markers (`[spec emitted: …]` — the app strips fenced specs from history, so the model doesn't believe it never presented one); and a one-shot **repair loop** in `planReply` when a turn tries to present a spec but none extracts (truncation / invalid JSON).
-  - **8d — scheduled-workout tool.** ✅ Done. The coach can see the future plan beyond the injected context's 14-day horizon via a `get_scheduled_workouts` Claude tool (chat + planning mode, `coach.js`): on demand it reads `planned_workouts` up to 12 weeks ahead (clamped) and returns a compact one-line-per-workout summary with steps (`scheduledSummary` in `context.js`), labelled "UPCOMING — not yet completed". `createResolvingTools` handles the tool round-trips server-side; the client only sees the final reply. No new table or endpoint — `planned_workouts` + `GET /api/planned?from=&to=` already cover it. Note: Runna only syncs ~2 weeks ahead, so far-future weeks legitimately return empty until Runna publishes them.
+  - **8d — scheduled-workout tool.** ✅ Done. The coach can see the future plan beyond the injected context's 14-day horizon via a `get_scheduled_workouts` Codex tool (chat + planning mode, `coach.js`): on demand it reads `planned_workouts` up to 12 weeks ahead (clamped) and returns a compact one-line-per-workout summary with steps (`scheduledSummary` in `context.js`), labelled "UPCOMING — not yet completed". `createResolvingTools` handles the tool round-trips server-side; the client only sees the final reply. No new table or endpoint — `planned_workouts` + `GET /api/planned?from=&to=` already cover it. Note: Runna only syncs ~2 weeks ahead, so far-future weeks legitimately return empty until Runna publishes them.
 - **Stage 9 — adapted-plan generation (replacing Runna).** In progress.
   - **9a — app-plan foundation.** ✅ Done. Schema + read-path precedence + push-time persistence only; no planning-mode or UI changes (those are 9b/9c).
     - `planned_workouts` gains `plan_id`/`rationale` (see Database) and the third `source` value `'app'`.

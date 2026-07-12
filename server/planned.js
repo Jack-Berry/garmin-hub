@@ -52,16 +52,27 @@ const localToday = () => {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
 
-// App-plan precedence (Stage 9a): when the app has planned a session on a
-// date, the app plan is the source of truth for that WHOLE date — upcoming
-// garmin/runna_ical rows on it are dropped (by date, not per-workout-type, so
-// an app plan supersedes overlapping Runna dates outright). Past dates are
-// never touched: history stays whatever was actually prescribed. Rows must
-// carry `source` and `calendar_date` ('YYYY-MM-DD' strings via the db.js
-// parsers, so plain string comparison orders correctly).
+// App-plan precedence (Stage 9a, tightened in 9d-2): when the app owns a
+// session on a date, the app plan is the source of truth for that WHOLE date —
+// upcoming garmin/runna_ical rows on it are dropped (by date, not
+// per-workout-type, so an app plan supersedes overlapping Runna dates
+// outright). Past dates are never touched: history stays whatever was actually
+// prescribed.
+//
+// "Owns" is gated on plan status (9d-2): only rows that are actually live on
+// the calendar suppress — the ACTIVE plan's sessions, and one-off pushes
+// (plan_id NULL, which only exist after a Garmin push). A draft is dormant and
+// suppresses nothing (Runna stays the real plan until activation); completed/
+// archived plans are history, not a claim on future dates. Rows must carry
+// `source`, `calendar_date` ('YYYY-MM-DD' strings via the db.js parsers, so
+// plain string comparison orders correctly) and `plan_status` (plans.status
+// via LEFT JOIN; NULL for one-off pushes — a row missing the field entirely
+// degrades to the pre-9d-2 always-suppress behaviour).
+const appRowLive = (r) =>
+  r.source === 'app' && (r.plan_status == null || r.plan_status === 'active');
+
 function applyAppPlanPrecedence(rows, today = localToday()) {
-  const appDates = new Set(
-    rows.filter((r) => r.source === 'app').map((r) => r.calendar_date));
+  const appDates = new Set(rows.filter(appRowLive).map((r) => r.calendar_date));
   if (!appDates.size) return rows;
   return rows.filter((r) =>
     r.source === 'app' || r.calendar_date < today || !appDates.has(r.calendar_date));

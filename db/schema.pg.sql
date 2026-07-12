@@ -165,17 +165,46 @@ CREATE TABLE IF NOT EXISTS planned_workouts (
 
   -- Appended by Stage 9a (app-generated plans)
   plan_id                      text,                -- app rows: owning adapted-plan id; NULL = one-off push / non-app row
-  rationale                    text                 -- app rows: per-session "why" from the coach
+  rationale                    text,                -- app rows: per-session "why" from the coach
+  removed_at                   timestamptz          -- Stage 9d soft-delete (app rows only): NULL = live; set = session dropped from the plan (kept for history / 9e load-awareness), excluded from every read path
 );
 
 CREATE INDEX IF NOT EXISTS idx_planned_workouts_calendar_date
   ON planned_workouts (calendar_date);
 
--- Adapted-plan parents (Stage 9c). One row per saved plan; planned_workouts
+-- Adapted-plan parents (Stage 9c/9d). One row per saved plan; planned_workouts
 -- app rows point here via plan_id. Holds the plan-level metadata the composer
--- generates (name/goal/summary/weeks) plus the push lifecycle: 'draft' on
--- save, 'active' once every session has been pushed to Garmin. Per-session
+-- generates (name/goal/summary/weeks) plus the plan lifecycle. Per-session
 -- push state lives on planned_workouts (workout_id NULL = not yet pushed).
+--
+-- status lifecycle (Stage 9d) — forward-only, nothing ever moves backward:
+--   'draft'     saved, not yet pushed to Garmin
+--   'active'    every session pushed (the 9c activation flip). At most ONE
+--               plan is active at a time, enforced at activation: flipping a
+--               plan to active retires any other active plan (below).
+--   'completed' block finished — goal race date (parsed from goal_race text,
+--               falling back to date_to) has passed. Set automatically on
+--               /api/plan/current load; also the retirement target at
+--               activation when the outgoing active plan is already finished.
+--   'archived'  superseded while still live — another plan activated before
+--               this one finished (the re-adaptation case 9e leans on).
+--   'discarded' abandoned draft — superseded by a newer saved draft (draft
+--               hygiene: a new save discards prior drafts + their session rows).
+-- Legal transitions: draft -> active | discarded; active -> completed | archived.
+-- All statuses are retained as history — nothing in the lifecycle deletes a plan,
+-- with ONE exception (9d-2): an athlete-requested discard of a DRAFT
+-- (POST /api/plan/:plan_id/discard) hard-deletes the plan row and its session
+-- rows. Draft-only, and only while no session carries a workout_id — a draft
+-- has nothing on Garmin and no run history, so there is nothing to preserve.
+-- Draft visibility (9d-2): a draft's sessions are dormant — excluded from every
+-- default read surface and from app-plan precedence until activation flips the
+-- plan to 'active'. Drafts surface only via /api/plan/current (the Activate
+-- card) and the planning context's plan-lifecycle list.
+-- runna_cleared_at (9d-3): athlete-asserted "Runna is cancelled / nothing to
+-- cancel" — the manual override for the post-push cancel-Runna gate, set via
+-- POST /api/plan/:plan_id/runna-cleared. NULL = not asserted (the gate clears
+-- itself when the plan's date span holds no live Runna rows). Never written by
+-- ingest; the feed check can't hold the athlete hostage.
 CREATE TABLE IF NOT EXISTS plans (
   plan_id                      text PRIMARY KEY,    -- matches planned_workouts.plan_id
   name                         text,
@@ -184,8 +213,9 @@ CREATE TABLE IF NOT EXISTS plans (
   weeks_json                   jsonb,               -- composer weeks[] verbatim (start/focus lines)
   date_from                    date,
   date_to                      date,
-  status                       text NOT NULL DEFAULT 'draft',  -- 'draft' | 'active'
-  created_at                   timestamptz
+  status                       text NOT NULL DEFAULT 'draft',  -- see lifecycle above
+  created_at                   timestamptz,
+  runna_cleared_at             timestamptz          -- 9d-3 manual cancel-gate override
 );
 
 CREATE TABLE IF NOT EXISTS recovery (

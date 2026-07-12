@@ -58,6 +58,27 @@ def delete(g, workout_id):
     return resp
 
 
+def unschedule(g, schedule_id):
+    """Remove one calendar entry WITHOUT deleting the workout template —
+    the other half of schedule(); used by the Stage 9d move reconcile."""
+    resp = g.unschedule_workout(schedule_id)
+    print(f"  unscheduled calendar entry {schedule_id}")
+    return resp
+
+
+def find_schedule_id(g, workout_id, date_str):
+    """Locate the Garmin calendar schedule id for workout_id on date_str (the
+    push response's schedule id isn't persisted, so a move looks it up live).
+    Returns None if no matching calendar entry exists."""
+    cal = g.get_scheduled_workouts(int(date_str[:4]), int(date_str[5:7]))
+    for item in (cal.get("calendarItems", []) if isinstance(cal, dict) else []):
+        if (str(item.get("itemType", "")).lower() == "workout"
+                and item.get("workoutId") == workout_id
+                and item.get("date") == date_str):
+            return item.get("id")
+    return None
+
+
 # --- Test workouts ------------------------------------------------------------
 def build_format_check():
     """(a) Sub-20 5k, km-paired negative, 500m — re-confirm template parity."""
