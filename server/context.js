@@ -156,16 +156,24 @@ const parseSteps = (segments) => {
   }
 };
 
-async function buildContext(db) {
-  // ONE local today for the whole build: every window below is an offset from
-  // it, and it's what the coach is told the date is. Computed once so the
-  // stated date and the queried windows can never disagree.
-  const today = localDate();
+// --- Section builders --------------------------------------------------------
+// Each returns ONE self-contained slice of context, so a surface can take a
+// section without dragging in the others. Every builder that needs a date takes
+// the caller's single local `today` (Stage 10a) — no section computes its own.
+// Property order inside each section is fixed, and every query has a stable
+// ORDER BY: the assembled object is injected as a cache_control'd prompt block
+// and must be byte-stable across calls.
 
+// The look-back / look-ahead window shared by the runs, recovery and upcoming
+// sections (and reported to the coach as `window_days`).
+const WINDOW_DAYS = 14;
+
+// Goals, constraints, routines, notes.
+async function sectionProfile(db) {
   const profileRow = await db.get(
     'SELECT shoes_json, races_json, injuries_json, routines_json, general_notes FROM profile WHERE id = 1'
   ) || {};
-  const profile = {
+  return {
     shoes: parseList(profileRow.shoes_json)
       .filter((s) => s && s.name)
       .map((s) => (s.purpose ? `${s.name} (${s.purpose})` : s.name)),
@@ -192,8 +200,11 @@ async function buildContext(db) {
     // The user no longer specifies paces; the coach derives them from runs.
     pace_guidance: 'Paces are not user-provided — infer easy/threshold/5k/long-run paces from recent_runs.',
   };
+}
 
-  // --- Recent runs (last 14 days, runs only) ---
+// Recent runs over the window (runs only), each with a work-rep summary when
+// the session was structured.
+async function sectionRecentRuns(db, today) {
   const runRows = await db.all(
     `SELECT activity_id, start_time_local::date AS date, distance_m, duration_s, avg_hr,
             hr_zone1_s, hr_zone2_s, hr_zone3_s, hr_zone4_s, hr_zone5_s,
@@ -202,7 +213,7 @@ async function buildContext(db) {
      FROM activities
      WHERE activity_group = 'run' AND distance_m > 0
        AND start_time_local >= $1
-     ORDER BY start_time_local DESC`, [shiftDate(today, -14)]);
+     ORDER BY start_time_local DESC`, [shiftDate(today, -WINDOW_DAYS)]);
 
   // All laps for the whole run set in ONE query (the old per-run lookup was a
   // fine prepared-statement loop under SQLite but an N+1 of awaits under pg).
@@ -217,7 +228,7 @@ async function buildContext(db) {
     lapsByActivity.get(l.activity_id).push(l);
   }
 
-  const recent_runs = runRows.map((r) => {
+  return runRows.map((r) => {
     const km = +(r.distance_m / 1000).toFixed(2);
     const zoneMin = zoneMinutes(
       [r.hr_zone1_s, r.hr_zone2_s, r.hr_zone3_s, r.hr_zone4_s, r.hr_zone5_s]);
@@ -236,33 +247,46 @@ async function buildContext(db) {
     if (wi) run.work_intervals = wi;
     return run;
   });
+}
 
-  // --- Recovery (last 14 days): latest snapshot + 14d trend averages ---
-  const recRows = await db.all(
-    `SELECT calendar_date, hrv_last_night, hrv_status,
+// The columns one recovery snapshot is built from — shared by the window query
+// (sectionRecovery) and the per-date one (sectionAlignedRecovery) so the two
+// can never drift into different snapshot shapes.
+const RECOVERY_COLS = `calendar_date, hrv_last_night, hrv_status,
             hrv_baseline_balanced_low, hrv_baseline_balanced_upper,
-            resting_hr, sleep_score, readiness_score, readiness_level
+            resting_hr, sleep_score, readiness_score, readiness_level`;
+
+// One recovery row -> one snapshot. An absent row yields a snapshot of nulls
+// (not null) — that's the long-standing shape of `recovery.latest`.
+const recoverySnapshot = (r = {}) => ({
+  date: r.calendar_date,
+  hrv: r.hrv_last_night,
+  hrv_status: r.hrv_status,
+  hrv_baseline: [r.hrv_baseline_balanced_low, r.hrv_baseline_balanced_upper],
+  resting_hr: r.resting_hr,
+  sleep_score: r.sleep_score,
+  readiness_score: r.readiness_score,
+  readiness_level: r.readiness_level,
+});
+
+// Recovery for ONE day (`asOf`, default today): that day's snapshot plus the
+// trailing-window trend averages. Note `latest` is the newest row at or before
+// `asOf` — for the default (today) that is the current snapshot, but pass a
+// past date and the whole section is anchored there instead.
+async function sectionRecovery(db, asOf) {
+  const recRows = await db.all(
+    `SELECT ${RECOVERY_COLS}
      FROM recovery
-     WHERE calendar_date >= $1
-     ORDER BY calendar_date DESC`, [shiftDate(today, -14)]);
+     WHERE calendar_date >= $1 AND calendar_date <= $2
+     ORDER BY calendar_date DESC`, [shiftDate(asOf, -WINDOW_DAYS), asOf]);
 
   const avg = (key) => {
     const vals = recRows.map((r) => r[key]).filter((v) => v != null);
     return vals.length ? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length) : null;
   };
 
-  const latest = recRows[0] || {};
-  const recovery = {
-    latest: {
-      date: latest.calendar_date,
-      hrv: latest.hrv_last_night,
-      hrv_status: latest.hrv_status,
-      hrv_baseline: [latest.hrv_baseline_balanced_low, latest.hrv_baseline_balanced_upper],
-      resting_hr: latest.resting_hr,
-      sleep_score: latest.sleep_score,
-      readiness_score: latest.readiness_score,
-      readiness_level: latest.readiness_level,
-    },
+  return {
+    latest: recoverySnapshot(recRows[0]),
     avg_14d: {
       hrv: avg('hrv_last_night'),
       resting_hr: avg('resting_hr'),
@@ -270,13 +294,39 @@ async function buildContext(db) {
       readiness_score: avg('readiness_score'),
     },
   };
+}
 
-  // --- Upcoming planned workouts (next 14 days) ---
-  // is_race_auto / is_race_override come along raw so collapseRaceDuplicates can
-  // fold the same-day race triplicate (Runna race + manual override + pacer)
-  // into one entry — otherwise the coach sees and counts the race three times.
-  // Draft plans are dormant (9d-2): their sessions never appear here, and
-  // plan_status feeds the active-only precedence gate.
+// Recovery ALIGNED to one specific day (Stage 10b) — the bundle a surface needs
+// to judge a run that happened in the past: the night before it, the day of it,
+// the day after (when it exists yet), and — labelled separately and explicitly
+// as NOW, not the run's — today's snapshot. Before this, day insight paired a
+// historical run with today's readiness and judged it against the wrong day.
+// Reusable on its own; 10d's get_activity_context will take it as-is.
+async function sectionAlignedRecovery(db, date, today) {
+  const dates = [shiftDate(date, -1), date, shiftDate(date, 1), today];
+  const rows = await db.all(
+    `SELECT ${RECOVERY_COLS}
+     FROM recovery WHERE calendar_date = ANY($1::date[])
+     ORDER BY calendar_date`, [dates]);
+  const byDate = new Map(rows.map((r) => [r.calendar_date, r]));
+  const snap = (d) => (byDate.has(d) ? recoverySnapshot(byDate.get(d)) : null);
+
+  return {
+    for_date: date,
+    recovery_before: snap(dates[0]),   // the night before the session
+    recovery_on_day: snap(date),       // the session's own day
+    recovery_after: snap(dates[2]),    // how they pulled up (null if not in yet)
+    current_recovery: snap(today),     // TODAY — not the session's
+  };
+}
+
+// Upcoming planned workouts over the window.
+// is_race_auto / is_race_override come along raw so collapseRaceDuplicates can
+// fold the same-day race triplicate (Runna race + manual override + pacer)
+// into one entry — otherwise the coach sees and counts the race three times.
+// Draft plans are dormant (9d-2): their sessions never appear here, and
+// plan_status feeds the active-only precedence gate.
+async function sectionUpcoming(db, today) {
   const planRows = await db.all(
     `SELECT p.calendar_date, p.title, p.estimated_distance_m, p.source,
             p.is_race_auto, p.is_race_override,
@@ -285,10 +335,10 @@ async function buildContext(db) {
      FROM planned_workouts p LEFT JOIN plans pl ON pl.plan_id = p.plan_id
      WHERE p.calendar_date >= $1 AND p.calendar_date <= $2 AND p.removed_at IS NULL
        AND pl.status IS DISTINCT FROM 'draft'
-     ORDER BY p.calendar_date`, [today, shiftDate(today, 14)]);
+     ORDER BY p.calendar_date`, [today, shiftDate(today, WINDOW_DAYS)]);
 
   // App-plan precedence (a live app row owns its date) before the race collapse.
-  const upcoming = collapseRaceDuplicates(applyAppPlanPrecedence(planRows)).map((p) => ({
+  return collapseRaceDuplicates(applyAppPlanPrecedence(planRows)).map((p) => ({
     date: p.calendar_date,
     title: p.title,
     km: p.estimated_distance_m ? +(p.estimated_distance_m / 1000).toFixed(2) : null,
@@ -296,52 +346,24 @@ async function buildContext(db) {
     pacer_ready: !!p.pacer_available,
     steps: parseSteps(p.steps_json),
   }));
+}
 
-  // --- Weekly mileage (runs only), newest first ---
-  // date_trunc('week') is ISO Monday-start, matching the old SQLite expression.
+// Weekly mileage (runs only), newest first — the last 5 ISO weeks.
+// date_trunc('week') is ISO Monday-start, matching the old SQLite expression.
+async function sectionWeeklyMileage(db) {
   const weekRows = await db.all(
     `SELECT to_char(date_trunc('week', start_time_local), 'YYYY-MM-DD') AS week_start,
             SUM(distance_m) AS m
      FROM activities
      WHERE activity_group = 'run' AND distance_m > 0 AND start_time_local IS NOT NULL
      GROUP BY week_start ORDER BY week_start DESC LIMIT 5`);
-  const weekly_km = weekRows.map((w) => +(w.m / 1000).toFixed(1));
+  return weekRows.map((w) => +(w.m / 1000).toFixed(1));
+}
 
-  // --- Derived signals + flags (computed here, not left to the model) ---
-  const priorWeeks = weekly_km.slice(1);
-  const priorAvg = priorWeeks.length
-    ? +(priorWeeks.reduce((a, b) => a + b, 0) / priorWeeks.length).toFixed(1)
-    : null;
-
-  const flags = [];
-  if (latest.hrv_last_night != null && latest.hrv_baseline_balanced_low != null &&
-      latest.hrv_last_night < latest.hrv_baseline_balanced_low) {
-    flags.push('HRV below baseline');
-  }
-  if (latest.hrv_status && latest.hrv_status !== 'BALANCED') {
-    flags.push(`HRV status ${latest.hrv_status}`);
-  }
-  if (['LOW', 'POOR'].includes(latest.readiness_level)) {
-    flags.push(`readiness ${latest.readiness_level}`);
-  }
-  if (recovery.avg_14d.readiness_score != null && latest.readiness_score != null &&
-      latest.readiness_score < recovery.avg_14d.readiness_score - 10) {
-    flags.push('readiness below 14d average');
-  }
-  if (priorAvg != null && weekly_km[0] > priorAvg * 1.3) {
-    flags.push('weekly mileage spike vs prior weeks');
-  }
-
-  const signals = {
-    current_week_km: weekly_km[0] ?? null,
-    prior_weeks_km: priorWeeks,
-    prior_weeks_avg_km: priorAvg,
-    flags,
-  };
-
-  // --- Personal records (Garmin bests) + current race predictions ---
-  // Compact strings so "goal: PB" is meaningful and the coach knows current
-  // fitness. Time PRs as M:SS / H:MM:SS; Longest Run as km.
+// Personal records (Garmin bests) + current race predictions. Compact strings
+// so "goal: PB" is meaningful and the coach knows current fitness. Time PRs as
+// M:SS / H:MM:SS; Longest Run as km.
+async function sectionRecords(db) {
   const prRows = await db.all(
     'SELECT label, value, value_kind FROM personal_records ORDER BY type_id');
   const personal_records = prRows.map((r) =>
@@ -365,36 +387,100 @@ async function buildContext(db) {
       }
     : null;
 
+  return { personal_records, race_predictions };
+}
+
+// Derived signals + flags — computed here, not left to the model. Pure: a fold
+// over the recovery and weekly-mileage sections, no DB of its own.
+function deriveSignals(recovery, weekly_km) {
+  const priorWeeks = weekly_km.slice(1);
+  const priorAvg = priorWeeks.length
+    ? +(priorWeeks.reduce((a, b) => a + b, 0) / priorWeeks.length).toFixed(1)
+    : null;
+
+  const latest = recovery.latest;
+  const [baselineLow] = latest.hrv_baseline;
+  const flags = [];
+  if (latest.hrv != null && baselineLow != null && latest.hrv < baselineLow) {
+    flags.push('HRV below baseline');
+  }
+  if (latest.hrv_status && latest.hrv_status !== 'BALANCED') {
+    flags.push(`HRV status ${latest.hrv_status}`);
+  }
+  if (['LOW', 'POOR'].includes(latest.readiness_level)) {
+    flags.push(`readiness ${latest.readiness_level}`);
+  }
+  if (recovery.avg_14d.readiness_score != null && latest.readiness_score != null &&
+      latest.readiness_score < recovery.avg_14d.readiness_score - 10) {
+    flags.push('readiness below 14d average');
+  }
+  if (priorAvg != null && weekly_km[0] > priorAvg * 1.3) {
+    flags.push('weekly mileage spike vs prior weeks');
+  }
+
+  return {
+    current_week_km: weekly_km[0] ?? null,
+    prior_weeks_km: priorWeeks,
+    prior_weeks_avg_km: priorAvg,
+    flags,
+  };
+}
+
+// --- Composition -------------------------------------------------------------
+
+// The general coaching context: every section, assembled. Surfaces that need
+// less can compose the sections directly (Stage 10c); this shape is unchanged.
+async function buildContext(db) {
+  // ONE local today for the whole build: every section's window is an offset
+  // from it, and it's what the coach is told the date is. Computed once so the
+  // stated date and the queried windows can never disagree.
+  const today = localDate();
+
+  const [profile, recent_runs, recovery, upcoming, weekly_km, records] = await Promise.all([
+    sectionProfile(db),
+    sectionRecentRuns(db, today),
+    sectionRecovery(db, today),
+    sectionUpcoming(db, today),
+    sectionWeeklyMileage(db),
+    sectionRecords(db),
+  ]);
+
   return {
     // Day-granular on purpose: this object is injected as a cache_control'd
     // prompt block, so it must be byte-stable across calls — a per-call
     // timestamp here busts the prompt cache every request. The coach still
     // needs "today" to resolve relative dates ("Saturday").
     today,
-    window_days: 14,
+    window_days: WINDOW_DAYS,
     profile,
     recent_runs,
     recovery,
     upcoming,
-    signals,
-    personal_records,
-    race_predictions,
+    signals: deriveSignals(recovery, weekly_km),
+    personal_records: records.personal_records,
+    race_predictions: records.race_predictions,
   };
 }
 
 // Per-day focus for the on-demand day insight (Stage 6b). Returns the completed
-// run and/or planned workout on `date` with a `kind`: 'completed' (a run was
-// logged that day), 'planned' (only a plan, nothing run yet), or 'rest'. Reuses
-// the same lap/step helpers as buildContext so the detail stays consistent.
+// run(s) and/or planned workout on `date` with a `kind`: 'completed' (at least
+// one run was logged that day), 'planned' (only a plan, nothing run yet),
+// 'routine', or 'rest'. Reuses the same lap/step helpers as buildContext so the
+// detail stays consistent, and carries the recovery ALIGNED to `date` (10b) —
+// the focus day may be historical, and its readiness is not today's.
 async function buildDayFocus(db, date) {
-  const actRow = await db.get(
+  const today = localDate();
+
+  // ALL runs on the date, oldest first — a double day is two sessions, and
+  // silently analysing one of them was a lie by omission.
+  const actRows = await db.all(
     `SELECT activity_id, name, start_time_local::date AS date, distance_m, duration_s,
             avg_hr, max_hr, hr_zone1_s, hr_zone2_s, hr_zone3_s, hr_zone4_s, hr_zone5_s,
             avg_cadence_spm, avg_power, aerobic_training_effect, anaerobic_training_effect,
             training_effect_label, activity_training_load, elevation_gain_m
      FROM activities
      WHERE activity_group = 'run' AND distance_m > 0 AND start_time_local::date = $1
-     ORDER BY start_time_local DESC LIMIT 1`, [date]);
+     ORDER BY start_time_local`, [date]);
 
   // Draft gate + live-app preference (9d-2): draft sessions never surface, and
   // the app row only outranks the Runna row when it's actually live (active
@@ -428,7 +514,6 @@ async function buildDayFocus(db, date) {
       `SELECT name, distance_m, duration_s, avg_hr FROM activities
        WHERE activity_group = $1 AND start_time_local::date = $2
        ORDER BY start_time_local DESC LIMIT 1`, [group, date]);
-    const today = localDate();
     routine = {
       activity: routineRow.activity,
       intensity: routineRow.intensity ?? null,
@@ -441,32 +526,42 @@ async function buildDayFocus(db, date) {
     };
   }
 
-  if (actRow) {
-    const km = +(actRow.distance_m / 1000).toFixed(2);
-    const zoneMin = zoneMinutes([actRow.hr_zone1_s, actRow.hr_zone2_s,
-      actRow.hr_zone3_s, actRow.hr_zone4_s, actRow.hr_zone5_s]);
-    const laps = await db.all(
-      'SELECT distance_m, duration_s, intensity_type FROM laps WHERE activity_id = $1 ORDER BY lap_index',
-      [actRow.activity_id]);
-    const run = {
-      date: actRow.date,
-      name: actRow.name,
-      km,
-      pace: pace(actRow.duration_s / km),
-      avg_hr: actRow.avg_hr,
-      max_hr: actRow.max_hr,
-      hr_min_by_zone: zoneMin,
-      avg_cadence_spm: actRow.avg_cadence_spm != null ? Math.round(actRow.avg_cadence_spm) : null,
-      avg_power: actRow.avg_power != null ? Math.round(actRow.avg_power) : null,
-      load: actRow.activity_training_load != null ? Math.round(actRow.activity_training_load) : null,
-      effect: actRow.training_effect_label,
-      aerobic_te: actRow.aerobic_training_effect,
-      anaerobic_te: actRow.anaerobic_training_effect,
-      elev_m: actRow.elevation_gain_m != null ? Math.round(actRow.elevation_gain_m) : null,
-    };
-    const wi = workIntervalSummary(laps);
-    if (wi) run.work_intervals = wi;
-    return { kind: 'completed', date, run, planned, routine };
+  if (actRows.length) {
+    // Recovery aligned to the focus day — the night before / day of / day after
+    // the session, plus today's snapshot labelled as today's. Only the
+    // completed-run branch judges execution against readiness, so it's the only
+    // branch that pays for the query.
+    const recovery = await sectionAlignedRecovery(db, date, today);
+
+    const lapRows = await db.all(
+      `SELECT activity_id, distance_m, duration_s, intensity_type FROM laps
+       WHERE activity_id = ANY($1::bigint[]) ORDER BY activity_id, lap_index`,
+      [actRows.map((a) => a.activity_id)]);
+
+    const runs = actRows.map((a) => {
+      const km = +(a.distance_m / 1000).toFixed(2);
+      const run = {
+        date: a.date,
+        name: a.name,
+        km,
+        pace: pace(a.duration_s / km),
+        avg_hr: a.avg_hr,
+        max_hr: a.max_hr,
+        hr_min_by_zone: zoneMinutes(
+          [a.hr_zone1_s, a.hr_zone2_s, a.hr_zone3_s, a.hr_zone4_s, a.hr_zone5_s]),
+        avg_cadence_spm: a.avg_cadence_spm != null ? Math.round(a.avg_cadence_spm) : null,
+        avg_power: a.avg_power != null ? Math.round(a.avg_power) : null,
+        load: a.activity_training_load != null ? Math.round(a.activity_training_load) : null,
+        effect: a.training_effect_label,
+        aerobic_te: a.aerobic_training_effect,
+        anaerobic_te: a.anaerobic_training_effect,
+        elev_m: a.elevation_gain_m != null ? Math.round(a.elevation_gain_m) : null,
+      };
+      const wi = workIntervalSummary(lapRows.filter((l) => l.activity_id === a.activity_id));
+      if (wi) run.work_intervals = wi;
+      return run;
+    });
+    return { kind: 'completed', date, runs, planned, routine, recovery };
   }
 
   if (planned) return { kind: 'planned', date, planned, routine };
@@ -574,6 +669,9 @@ async function renderContextDump(db) {
 // so they're surfaced separately to stop the coach double-booking them.
 async function buildPlanningContext(db, recentPushes = []) {
   const context = await buildContext(db);
+  // The base context's own local today — reused for the plan windows below so
+  // planning can't disagree with the date the coach was just told it is.
+  const today = context.today;
 
   const row = await db.get('SELECT lt_speed_mps, races_json FROM profile WHERE id = 1') || {};
   const records = await db.all('SELECT label, value, value_kind FROM personal_records');
@@ -663,7 +761,7 @@ async function buildPlanningContext(db, recentPushes = []) {
        FROM planned_workouts
        WHERE source = 'app' AND plan_id = $1 AND removed_at IS NULL
          AND calendar_date >= $2
-       ORDER BY calendar_date`, [activePlan.plan_id, localDate()]))
+       ORDER BY calendar_date`, [activePlan.plan_id, today]))
       .map((s) => ({
         schedule_id: s.schedule_id,
         date: s.calendar_date,
@@ -755,4 +853,11 @@ async function scheduledSummary(db, from, to) {
   return lines.join('\n');
 }
 
-module.exports = { buildContext, buildPlanningContext, buildDayFocus, renderContextDump, scheduledSummary, localDate };
+module.exports = {
+  buildContext, buildPlanningContext, buildDayFocus, renderContextDump,
+  scheduledSummary, localDate,
+  // Section builders — composable by surface (Stage 10c) and reusable by the
+  // 10d tools. Each takes the caller's local `today`; none computes its own.
+  sectionProfile, sectionRecentRuns, sectionRecovery, sectionAlignedRecovery,
+  sectionUpcoming, sectionWeeklyMileage, sectionRecords, deriveSignals,
+};

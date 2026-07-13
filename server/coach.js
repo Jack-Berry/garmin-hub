@@ -379,9 +379,9 @@ Style: second person, direct. Do NOT use em-dashes. Do NOT use the ~ symbol, wri
 
 // Per-day insight prompts (Sonnet). "How the run went" is the post-run analysis
 // deliberately kept OUT of the brief; "planned tips" coaches execution.
-const DAY_COMPLETED_SYSTEM = `You are this athlete's running coach reviewing ONE completed run in detail.
+const DAY_COMPLETED_SYSTEM = `You are this athlete's running coach reviewing the run(s) completed on ONE day, in detail.
 
-From the focus run (pace, avg/max HR, time-in-HR-zone, cadence, power, training load and effect, plus any interval work-reps) and the backdrop context (recovery, recent runs, goal paces), tell them how this session actually went. If a planned workout matched the day, judge execution against it: did they hit the target paces and intervals, or over/under-cook it. Comment on effort relative to recovery and how it fits recent training.
+The focus day carries every run logged on it (usually one; a double day carries two, and both count) with pace, avg/max HR, time-in-HR-zone, cadence, power, training load and effect, plus any interval work-reps. Judge them against \`focus.recovery\`, which is aligned TO THE FOCUS DAY, not to now: \`recovery_before\` is the night before the session, \`recovery_on_day\` is the readiness they ran on, \`recovery_after\` is how they pulled up (null if that day has not been recorded yet), and \`current_recovery\` is TODAY's snapshot — which is only the run's readiness if the focus day IS today. The backdrop context's \`recovery\` block is likewise today's, never the focus day's: never judge a past run against it. If a planned workout matched the day, judge execution against it: did they hit the target paces and intervals, or over/under-cook it. Comment on effort relative to the readiness they actually ran on, and on how the session fits recent training.
 
 Be specific with real numbers (paces, HR, load). Keep to a few short sentences or a couple of tight bullets. One short markdown header at most, only if it helps. No bold TL;DR line. Do NOT use em-dashes or the ~ symbol. Second person.`;
 
@@ -581,7 +581,9 @@ async function generateDayInsight(db, date) {
       ? `Comment on today's completed ${focus.routine.activity} session and how it fits the running week.`
       : `Give tips for today's ${focus.routine.activity} session (intensity ${focus.routine.intensity ?? "?"}/10) and how to balance it with running.`
     : focus.kind === "completed"
-      ? "Analyse how this session went."
+      ? focus.runs.length > 1
+        ? `Analyse how the ${focus.runs.length} runs logged on this day went, both of them, and what the double day means.`
+        : "Analyse how this session went."
       : "Give tips for executing this planned workout.";
   const response = await getClient().messages.create({
     model: CHAT_MODEL,
@@ -590,7 +592,10 @@ async function generateDayInsight(db, date) {
       { type: "text", text: withPolicy(system) },
       {
         type: "text",
-        text: `Backdrop training context as JSON:\n\n${JSON.stringify(context)}`,
+        // Backdrop only, and it is anchored to TODAY (its `recovery` and
+        // `signals` are today's) — the focus day may be historical, so the
+        // focus payload carries its own aligned recovery. Byte-stable, cached.
+        text: `Backdrop training context as JSON — all of it as of today (${context.today}), NOT as of the focus day:\n\n${JSON.stringify(context)}`,
         cache_control: { type: "ephemeral" },
       },
     ],
