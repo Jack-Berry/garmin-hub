@@ -331,6 +331,19 @@ export default function ChatWidget() {
     try {
       const res = await api.pacerPush(msg.spec);
       const advanced = messages.map((m, j) => (j === i ? { ...m, pushed: res } : m));
+      // Garmin took it but the hub failed to record it (persisted:false). Same
+      // hazard the plan-push loop halts on: the workout IS on the watch, so a
+      // retry would double-book it — but the app has no row for it. Stamp the
+      // turn (that retires the Push button, making a second push impossible),
+      // warn, and do NOT auto-advance: this is not a clean success and the
+      // athlete must see the mismatch before planning carries on.
+      if (res.persisted === false) {
+        setMessages(advanced);
+        setError(`“${res.name}” reached Garmin but the hub failed to record it. ` +
+          'Don’t push it again — it is already on your watch. It will reappear in ' +
+          'the hub after the next data refresh, as a plain calendar workout.');
+        return;
+      }
       // Structured confirmation so the coach reads it unambiguously as "this
       // session is done" and never re-presents it. `system: true` renders it as
       // a muted line (the app spoke, not the user) and is stripped for the API.
@@ -606,11 +619,21 @@ export default function ChatWidget() {
                   <div className="mt-2 w-full space-y-2">
                     <PacerPreview preview={m.preview} date={m.spec.date} />
                     {m.pushed ? (
-                      <p className="text-xs text-ink-secondary">
-                        Pushed ✓ <span className="font-medium">{m.pushed.name}</span> scheduled for{' '}
-                        {shortDate(m.pushed.date)} · ID{' '}
-                        <span className="font-mono">{m.pushed.workout_id}</span>
-                      </p>
+                      m.pushed.persisted === false ? (
+                        // On Garmin, unknown to the hub — never a clean "Pushed ✓".
+                        <p className="text-xs text-sem-red">
+                          On Garmin, not recorded — <span className="font-medium">{m.pushed.name}</span>{' '}
+                          is scheduled for {shortDate(m.pushed.date)} (ID{' '}
+                          <span className="font-mono">{m.pushed.workout_id}</span>), but the hub
+                          failed to save it. Don’t push it again.
+                        </p>
+                      ) : (
+                        <p className="text-xs text-ink-secondary">
+                          Pushed ✓ <span className="font-medium">{m.pushed.name}</span> scheduled for{' '}
+                          {shortDate(m.pushed.date)} · ID{' '}
+                          <span className="font-mono">{m.pushed.workout_id}</span>
+                        </p>
+                      )
                     ) : planning ? (
                       <button
                         onClick={() => push(i)}

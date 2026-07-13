@@ -335,10 +335,12 @@ app.get('/api/coach/context-dump', handler(async (req, res) => {
 // dashboard's brief carousel reads these; the deeper report is on-demand below.
 app.post('/api/coach/daily', handler(async (req, res) => {
   const { text, context, model } = await generateBrief(db);
-  const createdAt = new Date().toISOString();
-  const end = createdAt.slice(0, 10);
-  const start = new Date(Date.now() - context.window_days * 86400000)
-    .toISOString().slice(0, 10);
+  const createdAt = new Date().toISOString();  // timestamptz — UTC is correct here
+  // The note's date range is a CALENDAR range and must match the context the
+  // brief was written from: local today (context.today), back window_days. The
+  // old UTC slice could label the brief with yesterday's date under BST.
+  const end = context.today;
+  const start = localDate(-context.window_days);
   const result = await writeDb.run(
     `INSERT INTO coach_notes
        (created_at, note_type, content, model, date_range_start, date_range_end)
@@ -531,8 +533,9 @@ app.post('/api/pacer/chat', handler(async (req, res) => {
   if (!Array.isArray(messages) || messages.length === 0) {
     return res.status(400).json({ error: 'messages must be a non-empty array' });
   }
-  const today = new Date().toISOString().slice(0, 10);
-  const { reply, params } = await pacerChat(messages, today);
+  // Local, not UTC: the athlete says "Saturday" in their own timezone, and the
+  // date this resolves to is what gets scheduled on the watch.
+  const { reply, params } = await pacerChat(messages, localDate());
   res.json({ reply, params });
 }));
 
