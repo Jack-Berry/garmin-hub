@@ -4,6 +4,10 @@
 //   - detailed     : full multi-section daily report, on demand (Opus)
 //   - day insight  : on-demand per-day run report / planned tips (Sonnet)
 const Anthropic = require("@anthropic-ai/sdk");
+// writeDb: the ONE write path in the coach layer — the silent memory tools
+// below insert/delete note_type='memory' coach_notes rows. Everything else
+// here stays read-only (`db` is passed in by the routes as before).
+const { writeDb } = require("./db");
 const {
   buildContext,
   buildPlanningContext,
@@ -19,6 +23,20 @@ const MODEL = "claude-opus-4-8";
 // per-day insights. Cheaper and fast enough for a glance.
 const CHAT_MODEL = "claude-sonnet-4-6";
 
+// Shared memory fragment for the three conversational modes (chat, planning,
+// composer — the ones that run through createResolvingTools and so carry the
+// memory tools). Writes are silent by design: a confirm card for "I'll
+// remember that" would get old fast; the athlete prunes in Settings.
+const MEMORY_RULES = `## Persistent memory (coach_memory): remember silently
+
+\`coach_memory\` in the injected context is your long-term memory of this athlete — durable facts saved in past conversations, each {id, date, fact} (date = when it was saved). Use them: the athlete should never have to re-explain a race debrief, an illness, or why training dropped off.
+
+You maintain it with two tools, SILENTLY — never announce a save, quote the stored wording, mention these tools, or ask permission; just keep the conversation going:
+- remember_fact: when the athlete shares durable context the data can't show — their own account of how a race went, an illness or injury behind a gap or drop-off, life context (travel, work stress), a lasting preference. One concise self-contained sentence with its date or timeframe.
+- forget_fact: when a fact is outdated, wrong, or superseded (forget the old id, then remember the replacement).
+
+Never store what the injected data already shows (paces, mileage, recovery, schedules), one-off chit-chat, or near-duplicates of an existing fact. Memory is capped at 50 facts — few dense facts beat many thin ones.`;
+
 // Static framing for the chat coach — the interactive sibling of the daily
 // insight. Same analyst-not-generator role; conversational rather than essay.
 const CHAT_SYSTEM = `You are this athlete's running coach and analyst, answering their questions in a chat.
@@ -28,6 +46,8 @@ You have their full recent training context injected below as JSON: recent runs 
 You do NOT prescribe full workouts or write training plans — they use Runna for that. But you CAN answer practical questions: which shoes for a session, whether a goal is realistic given current fitness, why a run felt hard, what the recovery data suggests, how recent paces compare to goal paces.
 
 The injected context only covers roughly the next 14 days of planned workouts. When the athlete asks about scheduled sessions, races or their plan further out than that, call the get_scheduled_workouts tool (up to 12 weeks ahead) to read the real sessions rather than saying you can't see them.
+
+${MEMORY_RULES}
 
 Be concise and conversational — this is a chat, not an essay. Short, direct answers. No headers or long bullet lists unless genuinely useful.`;
 
@@ -208,6 +228,8 @@ ${LIFECYCLE_RULES}
 
 ${DISCARD_RULE}
 
+${MEMORY_RULES}
+
 ## App notices in the conversation
 
 Bracketed turns are the APP speaking, not the athlete. Read them structurally:
@@ -328,6 +350,8 @@ ${SEGMENTING_RULES}
 
 ${LIFECYCLE_RULES}
 
+${MEMORY_RULES}
+
 (Discarding a draft or editing sessions happens in PLANNING mode, not here — if asked, say so. Re-saving a new plan from this mode also supersedes any existing draft.)
 
 ## You never save; you only propose the plan
@@ -351,7 +375,7 @@ const SYSTEM_PROMPT = `You are an analytical running coach reviewing one athlete
 
 Your job is insight and observation, NOT prescribing workouts. The athlete plans their training with Runna, so never tell them which session to run or write a training plan.
 
-Focus on how their body is responding to training: recovery trends (HRV vs baseline, resting HR, sleep, readiness), heart-rate behaviour, and the balance between training load and readiness. Comment on how recent sessions actually went and what the numbers suggest. Pay particular attention to signals.flags, these are pre-computed warnings; address any that are present. If a race appears in the upcoming list, factor in its proximity and the athlete's goal paces. Use the profile (shoes, goals, typical paces, injuries/constraints) for relevant context, for example how recent paces compare to goal paces, or whether an injury constraint bears on the current load.
+Focus on how their body is responding to training: recovery trends (HRV vs baseline, resting HR, sleep, readiness), heart-rate behaviour, and the balance between training load and readiness. Comment on how recent sessions actually went and what the numbers suggest. Pay particular attention to signals.flags, these are pre-computed warnings; address any that are present. If a race appears in the upcoming list, factor in its proximity and the athlete's goal paces. Use the profile (shoes, goals, typical paces, injuries/constraints) for relevant context, for example how recent paces compare to goal paces, or whether an injury constraint bears on the current load. coach_memory holds durable facts remembered from past coach chats (race debriefs, illnesses, context for training gaps) — factor any relevant ones in.
 
 Be specific: cite actual numbers (paces, HR, HRV, mileage, dates). That specificity is the value, so keep it. Avoid generic advice ("stay hydrated", "listen to your body").
 
@@ -457,6 +481,80 @@ const SCHEDULED_TOOL = {
     required: ["start_date", "end_date"],
   },
 };
+// --- Silent memory tools --------------------------------------------------
+// The coach's persistent memory across conversations: durable athlete facts
+// (race debriefs, illnesses, context for training gaps) stored as
+// note_type='memory' coach_notes rows and injected into every context build
+// as `coach_memory` (context.js sectionMemory). Available in the three
+// conversational modes via createResolvingTools; pruned in Settings.
+const MEMORY_MAX = 50;
+
+const REMEMBER_TOOL = {
+  name: "remember_fact",
+  description:
+    "Silently store ONE durable fact about the athlete in your persistent memory (injected as " +
+    "coach_memory). Use for context the training data cannot show and that will matter in future " +
+    "conversations: the athlete's own account of how a race went, an illness or injury explaining " +
+    "a gap or drop-off in training, life context (travel, work stress), a lasting preference. " +
+    "Never store what the injected data already shows, or a near-duplicate of an existing " +
+    "coach_memory fact.",
+  input_schema: {
+    type: "object",
+    properties: {
+      fact: {
+        type: "string",
+        description:
+          "The fact — one concise, self-contained sentence including its date or timeframe.",
+      },
+    },
+    required: ["fact"],
+  },
+};
+
+const FORGET_TOOL = {
+  name: "forget_fact",
+  description:
+    "Delete one fact from persistent memory by its id (from coach_memory) when it is outdated, " +
+    "wrong, or superseded. To update a fact: forget the old id, then remember the replacement.",
+  input_schema: {
+    type: "object",
+    properties: {
+      id: { type: "integer", description: "The coach_memory id to delete." },
+    },
+    required: ["id"],
+  },
+};
+
+async function runRememberTool(db, input) {
+  const fact = (input && typeof input.fact === "string" ? input.fact : "").trim();
+  if (!fact) return "Nothing stored — fact was empty.";
+  const count = await db.get(
+    "SELECT count(*)::int AS n FROM coach_notes WHERE note_type = 'memory'");
+  if (count.n >= MEMORY_MAX) {
+    return `Memory is full (${MEMORY_MAX} facts) — forget an outdated fact first.`;
+  }
+  const result = await writeDb.run(
+    `INSERT INTO coach_notes (created_at, note_type, content)
+     VALUES ($1, 'memory', $2) RETURNING id`,
+    [new Date().toISOString(), fact]);
+  return `Remembered (id ${result.rows[0].id}).`;
+}
+
+async function runForgetTool(input) {
+  const id = Number(input && input.id);
+  if (!Number.isInteger(id)) return "forget_fact needs a numeric id.";
+  const result = await writeDb.run(
+    "DELETE FROM coach_notes WHERE id = $1 AND note_type = 'memory'", [id]);
+  return result.rowCount ? `Forgotten (id ${id}).` : `No memory fact with id ${id}.`;
+}
+
+const COACH_TOOLS = [SCHEDULED_TOOL, REMEMBER_TOOL, FORGET_TOOL];
+const runCoachTool = (db, b) =>
+  b.name === "get_scheduled_workouts" ? runScheduledTool(db, b.input)
+    : b.name === "remember_fact" ? runRememberTool(db, b.input)
+    : b.name === "forget_fact" ? runForgetTool(b.input)
+    : `Unknown tool ${b.name}.`;
+
 const MAX_TOOL_ROUNDS = 4;
 
 // Execute get_scheduled_workouts: clamp the requested range to [today, today+12
@@ -472,15 +570,16 @@ async function runScheduledTool(db, input) {
   return scheduledSummary(db, from, to);
 }
 
-// Run a messages.create call, resolving any get_scheduled_workouts tool calls in
-// a round-trip loop, and return the final (non-tool_use) response. `convo` is the
+// Run a messages.create call, resolving any coach tool calls (scheduled
+// workouts + the memory tools) in a round-trip loop, and return the final
+// (non-tool_use) response. `convo` is the
 // working message array — mutated with the internal tool round-trips, which stay
 // server-side (the client only ever sees the final reply text).
 async function createResolvingTools(db, params, convo) {
   for (let i = 0; i < MAX_TOOL_ROUNDS; i++) {
     const response = await getClient().messages.create({
       ...params,
-      tools: [SCHEDULED_TOOL],
+      tools: COACH_TOOLS,
       messages: convo,
     });
     if (response.stop_reason !== "tool_use") return response;
@@ -495,10 +594,7 @@ async function createResolvingTools(db, params, convo) {
           .map(async (b) => ({
             type: "tool_result",
             tool_use_id: b.id,
-            content:
-              b.name === "get_scheduled_workouts"
-                ? await runScheduledTool(db, b.input)
-                : `Unknown tool ${b.name}.`,
+            content: await runCoachTool(db, b),
           })),
       ),
     });

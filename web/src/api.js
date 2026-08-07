@@ -59,6 +59,8 @@ export const api = {
   replaceSession: (id, spec) => post(`/api/plan/session/${id}/replace`, { spec }),
   contextDump: () => get('/api/coach/context-dump'),
   coachNotes: (params = {}) => get(`/api/coach/notes${qs(params)}`),
+  coachMemory: () => get('/api/coach/memory'),
+  forgetMemory: (id) => post(`/api/coach/memory/${id}/forget`, {}),
   generateDaily: () => post('/api/coach/daily', {}),
   coachReport: () => post('/api/coach/report', {}),
   coachDay: (date) => post(`/api/coach/day/${date}`, {}),

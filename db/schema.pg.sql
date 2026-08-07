@@ -273,7 +273,7 @@ CREATE TABLE IF NOT EXISTS recovery (
 CREATE TABLE IF NOT EXISTS coach_notes (
   id                           bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   created_at                   timestamptz,
-  note_type                    text,    -- 'daily' / 'weekly' / 'ondemand'
+  note_type                    text,    -- 'daily' / 'weekly' / 'ondemand' / 'memory' (coach's silent persistent facts)
   content                      text,
   model                        text,
   date_range_start             date,

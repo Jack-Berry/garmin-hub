@@ -415,6 +415,25 @@ app.post('/api/coach/plan', handler(async (req, res) => {
   res.json({ reply, spec, edit, done, specError });
 }));
 
+// Coach memory — the durable facts the conversational coach has silently
+// remembered (note_type='memory' coach_notes rows; see the memory tools in
+// coach.js). GET feeds the Settings list; forget is the athlete's manual
+// prune (the coach's own deletions go through its forget_fact tool).
+app.get('/api/coach/memory', handler(async (req, res) => {
+  res.json(await db.all(
+    `SELECT id, created_at, content FROM coach_notes
+     WHERE note_type = 'memory' ORDER BY id DESC`));
+}));
+
+app.post('/api/coach/memory/:id/forget', handler(async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: 'bad id' });
+  const result = await writeDb.run(
+    `DELETE FROM coach_notes WHERE id = $1 AND note_type = 'memory'`, [id]);
+  if (!result.rowCount) return res.status(404).json({ error: 'memory fact not found' });
+  res.json({ forgotten: id });
+}));
+
 // Recent coach notes, newest first. ?limit (default 10), ?note_type filters
 // to one kind (e.g. 'daily' for the dashboard hero carousel).
 app.get('/api/coach/notes', handler(async (req, res) => {

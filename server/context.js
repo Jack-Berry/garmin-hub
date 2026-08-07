@@ -202,6 +202,19 @@ async function sectionProfile(db) {
   };
 }
 
+// Coach memory — durable athlete facts (race debriefs, illnesses, context for
+// training gaps) the conversational coach stores silently via its
+// remember_fact tool (note_type='memory' coach_notes rows; pruned in
+// Settings). Injected into every surface so no mode makes the athlete
+// re-explain. Ordered by id so the injected block stays byte-stable between
+// writes (cache rule above); ids ride along for the forget_fact tool.
+async function sectionMemory(db) {
+  return (await db.all(
+    `SELECT id, created_at::date AS date, content FROM coach_notes
+     WHERE note_type = 'memory' ORDER BY id`))
+    .map((r) => ({ id: r.id, date: r.date, fact: r.content }));
+}
+
 // Recent runs over the window (runs only), each with a work-rep summary when
 // the session was structured.
 async function sectionRecentRuns(db, today) {
@@ -436,8 +449,9 @@ async function buildContext(db) {
   // stated date and the queried windows can never disagree.
   const today = localDate();
 
-  const [profile, recent_runs, recovery, upcoming, weekly_km, records] = await Promise.all([
+  const [profile, coach_memory, recent_runs, recovery, upcoming, weekly_km, records] = await Promise.all([
     sectionProfile(db),
+    sectionMemory(db),
     sectionRecentRuns(db, today),
     sectionRecovery(db, today),
     sectionUpcoming(db, today),
@@ -453,6 +467,7 @@ async function buildContext(db) {
     today,
     window_days: WINDOW_DAYS,
     profile,
+    coach_memory,
     recent_runs,
     recovery,
     upcoming,
@@ -597,6 +612,12 @@ async function renderContextDump(db) {
   out.push(`Other regular activities: ${c.profile.routines.length ? c.profile.routines.join('; ') : '—'}`);
   if (c.profile.notes) out.push(`Notes: ${c.profile.notes}`);
   out.push(`Pace guidance: ${c.profile.pace_guidance}`);
+
+  // --- Coach memory ---
+  if (c.coach_memory.length) {
+    section('COACH MEMORY (facts saved from past coach chats)');
+    c.coach_memory.forEach((m) => out.push(`${m.date} — ${m.fact}`));
+  }
 
   // --- Recent runs ---
   section(`RECENT RUNS (last ${c.window_days} days, runs only)`);
@@ -858,6 +879,7 @@ module.exports = {
   scheduledSummary, localDate,
   // Section builders — composable by surface (Stage 10c) and reusable by the
   // 10d tools. Each takes the caller's local `today`; none computes its own.
-  sectionProfile, sectionRecentRuns, sectionRecovery, sectionAlignedRecovery,
-  sectionUpcoming, sectionWeeklyMileage, sectionRecords, deriveSignals,
+  sectionProfile, sectionMemory, sectionRecentRuns, sectionRecovery,
+  sectionAlignedRecovery, sectionUpcoming, sectionWeeklyMileage, sectionRecords,
+  deriveSignals,
 };

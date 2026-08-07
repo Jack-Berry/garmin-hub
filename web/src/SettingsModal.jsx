@@ -118,6 +118,58 @@ function GarminRecords() {
   );
 }
 
+// Facts the coach has silently remembered from chats (race debriefs, illnesses,
+// context for training gaps). Server-side, not part of the profile save —
+// deleting a fact applies immediately.
+function CoachMemory() {
+  const { data, loading, error } = useFetch(() => api.coachMemory());
+  const [facts, setFacts] = useState(null);
+  const [delError, setDelError] = useState(null);
+  useEffect(() => { if (data) setFacts(data); }, [data]);
+  const list = facts || [];
+
+  const forget = async (id) => {
+    setDelError(null);
+    try {
+      await api.forgetMemory(id);
+      setFacts((f) => (f || []).filter((m) => m.id !== id));
+    } catch (e) {
+      setDelError(e);
+    }
+  };
+
+  return (
+    <div className="border-t border-line pt-6">
+      <Group
+        title="Coach memory"
+        hint="Facts the coach quietly remembers from your chats — race debriefs, illnesses, context. Delete anything wrong or stale (applies immediately)."
+      >
+        <StateWrap loading={loading} error={error}>
+          {list.length === 0 && (
+            <p className="font-body text-sm text-ink-muted">Nothing remembered yet.</p>
+          )}
+          {list.map((m) => (
+            <div key={m.id} className="flex items-center gap-2">
+              <div className="flex-1 rounded-lg border border-line bg-surface-2 px-3 py-2">
+                <span className="font-mono text-nano text-ink-muted">
+                  {(m.created_at || '').slice(0, 10)}
+                </span>
+                <span className="ml-2 font-body text-sm text-ink">{m.content}</span>
+              </div>
+              <DelBtn onClick={() => forget(m.id)} label="Forget fact" />
+            </div>
+          ))}
+          {delError && (
+            <p className="font-body text-micro text-sem-red">
+              Couldn’t delete: {delError.message}
+            </p>
+          )}
+        </StateWrap>
+      </Group>
+    </div>
+  );
+}
+
 // Coaching profile editor in a modal overlay. Loads the profile, edits the
 // shoe / race / injury lists + notes inline, and saves everything at once.
 export default function SettingsModal({ onClose }) {
@@ -354,6 +406,8 @@ export default function SettingsModal({ onClose }) {
               )}
             </div>
           </StateWrap>
+
+          <CoachMemory />
 
           <GarminRecords />
         </div>
