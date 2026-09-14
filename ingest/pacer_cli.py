@@ -399,17 +399,19 @@ def cmd_push(params):
 
 def cmd_reconcile(params):
     """Single-session Garmin reconcile (Stage 9d) — the ONE primitive the
-    move/delete/nudge plan edits funnel through. Three ops:
+    move/delete/nudge calendar edits funnel through. App-owned calls omit the
+    optional schedule ids and retain template-deletion semantics; foreign calls
+    pass them so only the calendar entry is removed. Three ops:
 
-      move     {op, workout_id, from_date, to_date}: schedule the SAME workout
-               template on to_date, THEN unschedule the from_date entry (looked
-               up live — the original schedule id isn't persisted). No
-               re-upload, no re-build.
-      remove   {op, workout_id}: delete the workout template — Garmin removes
-               its calendar entry with it (the 9c-established behaviour).
-      replace  {op, replace_workout_id, ...spec}: build+guard+upload+schedule
-               the new spec (the full push path — nothing reaches Garmin
-               unvalidated), THEN delete the old template.
+      move     {op, workout_id, from_date, to_date, schedule_id?}: schedule the
+               SAME workout template on to_date, THEN unschedule the old entry.
+               A supplied schedule_id avoids the live month scan.
+      remove   {op, workout_id, schedule_id?}: with schedule_id, unschedule only
+               and keep the foreign template; otherwise delete the app-owned
+               template (which also removes its calendar entry).
+      replace  {op, replace_workout_id, replace_schedule_id?, ...spec}: build +
+               guard + upload + schedule the new spec, THEN unschedule the old
+               foreign entry or delete the old app-owned template.
 
     Ordering is deliberate: the NEW state lands on Garmin before the OLD one is
     removed, so a mid-op failure can only ever leave a cosmetic double-listing
@@ -426,7 +428,11 @@ def cmd_reconcile(params):
         if op == "move":
             wid = int(params["workout_id"])
             from_date, to_date = params["from_date"], params["to_date"]
-            old_sid = wp.find_schedule_id(g, wid, from_date)
+            old_sid = params.get("schedule_id")
+            if old_sid is None:
+                old_sid = wp.find_schedule_id(g, wid, from_date)
+            else:
+                old_sid = int(old_sid)
             sid, _ = wp.schedule(g, wid, to_date)
             warning = None
             if old_sid is None:
@@ -444,18 +450,32 @@ def cmd_reconcile(params):
                    "warning": warning}
         elif op == "remove":
             wid = int(params["workout_id"])
-            wp.delete(g, wid)
-            out = {"workout_id": wid, "removed": True}
+            old_sid = params.get("schedule_id")
+            if old_sid is None:
+                wp.delete(g, wid)
+                out = {"workout_id": wid, "removed": True}
+            else:
+                wp.unschedule(g, int(old_sid))
+                out = {"workout_id": wid, "unscheduled": True}
         elif op == "replace":
             old_wid = int(params["replace_workout_id"])
+            old_sid = params.get("replace_schedule_id")
             wid, sid = _upload_and_schedule(g, w, params["date"])
             warning = None
             try:
-                wp.delete(g, old_wid)
+                if old_sid is None:
+                    wp.delete(g, old_wid)
+                else:
+                    wp.unschedule(g, int(old_sid))
             except Exception as e:
-                warning = (f"new session is on Garmin but deleting the old "
-                           f"workout {old_wid} failed ({e}) — it is double-listed; "
-                           f"delete the old one in Garmin Connect")
+                if old_sid is None:
+                    warning = (f"new session is on Garmin but deleting the old "
+                               f"workout {old_wid} failed ({e}) — it is double-listed; "
+                               f"delete the old one in Garmin Connect")
+                else:
+                    warning = (f"new session is on Garmin but unscheduling old "
+                               f"calendar entry {old_sid} failed ({e}) — it is "
+                               f"double-listed; remove the old one in Garmin Connect")
             out = {**_push_result(w, wid, sid, params["date"]), "warning": warning}
     finally:
         sys.stdout = real_stdout

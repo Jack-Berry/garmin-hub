@@ -60,7 +60,7 @@ const localToday = () => {
 // prescribed.
 //
 // "Owns" is gated on plan status (9d-2): only rows that are actually live on
-// the calendar suppress — the ACTIVE plan's sessions, and one-off pushes
+// the calendar suppress — ACTIVE/QUEUED plan sessions, and one-off pushes
 // (plan_id NULL, which only exist after a Garmin push). A draft is dormant and
 // suppresses nothing (Runna stays the real plan until activation); completed/
 // archived plans are history, not a claim on future dates. Rows must carry
@@ -69,7 +69,8 @@ const localToday = () => {
 // via LEFT JOIN; NULL for one-off pushes — a row missing the field entirely
 // degrades to the pre-9d-2 always-suppress behaviour).
 const appRowLive = (r) =>
-  r.source === 'app' && (r.plan_status == null || r.plan_status === 'active');
+  r.source === 'app'
+  && (r.plan_status == null || ['active', 'queued'].includes(r.plan_status));
 
 function applyAppPlanPrecedence(rows, today = localToday()) {
   const appDates = new Set(rows.filter(appRowLive).map((r) => r.calendar_date));
@@ -78,4 +79,45 @@ function applyAppPlanPrecedence(rows, today = localToday()) {
     r.source === 'app' || r.calendar_date < today || !appDates.has(r.calendar_date));
 }
 
-module.exports = { collapseRaceDuplicates, applyAppPlanPrecedence };
+// SQL-level app/Garmin mirror handling (Stage 9f). Same-date Garmin rows are
+// mirrors; when Garmin holds a future pushed app workout only on another date,
+// the app row is stale and Garmin's date wins. The LATERAL LIMIT 1 matters
+// because a workout template can have more than one Garmin calendar entry.
+const appGhostFilterSql = (todayParam) => `NOT (
+  p.source = 'garmin' AND p.workout_id IS NOT NULL
+  AND EXISTS (
+    SELECT 1 FROM planned_workouts a
+    WHERE a.source = 'app' AND a.workout_id = p.workout_id
+      AND a.calendar_date = p.calendar_date
+  )
+)
+AND NOT (
+  p.source = 'app' AND p.workout_id IS NOT NULL
+  AND p.calendar_date >= $${todayParam}
+  AND NOT EXISTS (
+    SELECT 1 FROM planned_workouts g
+    WHERE g.source = 'garmin' AND g.workout_id = p.workout_id
+      AND g.calendar_date = p.calendar_date
+  )
+  AND EXISTS (
+    SELECT 1 FROM planned_workouts g2
+    WHERE g2.source = 'garmin' AND g2.workout_id = p.workout_id
+  )
+)`;
+
+const appGhostOverlaySql = (todayParam) => `LEFT JOIN LATERAL (
+  SELECT g.schedule_id AS ghost_schedule_id,
+         g.title, g.estimated_distance_m, g.estimated_duration_s, g.steps_json
+  FROM planned_workouts g
+  WHERE g.source = 'garmin' AND g.workout_id = p.workout_id
+    AND p.source = 'app' AND p.calendar_date >= $${todayParam}
+  ORDER BY (g.calendar_date = p.calendar_date) DESC, g.schedule_id
+  LIMIT 1
+) gh ON true`;
+
+module.exports = {
+  collapseRaceDuplicates,
+  applyAppPlanPrecedence,
+  appGhostFilterSql,
+  appGhostOverlaySql,
+};

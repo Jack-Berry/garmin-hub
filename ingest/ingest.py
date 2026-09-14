@@ -17,7 +17,7 @@ import time
 import hashlib
 import warnings
 from pathlib import Path
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 # --- Suppress the harmless LibreSSL-vs-OpenSSL warning (NotOpenSSLWarning) ---
 try:
@@ -614,6 +614,17 @@ def ingest_recovery(g, conn, summary):
         # training_readiness / body_battery are lists (most recent first).
         tr_list = sources.get("training_readiness")
         tr = tr_list[0] if isinstance(tr_list, list) and tr_list else {}
+        # Garmin RESETS readiness after a workout, so `tr` — the newest snapshot
+        # — is the post-exercise value on any day with a run. That is an effect
+        # of the session, not the state the athlete began it in (a real case:
+        # woke at 94, read 27 after a 16km progressive long run), and the coach
+        # was reading it as the latter. Keep the day's wake-up reading beside it
+        # as the genuine pre-training baseline. Newest-first ordering means the
+        # first match is the most recent wake-up reset.
+        tr_wake = next((x for x in tr_list
+                        if isinstance(x, dict)
+                        and x.get("inputContext") == "AFTER_WAKEUP_RESET"),
+                       {}) if isinstance(tr_list, list) else {}
         bb_list = sources.get("body_battery")
         bb = bb_list[0] if isinstance(bb_list, list) and bb_list else {}
 
@@ -653,6 +664,10 @@ def ingest_recovery(g, conn, summary):
             "readiness_score": pick(tr, "score"),
             "readiness_level": pick(tr, "level"),
             "readiness_feedback": pick(tr, "feedbackShort"),
+            "readiness_context": pick(tr, "inputContext"),
+            "readiness_time_local": pick(tr, "timestampLocal"),
+            "readiness_wake_score": pick(tr_wake, "score"),
+            "readiness_wake_level": pick(tr_wake, "level"),
             "recovery_time_minutes": pick(tr, "recoveryTime"),
             "acute_load": pick(tr, "acuteLoad"),
             "sleep_factor_pct": pick(tr, "sleepScoreFactorPercent"),
@@ -806,6 +821,27 @@ def main():
             # section's partial writes vanish and the next section starts clean.
             conn.rollback()
             summary["errors"].append(f"{label} pull failed: {e}")
+
+    # --- Record the run ----------------------------------------------------
+    # Written here, at the end of main, so EVERY ingest path records itself:
+    # the launchd schedules, the API's Refresh spawn, and a manual terminal run.
+    # Its own try/except — bookkeeping must never be the thing that fails a
+    # run that actually pulled data.
+    ok = not summary["errors"]
+    state = ("no errors" if ok
+             else f"{len(summary['errors'])} error(s): "
+                  + "; ".join(summary["errors"][:3]))
+    try:
+        upsert(conn, "ingest_state", ["id"], {
+            "id": 1,
+            "last_run_at": datetime.now(timezone.utc),
+            "ok": ok,
+            "summary": state[:500],
+        })
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"  (could not record ingest_state: {e})")
 
     conn.close()
 

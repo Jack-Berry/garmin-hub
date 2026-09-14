@@ -6,7 +6,7 @@ set -e
 REPO="/Users/jackberry/Code/Projects/garmin-hub"
 DEPLOY="$REPO/deploy/local-macos"
 LA="$HOME/Library/LaunchAgents"
-LABELS="api web daily"
+LABELS="api web daily ingest"
 
 mkdir -p "$LA" "$HOME/Library/Logs"
 
@@ -23,6 +23,7 @@ echo "[3/4] Installing plists into $LA …"
 cp "$DEPLOY"/com.garminhub.api.plist   "$LA/"
 cp "$DEPLOY"/com.garminhub.web.plist   "$LA/"
 cp "$DEPLOY"/com.garminhub.daily.plist "$LA/"
+cp "$DEPLOY"/com.garminhub.ingest.plist "$LA/"
 
 echo "[4/4] (Re)loading launchd services…"
 for l in $LABELS; do

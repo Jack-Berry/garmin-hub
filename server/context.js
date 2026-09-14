@@ -2,7 +2,12 @@
 // from the DB for the AI coach. Summarises (never dumps) recent runs, recovery,
 // upcoming planned workouts, the profile, and a few code-derived signals.
 // Read-only: takes the shared read-only db connection.
-const { collapseRaceDuplicates, applyAppPlanPrecedence } = require('./planned');
+const {
+  collapseRaceDuplicates,
+  applyAppPlanPrecedence,
+  appGhostFilterSql,
+  appGhostOverlaySql,
+} = require('./planned');
 const { computeZones } = require('./zones');
 const { resolveGoalPaces } = require('./goalpaces');
 // Guard bounds — the SAME file the enforcer (ingest/pacer_cli.py) and the
@@ -267,7 +272,18 @@ async function sectionRecentRuns(db, today) {
 // can never drift into different snapshot shapes.
 const RECOVERY_COLS = `calendar_date, hrv_last_night, hrv_status,
             hrv_baseline_balanced_low, hrv_baseline_balanced_upper,
-            resting_hr, sleep_score, readiness_score, readiness_level`;
+            resting_hr, sleep_score, readiness_score, readiness_level,
+            readiness_context, readiness_wake_score, readiness_wake_level`;
+
+// Which reading `readiness_score` actually is. Garmin re-reads readiness after
+// a workout, so on any day with a run the stored score is the POST-exercise
+// one — a consequence of the session, not the state it was started in. Without
+// this tag the coach read a 27 after a hard long run as "they set out wrecked".
+const READINESS_WHEN = {
+  AFTER_WAKEUP_RESET: 'on_waking',
+  AFTER_POST_EXERCISE_RESET: 'after_exercise',
+  UPDATE_REALTIME_VARIABLES: 'during_day',
+};
 
 // One recovery row -> one snapshot. An absent row yields a snapshot of nulls
 // (not null) — that's the long-standing shape of `recovery.latest`.
@@ -280,6 +296,11 @@ const recoverySnapshot = (r = {}) => ({
   sleep_score: r.sleep_score,
   readiness_score: r.readiness_score,
   readiness_level: r.readiness_level,
+  // When that score was taken, and the day's pre-training baseline beside it.
+  // Both null on rows ingested before this was captured — unknown, not "wake".
+  readiness_measured: READINESS_WHEN[r.readiness_context] || null,
+  readiness_on_waking: r.readiness_wake_score ?? null,
+  readiness_level_on_waking: r.readiness_wake_level ?? null,
 });
 
 // Recovery for ONE day (`asOf`, default today): that day's snapshot plus the
@@ -338,20 +359,25 @@ async function sectionAlignedRecovery(db, date, today) {
 // fold the same-day race triplicate (Runna race + manual override + pacer)
 // into one entry — otherwise the coach sees and counts the race three times.
 // Draft plans are dormant (9d-2): their sessions never appear here, and
-// plan_status feeds the active-only precedence gate.
+// plan_status feeds the active/queued precedence gate.
 async function sectionUpcoming(db, today) {
   const planRows = await db.all(
-    `SELECT p.calendar_date, p.title, p.estimated_distance_m, p.source,
+    `SELECT p.calendar_date, COALESCE(gh.title, p.title) AS title,
+            COALESCE(gh.estimated_distance_m, p.estimated_distance_m) AS estimated_distance_m,
+            p.source,
             p.is_race_auto, p.is_race_override,
-            COALESCE(p.is_race_override, p.is_race_auto) AS is_race, p.steps_json,
+            COALESCE(p.is_race_override, p.is_race_auto) AS is_race,
+            COALESCE(gh.steps_json, p.steps_json) AS steps_json,
             pl.status AS plan_status
      FROM planned_workouts p LEFT JOIN plans pl ON pl.plan_id = p.plan_id
+     ${appGhostOverlaySql(1)}
      WHERE p.calendar_date >= $1 AND p.calendar_date <= $2 AND p.removed_at IS NULL
        AND pl.status IS DISTINCT FROM 'draft'
-     ORDER BY p.calendar_date`, [today, shiftDate(today, WINDOW_DAYS)]);
+       AND ${appGhostFilterSql(1)}
+     ORDER BY p.calendar_date, p.schedule_id`, [today, shiftDate(today, WINDOW_DAYS)]);
 
   // App-plan precedence (a live app row owns its date) before the race collapse.
-  return collapseRaceDuplicates(applyAppPlanPrecedence(planRows)).map((p) => ({
+  return collapseRaceDuplicates(applyAppPlanPrecedence(planRows, today)).map((p) => ({
     date: p.calendar_date,
     title: p.title,
     km: p.estimated_distance_m ? +(p.estimated_distance_m / 1000).toFixed(2) : null,
@@ -497,17 +523,21 @@ async function buildDayFocus(db, date) {
      WHERE activity_group = 'run' AND distance_m > 0 AND start_time_local::date = $1
      ORDER BY start_time_local`, [date]);
 
-  // Draft gate + live-app preference (9d-2): draft sessions never surface, and
-  // the app row only outranks the Runna row when it's actually live (active
-  // plan or one-off push) — the same rule as applyAppPlanPrecedence.
+  // Draft gate + live-app preference (9d-2/9f): draft sessions never surface,
+  // and the app row only outranks the Runna row when it's actually live
+  // (active/queued plan or one-off push) — the same rule as appRowLive.
   const planRow = await db.get(
-    `SELECT p.title, p.estimated_distance_m,
-            COALESCE(p.is_race_override, p.is_race_auto) AS is_race, p.steps_json
+    `SELECT COALESCE(gh.title, p.title) AS title,
+            COALESCE(gh.estimated_distance_m, p.estimated_distance_m) AS estimated_distance_m,
+            COALESCE(p.is_race_override, p.is_race_auto) AS is_race,
+            COALESCE(gh.steps_json, p.steps_json) AS steps_json
      FROM planned_workouts p LEFT JOIN plans pl ON pl.plan_id = p.plan_id
+     ${appGhostOverlaySql(2)}
      WHERE p.calendar_date = $1 AND p.removed_at IS NULL
        AND pl.status IS DISTINCT FROM 'draft'
-     ORDER BY (p.source = 'app' AND (pl.status IS NULL OR pl.status = 'active'))
-              DESC NULLS LAST LIMIT 1`, [date]);
+       AND ${appGhostFilterSql(2)}
+     ORDER BY (p.source = 'app' AND (pl.status IS NULL OR pl.status IN ('active', 'queued')))
+              DESC NULLS LAST, p.schedule_id LIMIT 1`, [date, today]);
 
   const planned = planRow ? {
     title: planRow.title,
@@ -681,7 +711,7 @@ async function renderContextDump(db) {
 }
 
 // Planning-mode context (Stage 8). Wraps buildContext and augments it with the
-// authoritative pace sources the composer needs: the LT-derived zone table
+// authoritative pace sources the planner needs: the LT-derived zone table
 // (zones.js) and resolved goal paces (goalpaces.js), plus the guard bounds so
 // the coach never emits a spec it knows will be rejected. Overrides the base
 // pace_guidance (which says "infer paces from runs" — wrong in planning mode).
@@ -765,33 +795,45 @@ async function buildPlanningContext(db, recentPushes = []) {
     pushed_recently: recentPushes,
   };
 
-  // Active-plan sessions (Stage 9d) — what the planning coach can edit via the
-  // move/delete/nudge directives. Today onward only (the edit freeze line);
-  // soft-deleted sessions excluded. `spec` is steps_json verbatim — the
-  // buildable spec — so a nudge starts from the session's real current
-  // content. Null when no plan is active (then there is nothing to edit).
-  const activePlan = await db.get(
-    `SELECT plan_id, name FROM plans WHERE status = 'active'
-     ORDER BY created_at DESC LIMIT 1`);
-  context.planning.active_plan = activePlan ? {
-    plan_id: activePlan.plan_id,
-    name: activePlan.name,
-    sessions: (await db.all(
-      `SELECT schedule_id::text AS schedule_id, calendar_date, title,
-              workout_id, steps_json, rationale
-       FROM planned_workouts
-       WHERE source = 'app' AND plan_id = $1 AND removed_at IS NULL
-         AND calendar_date >= $2
-       ORDER BY calendar_date`, [activePlan.plan_id, today]))
-      .map((s) => ({
-        schedule_id: s.schedule_id,
-        date: s.calendar_date,
-        title: s.title,
-        pushed: s.workout_id != null,
-        rationale: s.rationale,
-        spec: s.steps_json,
-      })),
-  } : null;
+  // Whole-calendar edit surface (Stage 9f): every visible future workout, not
+  // just the active app plan. Exact text ids prevent bigint rounding; only app
+  // rows expose a buildable spec. Garmin wins display fields for future app
+  // rows, while spec_stale keeps any divergence explicit to the coach.
+  const calendarDays = 28;
+  const calendarRows = await db.all(
+    `SELECT p.schedule_id::text AS schedule_id, p.calendar_date,
+            COALESCE(gh.title, p.title) AS title,
+            COALESCE(gh.estimated_distance_m, p.estimated_distance_m) AS estimated_distance_m,
+            p.source, p.plan_id, pl.status AS plan_status, p.workout_id,
+            p.rationale, p.steps_json,
+            (gh.ghost_schedule_id IS NOT NULL AND (
+              gh.title IS DISTINCT FROM p.title
+              OR gh.estimated_distance_m IS DISTINCT FROM p.estimated_distance_m
+            )) AS spec_stale
+     FROM planned_workouts p LEFT JOIN plans pl ON pl.plan_id = p.plan_id
+     ${appGhostOverlaySql(1)}
+     WHERE p.calendar_date >= $1 AND p.calendar_date <= $2
+       AND p.removed_at IS NULL AND pl.status IS DISTINCT FROM 'draft'
+       AND ${appGhostFilterSql(1)}
+     ORDER BY p.calendar_date, p.schedule_id`,
+    [today, shiftDate(today, calendarDays)]);
+  context.planning.calendar = {
+    window_days: calendarDays,
+    sessions: calendarRows.map((s) => ({
+      schedule_id: s.schedule_id,
+      date: s.calendar_date,
+      title: s.title,
+      km: s.estimated_distance_m ? +(s.estimated_distance_m / 1000).toFixed(2) : null,
+      source: s.source,
+      plan_id: s.plan_id,
+      plan_status: s.plan_status,
+      pushed: s.workout_id != null,
+      editable: s.source === 'runna_ical' ? 'remove_only' : true,
+      rationale: s.source === 'app' ? s.rationale : null,
+      spec: s.source === 'app' ? s.steps_json : null,
+      spec_stale: !!s.spec_stale,
+    })),
+  };
 
   // Plan lifecycle surface (9d-2): every non-discarded saved plan with its
   // status and push state, so the coach can tell a DRAFT (saved in the hub
@@ -847,36 +889,241 @@ async function scheduledSummary(db, from, to) {
   // Draft gate (9d-2): drafts are dormant — the coach's scheduled view shows
   // the calendar as it really is (Runna until an app plan is ACTIVATED); the
   // draft itself is surfaced separately via planning.plans.
+  const today = localDate();
   const rows = await db.all(
-    `SELECT p.calendar_date, p.title, p.estimated_distance_m, p.source,
+    `SELECT p.schedule_id::text AS schedule_id, p.calendar_date,
+            COALESCE(gh.title, p.title) AS title,
+            COALESCE(gh.estimated_distance_m, p.estimated_distance_m) AS estimated_distance_m,
+            p.source,
             p.is_race_auto, p.is_race_override,
-            COALESCE(p.is_race_override, p.is_race_auto) AS is_race, p.steps_json,
+            COALESCE(p.is_race_override, p.is_race_auto) AS is_race,
+            COALESCE(gh.steps_json, p.steps_json) AS steps_json,
             pl.status AS plan_status
      FROM planned_workouts p LEFT JOIN plans pl ON pl.plan_id = p.plan_id
+     ${appGhostOverlaySql(3)}
      WHERE p.calendar_date >= $1 AND p.calendar_date <= $2 AND p.removed_at IS NULL
        AND pl.status IS DISTINCT FROM 'draft'
-     ORDER BY p.calendar_date`, [from, to]);
-  const items = collapseRaceDuplicates(applyAppPlanPrecedence(rows));
+       AND ${appGhostFilterSql(3)}
+     ORDER BY p.calendar_date, p.schedule_id`, [from, to, today]);
+  const items = collapseRaceDuplicates(applyAppPlanPrecedence(rows, today));
   if (!items.length) return `No scheduled workouts between ${from} and ${to}.`;
 
   const lines = [`Scheduled workouts ${from} to ${to} (UPCOMING — not yet completed):`];
   for (const p of items) {
     const km = p.estimated_distance_m ? ` — ${+(p.estimated_distance_m / 1000).toFixed(2)}km` : '';
     const race = p.is_race ? '  [RACE]' : '';
-    // App-owned rows are tagged so the Stage 9b composer can tell Runna's
-    // skeleton from sessions the app already planned (garmin/runna_ical rows
-    // are both "the Runna plan" and stay untagged).
-    const app = p.source === 'app' ? '  [app-planned]' : '';
-    lines.push(`${p.calendar_date} — ${p.title || 'workout'}${km}${race}${app}`);
+    const source = p.source === 'app' ? '[app-planned]'
+      : p.source === 'garmin' ? '[garmin]' : '[runna-feed]';
+    lines.push(`${p.calendar_date} — ${p.title || 'workout'}${km}${race}  ${source}  [id ${p.schedule_id}]`);
     const steps = parseSteps(p.steps_json);
     if (steps && steps.length) lines.push(`    steps: ${steps.join(' | ')}`);
   }
   return lines.join('\n');
 }
 
+// Full split-by-split detail for completed activities — powers the coach's
+// on-demand get_activity_detail tool (coach.js). The injected context carries
+// only whole-run averages plus a one-line work-rep summary (sectionRecentRuns),
+// deliberately: it is cached on EVERY coach call, and lap tables for a month of
+// running would sit in every prompt. So the depth lives here instead, fetched
+// only when a question needs it — per-lap HR, cadence, power and running
+// dynamics, the data that answers HR drift across reps, pacing execution and
+// running economy.
+const ACTIVITY_COLS = `activity_id, start_time_local, start_time_local::date AS date, name, activity_type,
+       activity_group, distance_m, duration_s, avg_hr, max_hr,
+       hr_zone1_s, hr_zone2_s, hr_zone3_s, hr_zone4_s, hr_zone5_s,
+       avg_cadence_spm, avg_power, norm_power, avg_ground_contact_ms,
+       avg_stride_length_cm, avg_vertical_oscillation_cm, avg_vertical_ratio,
+       aerobic_training_effect, anaerobic_training_effect, training_effect_label,
+       activity_training_load, elevation_gain_m, vo2max`;
+
+// A long auto-lapped run is one lap per km, but a badly-lapped session can run
+// to hundreds — cap the table rather than flood the model, and say so.
+const MAX_LAPS = 60;
+
+// Rounded value or an explicit em dash: a missing metric must read as unknown,
+// never as a zero the coach could analyse (same rule as zoneMinutes).
+const num = (v) => (v == null ? '—' : String(Math.round(v)));
+
+// Same, to one decimal — Garmin's doubles carry float noise (a training effect
+// of 3.5999999046325684) that would otherwise reach the prompt verbatim.
+const dec = (v) => (v == null ? '—' : v.toFixed(1));
+
+// One split table row. Header and rows are built by the SAME padder so the
+// columns can never drift apart — a ragged table is the one shape a model
+// reliably misreads.
+const lapRow = (c) => '    ' + [
+  c[0].padStart(3), c[1].padEnd(8), c[2].padStart(7), c[3].padStart(6),
+  c[4].padStart(8), c[5].padStart(8), c[6].padStart(4), c[7].padStart(4),
+  c[8].padStart(4), c[9].padStart(4), c[10].padStart(5),
+].join(' ');
+
+const LAP_HEADER = lapRow(
+  ['#', 'type', 'dist', 'time', 'pace', 'HR a/mx', 'cad', 'pwr', 'GCT', 'strd', 'vrat%']);
+
+const lapLine = (l) => {
+  const km = (l.distance_m || 0) / 1000;
+  return lapRow([
+    String(l.lap_index),
+    l.intensity_type || '—',
+    `${km.toFixed(2)}km`,
+    hms(l.duration_s || 0),
+    // Under 100m the per-km extrapolation is noise (a 17m rest lap "paces" at
+    // 58:00/km) — those laps are rests, and their time is the real datum.
+    km >= 0.1 && l.duration_s ? `${pace(l.duration_s / km)}/km` : '—',
+    `${num(l.avg_hr)}/${num(l.max_hr)}`,
+    num(l.avg_cadence_spm),
+    num(l.avg_power),
+    num(l.ground_contact_ms),
+    num(l.stride_length_cm),
+    dec(l.vertical_ratio),
+  ]);
+};
+
+// One activity -> its header lines (whole-run summary + form). Absent metrics
+// are dropped from the form line entirely rather than listed as dashes: a walk
+// carries no power or running dynamics, and a row of em dashes reads as broken
+// data instead of "this activity type never had them".
+const activityHeader = (a) => {
+  const km = +(a.distance_m / 1000).toFixed(2);
+  const zoneMin = zoneMinutes(
+    [a.hr_zone1_s, a.hr_zone2_s, a.hr_zone3_s, a.hr_zone4_s, a.hr_zone5_s]);
+  const lines = [
+    `${a.date} — ${a.name || 'activity'}  [${a.activity_type || a.activity_group}, id ${a.activity_id}]`,
+    `  ${km}km in ${hms(a.duration_s)}${km ? `, avg ${pace(a.duration_s / km)}/km` : ''}` +
+      `, HR ${num(a.avg_hr)} avg / ${num(a.max_hr)} max` +
+      (a.activity_training_load != null ? `, load ${num(a.activity_training_load)}` : '') +
+      (a.training_effect_label ? `, effect ${a.training_effect_label}` : '') +
+      `, aerobic TE ${dec(a.aerobic_training_effect)} / anaerobic TE ${dec(a.anaerobic_training_effect)}`,
+  ];
+  if (zoneMin) {
+    lines.push(`  HR minutes by zone 1-5: ${zoneMin.map((m) => (m == null ? '—' : m)).join(' / ')}`);
+  }
+  const form = [
+    [a.avg_cadence_spm, (v) => `cadence ${num(v)} spm`],
+    [a.avg_power, (v) => `power ${num(v)} W`],
+    [a.norm_power, (v) => `norm power ${num(v)} W`],
+    [a.avg_ground_contact_ms, (v) => `ground contact ${num(v)}ms`],
+    [a.avg_stride_length_cm, (v) => `stride ${num(v)}cm`],
+    [a.avg_vertical_oscillation_cm, (v) => `vertical oscillation ${dec(v)}cm`],
+    [a.avg_vertical_ratio, (v) => `vertical ratio ${dec(v)}%`],
+    [a.elevation_gain_m, (v) => `elevation +${num(v)}m`],
+    [a.vo2max, (v) => `VO2max ${num(v)}`],
+  ].filter(([v]) => v != null).map(([v, f]) => f(v));
+  if (form.length) lines.push(`  whole-run form: ${form.join(', ')}`);
+  return lines;
+};
+
+// Garmin takes SEVERAL readiness readings a day and RE-READS after a workout,
+// so the stored daily score is the post-exercise one on any day with a run —
+// which the coach kept reading as the state the athlete set out in ("readiness
+// 27, and you still ran 16km"), when the 27 was the run's own cost. The full
+// series lives in recovery.raw_json, timestamped, so for a specific activity we
+// can do better than the day's summary: the reading immediately BEFORE the
+// start is what they actually set out on, and the next one after is the price.
+// This also settles double days, where the pre-run state for the evening
+// session is the post-exercise reset from the morning one.
+
+// ISO-ish timestamps in two shapes ("...T13:17:25.0" from Garmin's json,
+// "... 13:17:25" from a pg timestamp) -> one comparable "YYYY-MM-DD HH:MM:SS".
+const stamp = (v) => String(v).replace('T', ' ').slice(0, 19);
+
+// Every readiness reading on the given dates, oldest first.
+const readinessReadings = (db, dates) => db.all(
+  `SELECT x->>'timestampLocal' AS at, (x->>'score')::int AS score,
+          x->>'level' AS level, x->>'inputContext' AS context,
+          (x->>'recoveryTime')::int AS recovery_min
+   FROM recovery r, LATERAL jsonb_array_elements(r.raw_json->'training_readiness') x
+   WHERE r.calendar_date = ANY($1::date[]) AND x->>'timestampLocal' IS NOT NULL
+   ORDER BY 1`, [dates]);
+
+const READING_LABEL = {
+  AFTER_WAKEUP_RESET: 'on waking',
+  AFTER_POST_EXERCISE_RESET: 'post-exercise reset',
+  UPDATE_REALTIME_VARIABLES: 'mid-day update',
+};
+
+const readingLine = (r) =>
+  `${r.score} ${r.level}` +
+  ` (${READING_LABEL[r.context] || r.context || 'reading'}, ${stamp(r.at).slice(11, 16)})` +
+  // Sub-hour recovery time means "clear" — printing it as "0h" reads as a
+  // measurement failure rather than a rested athlete.
+  (r.recovery_min >= 60 ? `, recovery time ${Math.round(r.recovery_min / 60)}h` : '');
+
+// The readings bracketing one activity -> lines for its detail block.
+const readinessAround = (readings, startedAt) => {
+  const start = stamp(startedAt);
+  const before = [...readings].reverse().find((r) => stamp(r.at) <= start);
+  const after = readings.find((r) => stamp(r.at) > start);
+  if (!before && !after) return [];
+  const lines = ['  Training readiness around this session:'];
+  if (before) lines.push(`    BEFORE the run — what they set out on: ${readingLine(before)}`);
+  else lines.push('    BEFORE the run: no reading taken before this start time.');
+  if (after) {
+    lines.push(`    AFTER the run — the next reading: ${readingLine(after)}`);
+    if (before && before.score != null && after.score != null && after.score < before.score) {
+      lines.push(
+        `    The ${before.score} -> ${after.score} drop is what THIS session took out of them.` +
+        ' It is a consequence of the run, never the state they began it in.');
+    }
+  }
+  return lines;
+};
+
+// Detail for one activity (`activityId`), every activity on a date (`date`), or
+// — given neither — the most recent run. Returns plain text for the tool.
+async function activityDetail(db, { date, activityId } = {}) {
+  const rows = activityId
+    ? await db.all(
+        `SELECT ${ACTIVITY_COLS} FROM activities WHERE activity_id = $1::bigint`,
+        [String(activityId)])
+    : date
+      ? await db.all(
+          `SELECT ${ACTIVITY_COLS} FROM activities
+           WHERE start_time_local::date = $1 AND distance_m > 0
+           ORDER BY start_time_local`, [date])
+      : await db.all(
+          `SELECT ${ACTIVITY_COLS} FROM activities
+           WHERE activity_group = 'run' AND distance_m > 0
+           ORDER BY start_time_local DESC LIMIT 1`);
+
+  if (!rows.length) {
+    return activityId ? `No activity with id ${activityId}.`
+      : date ? `No activity logged on ${date}.`
+        : 'No completed runs on record.';
+  }
+
+  const lapRows = await db.all(
+    `SELECT activity_id, lap_index, distance_m, duration_s, avg_hr, max_hr,
+            avg_cadence_spm, avg_power, ground_contact_ms, stride_length_cm,
+            vertical_ratio, intensity_type
+     FROM laps WHERE activity_id = ANY($1::bigint[]) ORDER BY activity_id, lap_index`,
+    [rows.map((r) => String(r.activity_id))]);
+
+  // The readings for each activity's own day and the day before — an early run
+  // can start before that morning's wake-up reset, and then the last reading of
+  // the previous evening is the true "before".
+  const readings = await readinessReadings(db, [
+    ...new Set(rows.flatMap((r) => [shiftDate(r.date, -1), r.date])),
+  ]);
+
+  const out = ['COMPLETED activity detail — actual splits as run, not a plan.'];
+  for (const a of rows) {
+    out.push('', ...activityHeader(a), ...readinessAround(readings, a.start_time_local));
+    const laps = lapRows.filter((l) => l.activity_id === a.activity_id);
+    if (!laps.length) { out.push('  No lap/split data recorded for this activity.'); continue; }
+    out.push(
+      `  Splits (${laps.length} laps; GCT ms, strd cm, vrat %; intensity_type marks` +
+      ' WARMUP/COOLDOWN/REST vs ACTIVE/INTERVAL work):', LAP_HEADER);
+    for (const l of laps.slice(0, MAX_LAPS)) out.push(lapLine(l));
+    if (laps.length > MAX_LAPS) out.push(`    … ${laps.length - MAX_LAPS} further laps not shown.`);
+  }
+  return out.join('\n');
+}
+
 module.exports = {
   buildContext, buildPlanningContext, buildDayFocus, renderContextDump,
-  scheduledSummary, localDate,
+  scheduledSummary, activityDetail, localDate,
   // Section builders — composable by surface (Stage 10c) and reusable by the
   // 10d tools. Each takes the caller's local `today`; none computes its own.
   sectionProfile, sectionMemory, sectionRecentRuns, sectionRecovery,

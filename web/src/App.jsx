@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { api } from './api';
 import Hero from './sections/Hero';
 import RecentActivities from './sections/RecentActivities';
@@ -11,23 +11,61 @@ import PlanActivation from './PlanActivation';
 import { Icon } from './ui';
 import { AccentProvider } from './accent';
 
-// Topbar button: runs the Python ingest, then bumps the dashboard refresh key
-// so every section refetches. Disabled while running; shows a brief outcome.
+// How stale the data may be before opening the dashboard pulls it itself.
+// 30 minutes: long enough that a reload, a second tab or a quick tab-switch
+// costs nothing, short enough that a run logged before you sit down is there.
+const AUTO_REFRESH_AFTER_MIN = 30;
+
+// A run older than this reads as a problem rather than a gap — the daily
+// launchd ingest alone should never let it get here.
+const STALE_WARN_MIN = 60 * 24;
+
+// Minutes -> "just now" / "12m ago" / "3h ago" / "2d ago".
+const ago = (min) => {
+  if (min == null) return null;
+  if (min < 2) return 'just now';
+  if (min < 60) return `${min}m ago`;
+  if (min < 60 * 36) return `${Math.round(min / 60)}h ago`;
+  return `${Math.round(min / 1440)}d ago`;
+};
+
+// Topbar refresh control: runs the Python ingest, then bumps the dashboard
+// refresh key so every section refetches. It also refreshes ON ITS OWN — once
+// when the dashboard opens and again whenever you come back to the tab —
+// gated server-side so only genuinely stale data costs a Garmin pull. The
+// "Updated N ago" label is the honest part: stale data now says so instead of
+// looking current.
 function RefreshButton({ className, onRefreshed }) {
   // 'idle' | 'running' | 'ok' | 'error'
   const [status, setStatus] = useState('idle');
   const [message, setMessage] = useState('');
+  const [age, setAge] = useState(null);      // minutes since the last ingest
+  const [lastOk, setLastOk] = useState(true); // did that ingest come back clean
 
-  const refresh = async () => {
-    if (status === 'running') return;
-    setStatus('running');
+  // `auto` marks the unattended passes (page open, tab refocus): they carry the
+  // staleness window, so the server skips the pull when data is already fresh,
+  // and a "someone is already ingesting" 409 is an expected outcome rather than
+  // something to shout about. A real failure still surfaces either way — silent
+  // staleness is the whole bug being fixed here.
+  const refresh = async (auto = false) => {
+    setStatus((s) => (s === 'running' ? s : 'running'));
     setMessage('');
     try {
-      await api.refreshIngest();
-      setStatus('ok');
+      const r = await api.refreshIngest(auto ? AUTO_REFRESH_AFTER_MIN : 0);
+      setAge(r.age_minutes ?? 0);
+      setLastOk(r.last_ok !== false);
+      if (r.skipped) {
+        setStatus('idle');
+        return;
+      }
       onRefreshed();
+      setStatus('ok');
       setTimeout(() => setStatus('idle'), 2500);
     } catch (err) {
+      if (auto && /409/.test(err.message)) {
+        setStatus('idle');
+        return;
+      }
       setStatus('error');
       setMessage(
         /409/.test(err.message)
@@ -38,13 +76,39 @@ function RefreshButton({ className, onRefreshed }) {
     }
   };
 
+  // On open, and again on every return to the tab. Both are gated server-side,
+  // so a dashboard left open all day does not become a Garmin poller.
+  useEffect(() => {
+    refresh(true);
+    const onVisible = () => { if (!document.hidden) refresh(true); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, []);
+
+  // Keep the label honest while the page sits open.
+  useEffect(() => {
+    const t = setInterval(() => setAge((a) => (a == null ? a : a + 1)), 60000);
+    return () => clearInterval(t);
+  }, []);
+
   const label =
     status === 'running' ? 'Refreshing…' : status === 'ok' ? 'Updated' : 'Refresh';
+  const stale = age != null && age >= STALE_WARN_MIN;
 
   return (
-    <div className="relative">
+    <div className="relative flex items-center gap-2">
+      {age != null && status !== 'running' && (
+        <span
+          className={`hidden font-body text-nano uppercase tracking-[0.18em] sm:inline ${
+            stale || !lastOk ? 'text-sem-amber' : 'text-ink-muted'
+          }`}
+          title={lastOk ? 'Last Garmin ingest' : 'The last ingest reported errors'}
+        >
+          {lastOk ? '' : 'Ingest issue · '}Updated {ago(age)}
+        </span>
+      )}
       <button
-        onClick={refresh}
+        onClick={() => refresh(false)}
         disabled={status === 'running'}
         className={`${className} disabled:opacity-60`}
         aria-label="Refresh Garmin data"
@@ -57,7 +121,7 @@ function RefreshButton({ className, onRefreshed }) {
         {label}
       </button>
       {status === 'error' && (
-        <p className="absolute right-0 mt-1 w-56 text-right text-xs text-sem-red">{message}</p>
+        <p className="absolute right-0 top-full mt-1 w-56 text-right text-xs text-sem-red">{message}</p>
       )}
     </div>
   );

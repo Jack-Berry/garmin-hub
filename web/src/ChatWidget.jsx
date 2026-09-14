@@ -12,17 +12,11 @@ import { ActivationFlow } from './PlanActivation';
 // panel is cleared. The client sends the full message array each turn; the
 // server is stateless.
 //
-// Three modes share the panel:
+// Two modes share the panel:
 //   'chat'     — the Sonnet analyst (default, unchanged).
-//   'planning' — routes turns to /api/coach/plan. When a turn returns a spec,
-//                we preview it inline (api.pacerPreview) and offer a per-turn
-//                "Push to Garmin" button (api.pacerPush) — the pacer flow lifted
-//                into the conversation. The panel gets an accent border while
-//                active; it auto-exits when the coach signals `done`.
-//   'composer' — Stage 9b: routes turns to /api/coach/compose. A returned plan
-//                (already guard-validated per session, server-side) renders as
-//                a week-by-week PlanReview with a Save button (api.savePlan —
-//                a DB write only, no Garmin). Wider panel while active.
+//   'planning' — one /api/coach/plan conversation for individual session
+//                previews/pushes, whole-calendar edits, and guard-validated
+//                multi-week PlanReview/save flows. Wider, accented while active.
 // Assistant messages may carry { spec, preview, previewError, pushed, specError,
 // duplicate, apiContent } for the inline preview attached to that turn.
 // `apiContent` is what goes to the API instead of `content`: turns that carried
@@ -43,7 +37,7 @@ const toPayload = (msgs) =>
 
 export default function ChatWidget() {
   const [open, setOpen] = useState(false);
-  const [mode, setMode] = useState('chat'); // 'chat' | 'planning' | 'composer'
+  const [mode, setMode] = useState('chat'); // 'chat' | 'planning'
   const [messages, setMessages] = useState([]); // [{role, content, spec?, preview?, previewError?, pushed?, plan?, savedPlan?}]
   const [input, setInput] = useState('');
   const [pending, setPending] = useState(false);
@@ -65,7 +59,6 @@ export default function ChatWidget() {
   const inputRef = useRef(null);
 
   const planning = mode === 'planning';
-  const composer = mode === 'composer';
 
   // Auto-grow the input with its content: reset to the natural (rows=3) height,
   // then fit scrollHeight. The max-h class caps it around 8 rows, after which
@@ -107,8 +100,8 @@ export default function ChatWidget() {
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages, pending, open]);
 
-  // Chat / planning / composer threads can't share history (different system
-  // prompts), so entering a mode starts fresh — same spirit as the accepted
+  // Chat and planning threads can't share history (different system prompts),
+  // so entering a mode starts fresh — same spirit as the accepted
   // "refresh wipes the conversation" limitation. Exiting manually also clears;
   // nothing half-commits (pushes and the plan save are atomic and confirmed).
   const enterMode = (m) => {
@@ -128,13 +121,13 @@ export default function ChatWidget() {
     setError(null);
     setPending(true);
     try {
-      const { reply, spec, edit, done, specError } = await api.plan(toPayload(nextMessages));
+      const { reply, spec, edit, plan, done, specError } =
+        await api.plan(toPayload(nextMessages));
       let assistant = { role: 'assistant', content: reply };
       let failNote = null;
       if (edit) {
-        // Stage 9d edit directive (move/delete/replace on an active-plan
-        // session). Rendered as a confirmation card; nothing happens until the
-        // athlete confirms (applyEdit). A replace previews through the same
+        // Calendar edit directive. Rendered as a confirmation card; nothing
+        // happens until the athlete confirms (applyEdit). A replace previews through the same
         // guard-backed preview endpoint as a fresh spec, with the same
         // guard-failure relay so the coach can fix a doomed nudge itself.
         assistant.edit = edit;
@@ -153,6 +146,22 @@ export default function ChatWidget() {
               content: `[Preview failed: ${msg} — the revised spec was rejected by the guard before the athlete saw it. Fix exactly what the error names and re-emit the corrected edit directive.]`,
             };
           }
+        }
+      } else if (plan) {
+        const invalid = plan.sessions.filter((s) => !s.valid);
+        const first = plan.sessions[0]?.date;
+        const last = plan.sessions[plan.sessions.length - 1]?.date;
+        assistant.plan = plan;
+        assistant.apiContent =
+          `${reply}\n\n[plan emitted: ${plan.sessions.length} sessions, ${first} to ${last}${invalid.length ? `, ${invalid.length} invalid` : ''}]`;
+        if (invalid.length) {
+          failNote = {
+            role: 'user',
+            system: true,
+            content: `[Plan validation failed for ${invalid.length} session(s): ${invalid
+              .map((s) => `"${s.name || s.date}" — ${s.error}`)
+              .join('; ')}. Fix exactly what each error names and re-emit the complete corrected plan.]`,
+          };
         }
       } else if (spec) {
         // Marker for the model's history — see toPayload/apiContent above.
@@ -208,54 +217,12 @@ export default function ChatWidget() {
     }
   };
 
-  // Run one composer turn (Stage 9b). The server already guard-validated every
-  // session of a returned plan; if any are invalid, relay the errors back to
-  // the coach ONCE (same pattern as the planning guard-failure relay) so it
-  // re-emits a corrected plan without the athlete copying error text around.
-  const runComposeTurn = async (nextMessages, canRelayInvalid = true) => {
-    setError(null);
-    setPending(true);
-    try {
-      const { reply, plan, planError } = await api.compose(toPayload(nextMessages));
-      let assistant = { role: 'assistant', content: reply };
-      let invalidNote = null;
-      if (plan) {
-        const invalid = plan.sessions.filter((s) => !s.valid);
-        const first = plan.sessions[0]?.date, last = plan.sessions[plan.sessions.length - 1]?.date;
-        assistant.plan = plan;
-        // Marker for the model's history (fences are stripped server-side).
-        assistant.apiContent =
-          `${reply}\n\n[plan emitted: ${plan.sessions.length} sessions, ${first} to ${last}${invalid.length ? `, ${invalid.length} invalid` : ''}]`;
-        if (invalid.length) {
-          invalidNote = {
-            role: 'user',
-            system: true,
-            content: `[Plan validation failed for ${invalid.length} session(s): ${invalid
-              .map((s) => `"${s.name || s.date}" — ${s.error}`)
-              .join('; ')}. Fix exactly what each error names and re-emit the complete corrected plan.]`,
-          };
-        }
-      } else if (planError) {
-        assistant = { ...assistant, planError: true };
-      }
-      const withReply = invalidNote
-        ? [...nextMessages, assistant, invalidNote]
-        : [...nextMessages, assistant];
-      setMessages(withReply);
-      if (invalidNote && canRelayInvalid) await runComposeTurn(withReply, false);
-    } catch (e) {
-      setError(e.message || 'Something went wrong');
-    } finally {
-      setPending(false);
-    }
-  };
-
   // Save the plan attached to message `i` — a DB write only (no Garmin; that's
   // a later stage). On success, stamp the turn, note it for the transcript, and
   // drop back to the analyst (the plan now shows up via the normal dashboard).
   const savePlan = async (i) => {
     const msg = messages[i];
-    if (!composer || !msg?.plan || savingIdx != null || pending) return;
+    if (!planning || !msg?.plan || savingIdx != null || pending) return;
     setSavingIdx(i);
     setError(null);
     try {
@@ -291,10 +258,6 @@ export default function ChatWidget() {
     setInput('');
     if (planning) {
       await runPlanTurn(next);
-      return;
-    }
-    if (composer) {
-      await runComposeTurn(next);
       return;
     }
     setError(null);
@@ -436,19 +399,19 @@ export default function ChatWidget() {
   return (
     <div
       className={`fixed bottom-5 right-5 z-40 flex flex-col overflow-hidden rounded-2xl border bg-surface-1 shadow-xl ${
-        composer
+        planning
           ? 'h-[620px] w-[560px]'
           : 'h-[500px] w-[360px]'
-      } max-w-[calc(100vw-2.5rem)] ${planning || composer ? 'border-acc' : 'border-line'}`}
+      } max-w-[calc(100vw-2.5rem)] ${planning ? 'border-acc' : 'border-line'}`}
     >
       <header className="flex items-center justify-between border-b border-line px-4 py-3">
         <div>
           <h2 className="font-display text-[0.9375rem] font-bold uppercase tracking-[0.1em] text-ink">
             Coach
           </h2>
-          {planning || composer ? (
+          {planning ? (
             <p className="mt-0.5 font-body text-nano uppercase tracking-[0.18em] text-acc">
-              {planning ? 'Planning mode' : 'Plan composer'}
+              Planning mode
             </p>
           ) : (
             <p className="mt-0.5 font-body text-nano uppercase tracking-[0.18em] text-ink-muted">
@@ -457,31 +420,23 @@ export default function ChatWidget() {
           )}
         </div>
         <div className="flex items-center gap-1">
-          {planning || composer ? (
+          {planning ? (
             <button
               onClick={() => enterMode('chat')}
               disabled={pending}
               className="rounded-lg border border-line px-2 py-1 text-xs text-ink-secondary transition hover:bg-surface-2 disabled:opacity-50"
             >
-              {planning ? 'Exit planning' : 'Exit composer'}
+              Exit planning
             </button>
           ) : (
             <>
               <button
                 onClick={() => enterMode('planning')}
                 disabled={pending}
-                title="Plan and push a workout to Garmin"
+                title="Plan sessions or blocks, and edit the Garmin calendar"
                 className="inline-flex items-center gap-1 rounded-lg border border-line px-2 py-1 text-xs text-ink-secondary transition hover:bg-surface-2 disabled:opacity-50"
               >
                 <Icon name="stopwatch" /> Plan
-              </button>
-              <button
-                onClick={() => enterMode('composer')}
-                disabled={pending}
-                title="Compose a multi-week plan (adapts your Runna block, or builds from scratch)"
-                className="inline-flex items-center gap-1 rounded-lg border border-line px-2 py-1 text-xs text-ink-secondary transition hover:bg-surface-2 disabled:opacity-50"
-              >
-                <Icon name="calendar" /> Adapt
               </button>
               <button
                 onClick={copyContext}
@@ -520,9 +475,7 @@ export default function ChatWidget() {
         {messages.length === 0 && (
           <p className="mt-2 text-center text-xs text-ink-muted">
             {planning
-              ? 'Planning mode — describe the week or session you want, and the coach will propose it, then build and push each session for your approval.'
-              : composer
-                ? 'Plan composer — the coach reads your calendar and proposes a multi-week plan: an adaptation of your Runna block (same skeleton, its own sessions), or one from scratch when there’s nothing to adapt (a bridge, a gap-fill). You review week by week, then save it.'
+              ? 'Planning mode — compose and push a session, build a multi-week plan for review, or move, remove and revise future Garmin calendar workouts.'
                 : 'Ask about your training — paces, recovery, whether a goal is realistic, why a run felt hard.'}
           </p>
         )}
@@ -543,21 +496,15 @@ export default function ChatWidget() {
                 </Markdown>
                 {m.specError && (
                   <p className="mt-2 text-xs text-sem-red">
-                    The coach tried to present a session but its spec couldn't be read.
-                    Ask it to re-send the session.
-                  </p>
-                )}
-                {m.planError && (
-                  <p className="mt-2 text-xs text-sem-red">
-                    The coach tried to present a plan but it couldn't be read.
-                    Ask it to re-send the plan.
+                    The coach tried to present structured planning output, but it couldn't be read.
+                    Ask it to re-send the session, plan, or edit.
                   </p>
                 )}
                 {m.plan && (
                   <div className="mt-2 w-full">
                     <PlanReview
                       plan={m.plan}
-                      active={composer}
+                      active={planning}
                       saving={savingIdx === i}
                       saved={m.savedPlan}
                       onSave={() => savePlan(i)}
@@ -687,8 +634,7 @@ export default function ChatWidget() {
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onKeyDown}
             placeholder={
-              planning ? 'Reply, or say "too fast" / "skip this"…'
-              : composer ? 'Describe the adaptation you want, or reply to the outline…'
+              planning ? 'Ask for a session, plan, or calendar edit…'
               : 'Ask your coach… (Shift+Enter for a new line)'
             }
             className="max-h-[178px] flex-1 resize-none overflow-y-auto rounded-lg border border-line bg-surface-2 px-3 py-2 text-sm text-ink shadow-sm outline-none transition placeholder:text-ink-muted focus:border-acc focus:ring-2 focus:ring-acc/20"

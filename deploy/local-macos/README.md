@@ -13,6 +13,7 @@ Three launchd user agents in `~/Library/LaunchAgents`:
 | API | `com.garminhub.api` | `node server.js` on **:3001**. KeepAlive + RunAtLoad. |
 | Web | `com.garminhub.web` | `vite preview` serving the prod build (`web/dist`) on **127.0.0.1:4173**. KeepAlive + RunAtLoad. |
 | Daily | `com.garminhub.daily` | At **10:00** daily: `ingest.py`, then (on success) `POST /api/coach/daily`. |
+| Ingest | `com.garminhub.ingest` | **Every 2 hours**: `daily.sh --no-insight` — ingest only, no Claude spend. Keeps the dashboard current between daily runs. |
 
 `KeepAlive` = auto-restart on crash. `RunAtLoad` = start now and at every login,
 so they survive closing the terminal / logging out and back in.
@@ -65,6 +66,7 @@ tail -f ~/garmin-hub-cron.log
 
 ```bash
 launchctl start com.garminhub.daily      # runs ingest + insight now
+launchctl start com.garminhub.ingest     # runs ingest only, now
 tail -f ~/garmin-hub-cron.log            # watch it work
 ```
 

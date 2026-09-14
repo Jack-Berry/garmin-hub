@@ -208,7 +208,8 @@ export function ActivationFlow({ variant = 'card', expectPlanId = null }) {
       {plan.supersedes_active && (
         <p className="mt-2 text-xs text-ink-secondary">
           “{plan.supersedes_active}” is still the active plan — activating this one
-          archives it (its pushed sessions stay on Garmin).
+          archives it if their dates overlap, or queues this plan behind it if they do not.
+          Pushed sessions stay on Garmin.
         </p>
       )}
 

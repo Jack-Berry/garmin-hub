@@ -48,7 +48,6 @@ export const api = {
   racePredictions: () => get('/api/race-predictions'),
   chat: (messages) => post('/api/coach/chat', { messages }),
   plan: (messages) => post('/api/coach/plan', { messages }),
-  compose: (messages) => post('/api/coach/compose', { messages }),
   savePlan: (plan) => post('/api/plan/save', { plan }),
   planCurrent: () => get('/api/plan/current'),
   planPushNext: (planId) => post(`/api/plan/${planId}/push-next`, {}),
@@ -64,7 +63,11 @@ export const api = {
   generateDaily: () => post('/api/coach/daily', {}),
   coachReport: () => post('/api/coach/report', {}),
   coachDay: (date) => post(`/api/coach/day/${date}`, {}),
-  refreshIngest: () => post('/api/ingest/refresh'),
+  // maxAgeMinutes: only actually pull if the last run is older than this (the
+  // dashboard's on-load refresh). Omit it to always pull (the manual button).
+  refreshIngest: (maxAgeMinutes) =>
+    post('/api/ingest/refresh',
+      maxAgeMinutes ? { max_age_minutes: maxAgeMinutes } : {}),
   pacerChat: (messages) => post('/api/pacer/chat', { messages }),
   pacerPreview: (params) => post('/api/pacer/preview', params),
   pacerPush: (params) => post('/api/pacer/push', params),

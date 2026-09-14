@@ -166,22 +166,24 @@ CREATE TABLE IF NOT EXISTS planned_workouts (
   -- Appended by Stage 9a (app-generated plans)
   plan_id                      text,                -- app rows: owning adapted-plan id; NULL = one-off push / non-app row
   rationale                    text,                -- app rows: per-session "why" from the coach
-  removed_at                   timestamptz          -- Stage 9d soft-delete (app rows only): NULL = live; set = session dropped from the plan (kept for history / 9e load-awareness), excluded from every read path
+  removed_at                   timestamptz          -- app history tombstone or runna_ical removal; NULL = live; excluded from reads when set
 );
 
 CREATE INDEX IF NOT EXISTS idx_planned_workouts_calendar_date
   ON planned_workouts (calendar_date);
 
--- Adapted-plan parents (Stage 9c/9d). One row per saved plan; planned_workouts
--- app rows point here via plan_id. Holds the plan-level metadata the composer
--- generates (name/goal/summary/weeks) plus the plan lifecycle. Per-session
+-- Adapted-plan parents (Stage 9c/9d/9f). One row per saved plan;
+-- planned_workouts app rows point here via plan_id. Holds generated plan-level
+-- metadata (name/goal/summary/weeks) plus the lifecycle. Per-session
 -- push state lives on planned_workouts (workout_id NULL = not yet pushed).
 --
--- status lifecycle (Stage 9d) — forward-only, nothing ever moves backward:
+-- status lifecycle (Stage 9d/9f) — forward-only, nothing ever moves backward:
 --   'draft'     saved, not yet pushed to Garmin
 --   'active'    every session pushed (the 9c activation flip). At most ONE
 --               plan is active at a time, enforced at activation: flipping a
---               plan to active retires any other active plan (below).
+--               plan to active retires only a finished or overlapping active.
+--   'queued'    every session pushed, but a non-overlapping plan is still
+--               active. Promoted automatically when no active plan remains.
 --   'completed' block finished — goal race date (parsed from goal_race text,
 --               falling back to date_to) has passed. Set automatically on
 --               /api/plan/current load; also the retirement target at
@@ -190,7 +192,8 @@ CREATE INDEX IF NOT EXISTS idx_planned_workouts_calendar_date
 --               this one finished (the re-adaptation case 9e leans on).
 --   'discarded' abandoned draft — superseded by a newer saved draft (draft
 --               hygiene: a new save discards prior drafts + their session rows).
--- Legal transitions: draft -> active | discarded; active -> completed | archived.
+-- Legal transitions: draft -> active | queued | discarded; queued -> active;
+--                    active -> completed | archived.
 -- All statuses are retained as history — nothing in the lifecycle deletes a plan,
 -- with ONE exception (9d-2): an athlete-requested discard of a DRAFT
 -- (POST /api/plan/:plan_id/discard) hard-deletes the plan row and its session
@@ -198,8 +201,8 @@ CREATE INDEX IF NOT EXISTS idx_planned_workouts_calendar_date
 -- has nothing on Garmin and no run history, so there is nothing to preserve.
 -- Draft visibility (9d-2): a draft's sessions are dormant — excluded from every
 -- default read surface and from app-plan precedence until activation flips the
--- plan to 'active'. Drafts surface only via /api/plan/current (the Activate
--- card) and the planning context's plan-lifecycle list.
+-- plan to 'active' or 'queued'. Drafts surface only via /api/plan/current (the
+-- Activate card) and the planning context's plan-lifecycle list.
 -- runna_cleared_at (9d-3): athlete-asserted "Runna is cancelled / nothing to
 -- cancel" — the manual override for the post-push cancel-Runna gate, set via
 -- POST /api/plan/:plan_id/runna-cleared. NULL = not asserted (the gate clears
@@ -210,7 +213,7 @@ CREATE TABLE IF NOT EXISTS plans (
   name                         text,
   goal_race                    text,
   summary                      text,
-  weeks_json                   jsonb,               -- composer weeks[] verbatim (start/focus lines)
+  weeks_json                   jsonb,               -- generated-plan weeks[] verbatim (start/focus lines)
   date_from                    date,
   date_to                      date,
   status                       text NOT NULL DEFAULT 'draft',  -- see lifecycle above
@@ -242,10 +245,23 @@ CREATE TABLE IF NOT EXISTS recovery (
   sleep_score_qualifier        text,
   avg_sleep_stress             double precision,
 
-  -- Training readiness
+  -- Training readiness.
+  -- Garmin returns SEVERAL readiness snapshots per day, each tagged with an
+  -- inputContext (AFTER_WAKEUP_RESET, AFTER_POST_EXERCISE_RESET,
+  -- UPDATE_REALTIME_VARIABLES) and newest-first. readiness_score & friends hold
+  -- the LATEST one — so on any day with a run they are the POST-exercise value,
+  -- which is an effect of the session, not the state the athlete started it in
+  -- (a real case: woke at 94, read 27 after a 16km progressive long run).
+  -- readiness_wake_* holds that day's AFTER_WAKEUP_RESET reading — the genuine
+  -- pre-training baseline — and readiness_context/readiness_time_local label
+  -- what the primary reading actually is, so no caller has to guess.
   readiness_score              integer,
   readiness_level              text,
   readiness_feedback           text,
+  readiness_context            text,       -- inputContext of the primary reading
+  readiness_time_local         timestamp,  -- when the primary reading was taken
+  readiness_wake_score         integer,    -- the day's wake-up reading: pre-training
+  readiness_wake_level         text,
   recovery_time_minutes        double precision,
   acute_load                   double precision,
   sleep_factor_pct             integer,
@@ -324,6 +340,27 @@ CREATE TABLE IF NOT EXISTS race_predictions (
 -- garminhub_rw: DML only, no DDL (Node's writeDb + the Python ingest).
 -- Roles are created by setup_local.sh; DDL runs as the superuser/owner.
 -- =========================================================================
+-- =========================================================================
+-- ingest_state — single row (id = 1, CHECK-enforced, like profile) recording
+-- the last ingest run. Written by ingest.py ITSELF, so it covers every path
+-- that ingests: the launchd schedules, the API's Refresh spawn, and a manual
+-- terminal run. Two readers: the dashboard's "Updated N ago" label, and the
+-- staleness gate on POST /api/ingest/refresh, which skips spawning a fresh
+-- pull when one already ran inside the caller's window (so opening the page in
+-- five tabs does not mean five Garmin pulls).
+--
+-- last_run_at is the last COMPLETED attempt, not the last clean one: the gate
+-- deliberately counts a partial run as recent, because ingest exits non-zero
+-- on any error at all (one rate-limited date included) and a failing pull must
+-- not turn into a retry loop against Garmin. `ok` carries the distinction to
+-- the UI. No raw_json — this is our own bookkeeping, not Garmin's data.
+CREATE TABLE IF NOT EXISTS ingest_state (
+  id           smallint PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+  last_run_at  timestamptz NOT NULL,
+  ok           boolean     NOT NULL,
+  summary      text
+);
+
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;  -- PG14 default is too permissive
 GRANT USAGE ON SCHEMA public TO garminhub_ro, garminhub_rw;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO garminhub_ro;

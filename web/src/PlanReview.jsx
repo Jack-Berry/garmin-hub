@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { shortDate } from './format';
 import { PacerPreview } from './PacerPreview';
 
-// Stage 9b plan review — the composer's generated plan rendered week by week.
+// Stage 9b plan review — a generated multi-week plan rendered week by week.
 // Each session row expands to the same preview card the single-session
 // planner shows (repeat groups stay grouped); invalid sessions are flagged
 // with their guard error, never hidden. Presentation + the Save action only —
@@ -138,7 +138,7 @@ export function PlanReview({ plan, active, saving, saved, onSave, onActivate }) 
           </button>
         ) : (
           <span className="text-xs text-ink-muted">
-            Not saved — composer ended. Re-enter Adapt plan to save.
+            Not saved — planning ended. Re-enter planning to save.
           </span>
         )}
       </div>

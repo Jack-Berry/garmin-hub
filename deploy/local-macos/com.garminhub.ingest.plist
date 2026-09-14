@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.garminhub.ingest</string>
+
+  <!-- Periodic ingest ONLY — no daily insight (that is com.garminhub.daily at
+       10:00, and it spends Claude credit). Without this, a run logged at
+       midday did not reach the dashboard until 10:00 the next morning. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/jackberry/Code/Projects/garmin-hub/deploy/local-macos/daily.sh</string>
+    <string>--no-insight</string>
+  </array>
+
+  <!-- Every 2 hours. If the Mac is asleep across several intervals, launchd
+       coalesces them into ONE run at the next wake, so this cannot pile up. -->
+  <key>StartInterval</key>
+  <integer>7200</integer>
+
+  <!-- Do NOT run at load: install.sh reloads the agents on every deploy, and
+       that should not fire a Garmin pull each time. The dashboard's own
+       on-open refresh covers the gap. -->
+  <key>RunAtLoad</key>
+  <false/>
+
+  <!-- daily.sh appends to ~/garmin-hub-cron.log itself; these catch any
+       launchd-level launch errors too. -->
+  <key>StandardOutPath</key>
+  <string>/Users/jackberry/garmin-hub-cron.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/jackberry/garmin-hub-cron.log</string>
+</dict>
+</plist>

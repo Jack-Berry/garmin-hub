@@ -8,8 +8,13 @@ const { spawn } = require('child_process');
 const express = require('express');
 const { db, writeDb } = require('./db');
 const { buildContext, renderContextDump, localDate } = require('./context');
-const { collapseRaceDuplicates, applyAppPlanPrecedence } = require('./planned');
-const { generateBrief, generateDetailedReport, generateDayInsight, chatReply, planReply, composeReply } = require('./coach');
+const {
+  collapseRaceDuplicates,
+  applyAppPlanPrecedence,
+  appGhostFilterSql,
+  appGhostOverlaySql,
+} = require('./planned');
+const { generateBrief, generateDetailedReport, generateDayInsight, chatReply, planReply } = require('./coach');
 const { pacerChat } = require('./pacer');
 
 const app = express();
@@ -109,24 +114,35 @@ app.get('/api/planned', handler(async (req, res) => {
   // removed_at: Stage 9d soft-deleted sessions are history, never display rows.
   // Draft gate (9d-2): a saved-but-unactivated plan is dormant — its sessions
   // never surface on default read paths (nor suppress Runna; see planned.js).
-  const where = ["p.removed_at IS NULL", "pl.status IS DISTINCT FROM 'draft'"];
+  const where = [
+    "p.removed_at IS NULL",
+    "pl.status IS DISTINCT FROM 'draft'",
+  ];
   const params = [];
   if (req.query.from) { params.push(req.query.from); where.push(`p.calendar_date >= $${params.length}`); }
   if (req.query.to) { params.push(req.query.to); where.push(`p.calendar_date <= $${params.length}`); }
+  const today = localDate();
+  params.push(today);
+  const todayParam = params.length;
+  where.push(appGhostFilterSql(todayParam));
   const rows = await db.all(
-    `SELECT p.schedule_id, p.workout_id, p.calendar_date, p.title, p.sport_type, p.source,
+    `SELECT p.schedule_id, p.workout_id, p.calendar_date,
+            COALESCE(gh.title, p.title) AS title, p.sport_type, p.source,
             p.is_race_auto, p.is_race_override,
             COALESCE(p.is_race_override, p.is_race_auto) AS is_race,
-            p.estimated_distance_m, p.estimated_duration_s, p.steps_json,
+            COALESCE(gh.estimated_distance_m, p.estimated_distance_m) AS estimated_distance_m,
+            COALESCE(gh.estimated_duration_s, p.estimated_duration_s) AS estimated_duration_s,
+            COALESCE(gh.steps_json, p.steps_json) AS steps_json,
             pl.status AS plan_status
      FROM planned_workouts p LEFT JOIN plans pl ON pl.plan_id = p.plan_id
-     WHERE ${where.join(' AND ')} ORDER BY p.calendar_date`, params);
-  // App-plan precedence first (a LIVE app row — active plan or one-off push —
-  // owns its date: upcoming Runna/Garmin rows on it are dropped), then
+     ${appGhostOverlaySql(todayParam)}
+     WHERE ${where.join(' AND ')} ORDER BY p.calendar_date, p.schedule_id`, params);
+  // App-plan precedence first (a LIVE app row — active/queued plan or one-off
+  // push — owns its date: upcoming Runna/Garmin rows on it are dropped), then
   // collapse same-day race triplicates (Runna race + manual override + pacer)
   // into one row before shaping; the survivor carries a pacer_available flag.
   // steps_json is jsonb — pg hands back the parsed array (or null) directly.
-  const out = collapseRaceDuplicates(applyAppPlanPrecedence(rows)).map((r) => {
+  const out = collapseRaceDuplicates(applyAppPlanPrecedence(rows, today)).map((r) => {
     const { steps_json, plan_status, ...rest } = r;
     return { ...rest, steps: steps_json ?? null };
   });
@@ -391,13 +407,9 @@ app.post('/api/coach/chat', handler(async (req, res) => {
   res.json({ reply });
 }));
 
-// Planning-mode coach turn (Opus, Stage 8). Body: { messages } — the full
-// conversation so far. Returns { reply, spec, edit } — spec is the extracted
-// session spec object when the coach presents one; edit is a Stage 9d edit
-// directive (move/delete/replace on an active-plan session). This endpoint
-// COMPOSES only; preview/push go through /api/pacer/preview and
-// /api/pacer/push, edits through /api/plan/session/... after the athlete
-// confirms. Stateless: nothing persisted.
+// Unified planning-mode coach turn (Stage 9f). Returns one session spec, edit
+// directive, or full multi-week plan. Sessions/plans are only proposed here:
+// preview, save, push and edit paths remain athlete-confirmed endpoints.
 // Sessions pushed to Garmin this server session, newest last. The DB only
 // learns about pushes on the next ingest, so the planning coach reads this
 // in-memory list (planning.pushed_recently) to avoid double-booking a session
@@ -411,8 +423,20 @@ app.post('/api/coach/plan', handler(async (req, res) => {
   if (!Array.isArray(messages) || messages.length === 0) {
     return res.status(400).json({ error: 'messages must be a non-empty array' });
   }
-  const { reply, spec, edit, done, specError } = await planReply(db, messages, recentPushes);
-  res.json({ reply, spec, edit, done, specError });
+  const { reply, spec, edit, plan, done, specError } =
+    await planReply(db, messages, recentPushes);
+  if (plan) {
+    const v = await runPacer('validate', { sessions: plan.sessions }, 30000);
+    plan.sessions = plan.sessions.map((s, i) => {
+      const r = v.sessions[i];
+      return r?.ok
+        ? { ...s, valid: true,
+            preview: { name: r.name, total_distance_m: r.total_distance_m,
+                       est_duration_s: r.est_duration_s, segments: r.segments } }
+        : { ...s, valid: false, error: r ? r.error : 'no validation result' };
+    });
+  }
+  res.json({ reply, spec, edit, plan, done, specError });
 }));
 
 // Coach memory — the durable facts the conversational coach has silently
@@ -459,9 +483,41 @@ const INGEST_TIMEOUT_MS = 120000;
 // ingest spawning while one is in flight (manual click or a future cron tick).
 let ingestRunning = false;
 
-app.post('/api/ingest/refresh', (req, res) => {
+// Last-run bookkeeping, written by ingest.py itself (see ingest_state in
+// schema.pg.sql) so it reflects the launchd schedules and manual terminal runs
+// too, not just refreshes that came through here. Never throws: a missing or
+// unreadable row must not break a refresh, it just means "age unknown", which
+// the gate below reads as "go ahead and pull".
+async function readIngestState() {
+  try {
+    const r = await db.get('SELECT last_run_at, ok FROM ingest_state WHERE id = 1');
+    if (!r || !r.last_run_at) return { last_run_at: null, last_ok: null, age_minutes: null };
+    return {
+      last_run_at: r.last_run_at,
+      last_ok: r.ok,
+      age_minutes: Math.max(0, Math.round((Date.now() - new Date(r.last_run_at)) / 60000)),
+    };
+  } catch {
+    return { last_run_at: null, last_ok: null, age_minutes: null };
+  }
+}
+
+app.post('/api/ingest/refresh', async (req, res) => {
+  const state = await readIngestState();
+
+  // Staleness gate. The dashboard fires this on every page load, so without a
+  // window a reload — or a second tab — would mean another Garmin pull each
+  // time. The manual Refresh button sends no window and so always pulls.
+  const maxAge = Number((req.body || {}).max_age_minutes);
+  if (Number.isFinite(maxAge) && maxAge > 0
+      && state.age_minutes != null && state.age_minutes < maxAge) {
+    return res.json({ ok: true, skipped: true, ...state });
+  }
+
   if (ingestRunning) {
-    return res.status(409).json({ error: 'ingest already running' });
+    // Not an error for the automatic caller — someone is already doing the
+    // work — so the current state rides along with the 409.
+    return res.status(409).json({ error: 'ingest already running', ...state });
   }
   ingestRunning = true;
 
@@ -496,14 +552,17 @@ app.post('/api/ingest/refresh', (req, res) => {
     finish(() => res.status(500).json({ error: `Failed to start ingest: ${err.message}` }));
   });
 
-  child.on('close', (code) => {
+  child.on('close', async (code) => {
     const tail = out.trim().split('\n').slice(-8).join('\n');
+    // Re-read AFTER the run so the caller gets the timestamp it just produced.
+    const after = await readIngestState();
     if (code === 0) {
-      finish(() => res.json({ ok: true, summary: tail }));
+      finish(() => res.json({ ok: true, skipped: false, summary: tail, ...after }));
     } else {
       finish(() => res.status(500).json({
         error: `Ingest failed (exit ${code}). If it stalled on login, the Garmin token may have expired — run it manually in a terminal to re-authenticate (MFA).`,
         summary: tail,
+        ...after,
       }));
     }
   });
@@ -572,6 +631,20 @@ app.post('/api/pacer/preview', handler(async (req, res) => {
 const appScheduleId = (uid) =>
   (-BigInt('0x' + crypto.createHash('sha1').update(uid).digest('hex').slice(0, 15))).toString();
 
+// Persist a successful Garmin push as the app-owned, buildable calendar row.
+// Callers handle the Garmin-succeeded/DB-failed hazard around this promise.
+const persistAppRow = (result, spec, planId, rationale) => writeDb.run(
+  `INSERT INTO planned_workouts
+     (schedule_id, workout_id, calendar_date, title, sport_type,
+      estimated_distance_m, estimated_duration_s, steps_json,
+      source, plan_id, rationale)
+   VALUES ($1, $2, $3, $4, 'running', $5, $6, $7, 'app', $8, $9)
+   ON CONFLICT (schedule_id) DO NOTHING`,
+  [appScheduleId(`app:${result.schedule_id}`), result.workout_id,
+   result.date, result.name,
+   result.total_distance_m ?? null, result.est_duration_s ?? null,
+   spec, planId, rationale]);
+
 // Build AND push to Garmin (upload + schedule). The ONLY endpoint that writes
 // to Garmin — called only after the user approves the preview. Body: params
 // (+ optional plan_id / rationale, Stage 9 — NULL for one-off single pushes).
@@ -596,17 +669,7 @@ app.post('/api/pacer/push', handler(async (req, res) => {
   try {
     // steps_json holds the pushed spec verbatim (deterministic rebuild input).
     // node-pg serialises the object for the jsonb column — no JSON.stringify.
-    await writeDb.run(
-      `INSERT INTO planned_workouts
-         (schedule_id, workout_id, calendar_date, title, sport_type,
-          estimated_distance_m, estimated_duration_s, steps_json,
-          source, plan_id, rationale)
-       VALUES ($1, $2, $3, $4, 'running', $5, $6, $7, 'app', $8, $9)
-       ON CONFLICT (schedule_id) DO NOTHING`,
-      [appScheduleId(`app:${result.schedule_id}`), result.workout_id,
-       result.date, result.name,
-       result.total_distance_m ?? null, result.est_duration_s ?? null,
-       spec, spec.plan_id || null, spec.rationale || null]);
+    await persistAppRow(result, spec, spec.plan_id || null, spec.rationale || null);
   } catch (err) {
     persisted = false;
     console.error('pacer push succeeded on Garmin but planned_workouts insert failed:', err.message);
@@ -614,38 +677,10 @@ app.post('/api/pacer/push', handler(async (req, res) => {
   res.json({ ...result, persisted });
 }));
 
-// --- Adapted-plan composer (Stage 9b) ------------------------------------------
-// Composer-mode coach turn (Opus). Body: { messages }. Returns { reply, plan,
-// planError } — plan is the extracted multi-week plan when the coach presents
-// one. Generation-time validation: every session's spec runs through the SAME
-// deterministic Python guard the push path uses (one spawn for the whole
-// plan), so the review never shows a plan that couldn't later push. Invalid
-// sessions are FLAGGED on the plan, never silently dropped. Stateless; writes
-// nothing — persistence is /api/plan/save below, Garmin push is Stage 9c.
-app.post('/api/coach/compose', handler(async (req, res) => {
-  const { messages } = req.body || {};
-  if (!Array.isArray(messages) || messages.length === 0) {
-    return res.status(400).json({ error: 'messages must be a non-empty array' });
-  }
-  const { reply, plan, planError } = await composeReply(db, messages, recentPushes);
-  if (plan) {
-    const v = await runPacer('validate', { sessions: plan.sessions }, 30000);
-    plan.sessions = plan.sessions.map((s, i) => {
-      const r = v.sessions[i];
-      return r?.ok
-        ? { ...s, valid: true,
-            preview: { name: r.name, total_distance_m: r.total_distance_m,
-                       est_duration_s: r.est_duration_s, segments: r.segments } }
-        : { ...s, valid: false, error: r ? r.error : 'no validation result' };
-    });
-  }
-  res.json({ reply, plan, planError });
-}));
-
 // Persist a reviewed plan — a plans parent row + planned_workouts source='app'
 // session rows sharing one plan_id. A DB write ONLY (no Garmin; pushing is the
 // activation step below). Body: { plan: { name?, goal_race?, summary?, weeks?,
-// sessions: [...] } } — sessions in the composer's spec shape. The guard
+// sessions: [...] } } — sessions in the unified planning spec shape. The guard
 // re-runs on the exact specs being persisted (the write trusts nothing it
 // didn't check itself) and also supplies the built distance/duration
 // estimates. Everything runs as ONE atomic statement, so a partial plan can
@@ -787,18 +822,19 @@ const planPayload = async (plan, today) => {
   };
 };
 
-// Lifecycle (Stage 9d): the auto-complete check runs here — this is the read
+// Lifecycle (Stage 9d/9f): completion and queued promotion run here — the read
 // every dashboard load makes, so it's the leanest place (no scheduler). The
 // UPDATE is idempotent and forward-only (active -> completed when the block's
-// race/last session has passed); nothing is deleted. Selection prefers the
-// live pipeline: active plan, else newest draft, else the newest completed
+// race/last session has passed; earliest queued -> active when no active plan
+// remains); nothing is deleted. Selection prefers the live pipeline: active,
+// queued, newest draft, then newest completed
 // (so the dashboard can note the block finished) — EXCEPT (9d-3) that a
 // QUIESCENT active plan (nothing left to push, Runna gate satisfied) yields to
 // a newer draft: its activation card is done, and letting it keep the slot was
 // exactly how a stale cancel step blocked the next plan from ever activating.
 // The draft payload carries supersedes_active so the card can warn that
-// activating it archives the still-live plan (one active plan at a time —
-// queued auto-activation stays a non-goal). Archived/discarded plans are
+// activating it archives the still-live plan when their spans overlap; a
+// non-overlapping plan becomes queued instead. Archived/discarded plans are
 // history and never surface here.
 const PLAN_SELECT =
   `SELECT plan_id, name, goal_race, summary, weeks_json, date_from, date_to,
@@ -809,9 +845,19 @@ app.get('/api/plan/current', handler(async (req, res) => {
   await writeDb.run(
     `UPDATE plans SET status = 'completed'
      WHERE status = 'active' AND ${PLAN_FINISHED_SQL}`, [today]);
+  await writeDb.run(
+    `UPDATE plans SET status = 'active'
+     WHERE plan_id = (
+       SELECT q.plan_id FROM plans q
+       WHERE q.status = 'queued'
+         AND NOT EXISTS (SELECT 1 FROM plans a WHERE a.status = 'active')
+       ORDER BY q.date_from, q.created_at, q.plan_id
+       LIMIT 1
+     )`);
   const plan = await db.get(
-    `${PLAN_SELECT} WHERE status IN ('active', 'draft', 'completed')
-     ORDER BY (status = 'active') DESC, (status = 'draft') DESC, created_at DESC
+    `${PLAN_SELECT} WHERE status IN ('active', 'queued', 'draft', 'completed')
+     ORDER BY (status = 'active') DESC, (status = 'queued') DESC,
+              (status = 'draft') DESC, created_at DESC
      LIMIT 1`);
   if (!plan) return res.json(null);
   let payload = await planPayload(plan, today);
@@ -862,7 +908,7 @@ app.post('/api/plan/:plan_id/runna-cleared', handler(async (req, res) => {
 // fresh one) → upload + schedule → workout_id recorded on the row. A failure
 // leaves workout_id NULL, so re-running resumes exactly there — pushed rows
 // are never re-selected, nothing double-books. When nothing is pending the
-// plan flips to 'active' (the signal the cancel-Runna step gates on).
+// plan flips to 'active', or 'queued' behind a non-overlapping running plan.
 // Mirror of the 9a push hazard: if Garmin succeeded but the row update failed,
 // respond recorded:false rather than 500 — a blind retry WOULD double-book.
 // In-process lock (ingestRunning pattern): a Garmin plan write takes ~30s of
@@ -888,8 +934,12 @@ app.post('/api/plan/:plan_id/push-next', withGarminLock(pushNextSession));
 
 async function pushNextSession(req, res) {
   const planId = req.params.plan_id;
-  const plan = await db.get('SELECT plan_id, status FROM plans WHERE plan_id = $1', [planId]);
+  const plan = await db.get(
+    'SELECT plan_id, status, date_from, date_to FROM plans WHERE plan_id = $1', [planId]);
   if (!plan) return res.status(404).json({ error: 'plan not found' });
+  if (!['draft', 'active', 'queued'].includes(plan.status)) {
+    return res.status(409).json({ error: `${plan.status} plans cannot be activated` });
+  }
   const today = localDate();
   const next = await db.get(
     `SELECT schedule_id::text AS schedule_id, calendar_date, steps_json
@@ -900,17 +950,24 @@ async function pushNextSession(req, res) {
 
   if (!next) {
     if (plan.status !== 'active') {
-      // One active plan, enforced HERE (activation), not by sweep: before this
-      // plan goes active, retire any other active plan — 'completed' if its
-      // block already finished (race/last session passed), else 'archived'
-      // (superseded while still live — the 9e re-adaptation case). Retire
-      // first, then flip, so a crash between the two can never leave two
-      // actives. Both moves are forward-only; nothing is deleted.
-      await writeDb.run(
-        `UPDATE plans
-         SET status = CASE WHEN ${PLAN_FINISHED_SQL} THEN 'completed' ELSE 'archived' END
-         WHERE status = 'active' AND plan_id != $2`, [today, planId]);
-      await writeDb.run(`UPDATE plans SET status = 'active' WHERE plan_id = $1`, [planId]);
+      const active = await db.get(
+        `SELECT plan_id, date_from, date_to, ${PLAN_FINISHED_SQL} AS finished
+         FROM plans WHERE status = 'active' AND plan_id != $2
+         ORDER BY created_at DESC LIMIT 1`, [today, planId]);
+      const overlaps = active != null
+        && active.date_from <= plan.date_to && plan.date_from <= active.date_to;
+      const status = active && !active.finished && !overlaps ? 'queued' : 'active';
+
+      // Retire first only for a finished or genuinely overlapping incumbent,
+      // then flip the incoming plan. A crash between these writes can leave no
+      // active plan, never two; GET /api/plan/current promotes queued plans.
+      if (active && status === 'active') {
+        await writeDb.run(
+          `UPDATE plans SET status = $2 WHERE plan_id = $1 AND status = 'active'`,
+          [active.plan_id, active.finished ? 'completed' : 'archived']);
+      }
+      await writeDb.run('UPDATE plans SET status = $2 WHERE plan_id = $1', [planId, status]);
+      return res.json({ done: true, status });
     }
     return res.json({ done: true, status: 'active' });
   }
@@ -997,8 +1054,9 @@ app.post('/api/plan/:plan_id/discard', withGarminLock(async (req, res) => {
 // the UI before anything runs here. All three funnel through the same Garmin
 // reconcile primitive (pacer_cli.py `reconcile`: the NEW state lands on Garmin
 // before the OLD one is removed, so a mid-op failure double-lists rather than
-// vanishes a session) and the same row bookkeeping below. Scope: the ACTIVE
-// plan's sessions, today onward — past sessions are frozen history.
+// vanishes a session) and the same row bookkeeping below. Scope: any
+// today-onward calendar workout; draft app sessions are dormant and past
+// sessions are frozen history.
 
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const dowOf = (date) => DOW[new Date(`${date}T00:00:00`).getDay()];
@@ -1013,6 +1071,9 @@ const clearGhosts = (workoutId) => writeDb.run(
    WHERE source = 'garmin' AND workout_id = $1 AND calendar_date >= $2`,
   [workoutId, localDate()]);
 
+const RUNNA_FEED_EDIT_ERROR =
+  "this workout is only in Runna's feed — not synced to Garmin yet. It can be removed here; move it once Garmin has it, or move it in Runna.";
+
 // Load + gate an editable session by schedule_id (text — exact past 2^53).
 // Responds with the right error itself and returns null when not editable.
 async function editableSession(req, res) {
@@ -1023,15 +1084,24 @@ async function editableSession(req, res) {
   }
   const row = await db.get(
     `SELECT p.schedule_id::text AS schedule_id, p.workout_id, p.calendar_date,
-            p.title, p.steps_json, p.plan_id, p.removed_at, pl.status
+            p.title, p.steps_json, p.source, p.plan_id, p.removed_at, pl.status,
+            EXISTS (
+              SELECT 1 FROM planned_workouts a
+              WHERE a.source = 'app' AND a.workout_id = p.workout_id
+                AND a.calendar_date = p.calendar_date
+            ) AS app_ghost
      FROM planned_workouts p LEFT JOIN plans pl ON pl.plan_id = p.plan_id
-     WHERE p.schedule_id = $1::bigint AND p.source = 'app'`, [id]);
+     WHERE p.schedule_id = $1::bigint`, [id]);
   if (!row || row.removed_at) {
     res.status(404).json({ error: 'session not found' });
     return null;
   }
-  if (!row.plan_id || row.status !== 'active') {
-    res.status(409).json({ error: 'only sessions of the active plan can be edited' });
+  if (row.source === 'app' && row.status === 'draft') {
+    res.status(409).json({ error: 'draft sessions are re-composed, not edited — nothing is on Garmin' });
+    return null;
+  }
+  if (row.source === 'garmin' && row.app_ghost) {
+    res.status(409).json({ error: 'this is the Garmin mirror of an app-planned session — edit the app session instead' });
     return null;
   }
   if (row.calendar_date < localDate()) {
@@ -1045,12 +1115,16 @@ async function editableSession(req, res) {
 // (another workout, or a routine day like football) is flagged back for
 // confirmation, never silently stacked or refused: the first call returns
 // { collision } and does nothing; the retry with force:true proceeds. The
-// stored spec is re-validated on principle (content unchanged — trust nothing
-// unchecked). Garmin reconcile reschedules the SAME workout template (no
+// app-owned stored spec is re-validated on principle (content unchanged —
+// trust nothing unchecked); Garmin rows carry non-buildable workoutSegments
+// and skip that check. Reconcile reschedules the SAME workout template (no
 // re-upload), new date first, so the session never vanishes mid-move.
 app.post('/api/plan/session/:schedule_id/move', withGarminLock(async (req, res) => {
   const row = await editableSession(req, res);
   if (!row) return;
+  if (row.source === 'runna_ical') {
+    return res.status(409).json({ error: RUNNA_FEED_EDIT_ERROR });
+  }
   const { to_date, force } = req.body || {};
   if (!/^\d{4}-\d{2}-\d{2}$/.test(to_date || '')) {
     return res.status(400).json({ error: 'to_date must be YYYY-MM-DD' });
@@ -1062,9 +1136,12 @@ app.post('/api/plan/session/:schedule_id/move', withGarminLock(async (req, res) 
     return res.status(400).json({ error: 'session is already on that date' });
   }
 
-  const v = await runPacer('validate', { sessions: [{ ...row.steps_json, date: to_date }] }, 30000);
-  if (!v.sessions[0]?.ok) {
-    return res.status(400).json({ error: `stored spec failed validation: ${v.sessions[0]?.error}` });
+  if (row.source === 'app') {
+    const v = await runPacer(
+      'validate', { sessions: [{ ...row.steps_json, date: to_date }] }, 30000);
+    if (!v.sessions[0]?.ok) {
+      return res.status(400).json({ error: `stored spec failed validation: ${v.sessions[0]?.error}` });
+    }
   }
 
   if (!force) {
@@ -1093,11 +1170,16 @@ app.post('/api/plan/session/:schedule_id/move', withGarminLock(async (req, res) 
     }
   }
 
+  let reconcileResult = null;
   let warning = null;
   if (row.workout_id != null) {
-    const result = await runPacer('reconcile',
-      { op: 'move', workout_id: row.workout_id, from_date: row.calendar_date, to_date }, 120000);
-    warning = result.warning || null;
+    const params = {
+      op: 'move', workout_id: row.workout_id,
+      from_date: row.calendar_date, to_date,
+    };
+    if (row.source === 'garmin') params.schedule_id = row.schedule_id;
+    reconcileResult = await runPacer('reconcile', params, 120000);
+    warning = reconcileResult.warning || null;
     recentPushes.push({ name: row.title, date: to_date, workout_id: row.workout_id,
                         pushed_at: new Date().toISOString() });
     if (recentPushes.length > RECENT_PUSHES_MAX) recentPushes.shift();
@@ -1106,41 +1188,69 @@ app.post('/api/plan/session/:schedule_id/move', withGarminLock(async (req, res) 
   // failure degrades to recorded:false rather than a 500 (a blind retry would
   // reschedule a second calendar entry).
   let recorded = true;
+  let movedScheduleId = row.schedule_id;
   try {
-    await writeDb.run(
-      'UPDATE planned_workouts SET calendar_date = $1 WHERE schedule_id = $2::bigint',
-      [to_date, row.schedule_id]);
-    if (row.workout_id != null) await clearGhosts(row.workout_id);
+    if (row.source === 'garmin') {
+      if (reconcileResult?.schedule_id == null) {
+        await writeDb.run(
+          'DELETE FROM planned_workouts WHERE schedule_id = $1::bigint',
+          [row.schedule_id]);
+        movedScheduleId = null;
+        warning = [warning, 'Garmin returned no new schedule id — the hub row was dropped and the next ingest will restore it.']
+          .filter(Boolean).join(' ');
+      } else {
+        movedScheduleId = String(reconcileResult.schedule_id);
+        await writeDb.run(
+          `UPDATE planned_workouts
+           SET schedule_id = $1::bigint, calendar_date = $2
+           WHERE schedule_id = $3::bigint`,
+          [movedScheduleId, to_date, row.schedule_id]);
+      }
+    } else {
+      await writeDb.run(
+        'UPDATE planned_workouts SET calendar_date = $1 WHERE schedule_id = $2::bigint',
+        [to_date, row.schedule_id]);
+      if (row.workout_id != null) await clearGhosts(row.workout_id);
+    }
   } catch (err) {
     recorded = false;
     console.error('move reconciled on Garmin but the row update failed:', err.message);
   }
   res.json({
-    moved: { schedule_id: row.schedule_id, title: row.title,
+    moved: { schedule_id: movedScheduleId, title: row.title,
              from: row.calendar_date, to: to_date },
     recorded, warning,
   });
 }));
 
-// Delete — drop a whole session. Soft-delete (removed_at stamps the skip so
-// history and 9e's load-awareness can see it — the row is never hard-deleted)
-// plus Garmin delete by workout_id (removes the template and its calendar
-// entry, the 9c-established behaviour). No collision check, no push.
+// Delete — drop a whole session. App rows keep their history tombstone and
+// delete their Garmin template; foreign Garmin rows unschedule only and are
+// removed from the mirror table; Runna-feed-only rows become tombstones here.
 app.post('/api/plan/session/:schedule_id/remove', withGarminLock(async (req, res) => {
   const row = await editableSession(req, res);
   if (!row) return;
-  if (row.workout_id != null) {
-    await runPacer('reconcile', { op: 'remove', workout_id: row.workout_id }, 120000);
+  if (row.source !== 'runna_ical' && row.workout_id != null) {
+    const params = { op: 'remove', workout_id: row.workout_id };
+    if (row.source === 'garmin') params.schedule_id = row.schedule_id;
+    await runPacer('reconcile', params, 120000);
   }
   let recorded = true;
   try {
-    await writeDb.run(
-      'UPDATE planned_workouts SET removed_at = $1 WHERE schedule_id = $2::bigint',
-      [new Date().toISOString(), row.schedule_id]);
-    if (row.workout_id != null) await clearGhosts(row.workout_id);
+    if (row.source === 'garmin') {
+      await writeDb.run(
+        'DELETE FROM planned_workouts WHERE schedule_id = $1::bigint',
+        [row.schedule_id]);
+    } else {
+      await writeDb.run(
+        'UPDATE planned_workouts SET removed_at = $1 WHERE schedule_id = $2::bigint',
+        [new Date().toISOString(), row.schedule_id]);
+      if (row.source === 'app' && row.workout_id != null) {
+        await clearGhosts(row.workout_id);
+      }
+    }
   } catch (err) {
     recorded = false;
-    console.error('remove succeeded on Garmin but the soft-delete failed:', err.message);
+    console.error('remove applied but the row bookkeeping failed:', err.message);
   }
   res.json({
     removed: { schedule_id: row.schedule_id, title: row.title, date: row.calendar_date },
@@ -1157,6 +1267,9 @@ app.post('/api/plan/session/:schedule_id/remove', withGarminLock(async (req, res
 app.post('/api/plan/session/:schedule_id/replace', withGarminLock(async (req, res) => {
   const row = await editableSession(req, res);
   if (!row) return;
+  if (row.source === 'runna_ical') {
+    return res.status(409).json({ error: RUNNA_FEED_EDIT_ERROR });
+  }
   const s = (req.body || {}).spec;
   if (!s || !Array.isArray(s.blocks) || !s.blocks.length) {
     return res.status(400).json({ error: 'spec with a non-empty blocks array required' });
@@ -1170,29 +1283,43 @@ app.post('/api/plan/session/:schedule_id/replace', withGarminLock(async (req, re
   const spec = { name: s.name, date: s.date, warmup_m: s.warmup_m || 0,
                  cooldown_m: s.cooldown_m || 0, blocks: s.blocks,
                  type: s.type ?? row.steps_json?.type ?? null };
-  const result = row.workout_id != null
-    ? await runPacer('reconcile', { op: 'replace', replace_workout_id: row.workout_id, ...spec }, 120000)
-    : await runPacer('push', spec, 120000);
+  let result;
+  if (row.workout_id != null) {
+    const params = { op: 'replace', replace_workout_id: row.workout_id, ...spec };
+    if (row.source === 'garmin') params.replace_schedule_id = row.schedule_id;
+    result = await runPacer('reconcile', params, 120000);
+  } else {
+    result = await runPacer('push', spec, 120000);
+  }
   recentPushes.push({ name: result.name, date: result.date,
                       workout_id: result.workout_id, pushed_at: new Date().toISOString() });
   if (recentPushes.length > RECENT_PUSHES_MAX) recentPushes.shift();
 
   let recorded = true;
+  let updatedScheduleId = row.schedule_id;
   try {
-    await writeDb.run(
-      `UPDATE planned_workouts
-       SET workout_id = $1, title = $2, estimated_distance_m = $3,
-           estimated_duration_s = $4, steps_json = $5
-       WHERE schedule_id = $6::bigint`,
-      [result.workout_id, result.name, result.total_distance_m ?? null,
-       result.est_duration_s ?? null, spec, row.schedule_id]);
-    if (row.workout_id != null) await clearGhosts(row.workout_id);
+    if (row.source === 'garmin') {
+      updatedScheduleId = appScheduleId(`app:${result.schedule_id}`);
+      await persistAppRow(result, spec, null, null);
+      await writeDb.run(
+        'DELETE FROM planned_workouts WHERE schedule_id = $1::bigint',
+        [row.schedule_id]);
+    } else {
+      await writeDb.run(
+        `UPDATE planned_workouts
+         SET workout_id = $1, title = $2, estimated_distance_m = $3,
+             estimated_duration_s = $4, steps_json = $5
+         WHERE schedule_id = $6::bigint`,
+        [result.workout_id, result.name, result.total_distance_m ?? null,
+         result.est_duration_s ?? null, spec, row.schedule_id]);
+      if (row.workout_id != null) await clearGhosts(row.workout_id);
+    }
   } catch (err) {
     recorded = false;
     console.error('replace succeeded on Garmin but the row update failed:', err.message);
   }
   res.json({
-    updated: { schedule_id: row.schedule_id, name: result.name,
+    updated: { schedule_id: updatedScheduleId, name: result.name,
                date: result.date, workout_id: result.workout_id },
     recorded, warning: result.warning || null,
   });
