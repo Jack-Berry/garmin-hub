@@ -20,6 +20,9 @@ const AUTO_REFRESH_AFTER_MIN = 30;
 // launchd ingest alone should never let it get here.
 const STALE_WARN_MIN = 60 * 24;
 
+const postNative = (message) =>
+  window.webkit?.messageHandlers?.garminHub?.postMessage(message);
+
 // Minutes -> "just now" / "12m ago" / "3h ago" / "2d ago".
 const ago = (min) => {
   if (min == null) return null;
@@ -143,17 +146,40 @@ export default function App() {
 
   useEffect(() => {
     if (!appMode) return;
-    document.documentElement.classList.add('app-mode');
+    const root = document.documentElement;
+    const viewportMeta = document.querySelector('meta[name="viewport"]');
+    const originalViewport = viewportMeta?.content;
+    viewportMeta?.setAttribute(
+      'content',
+      'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover'
+    );
+    root.classList.add('app-mode');
     const viewport = window.visualViewport;
-    const size = () => document.documentElement.style.setProperty(
-      '--app-height', `${viewport?.height || window.innerHeight}px`);
+    let layoutHeight = window.innerHeight;
+    const size = () => {
+      const height = viewport?.height || window.innerHeight;
+      const keyboardOpen = layoutHeight - height > 120;
+      if (!keyboardOpen) layoutHeight = Math.max(layoutHeight, height);
+      root.style.setProperty('--app-height', `${height}px`);
+      root.style.setProperty('--app-top', `${viewport?.offsetTop || 0}px`);
+      root.classList.toggle('keyboard-open', keyboardOpen);
+    };
     size();
     viewport?.addEventListener('resize', size);
+    viewport?.addEventListener('scroll', size);
+    window.addEventListener('resize', size);
     return () => {
-      document.documentElement.classList.remove('app-mode');
+      root.classList.remove('app-mode', 'keyboard-open');
       viewport?.removeEventListener('resize', size);
+      viewport?.removeEventListener('scroll', size);
+      window.removeEventListener('resize', size);
+      if (originalViewport) viewportMeta?.setAttribute('content', originalViewport);
     };
   }, [appMode]);
+
+  useEffect(() => {
+    if (appMode) postNative({ action: 'theme', dark });
+  }, [appMode, dark]);
 
   const tabs = [
     ['today', 'calendar', 'Today'],

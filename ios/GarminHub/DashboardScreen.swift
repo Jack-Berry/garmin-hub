@@ -4,6 +4,7 @@ struct DashboardScreen: View {
     @EnvironmentObject private var settings: AppSettings
     @State private var state: LoadState = .checking
     @State private var showingSettings = false
+    @State private var webDark = true
 
     enum LoadState: Equatable {
         case checking
@@ -18,9 +19,12 @@ struct DashboardScreen: View {
                 case .checking:
                     ProgressView("Connecting...")
                 case .ready:
-                    DashboardWebView(apiKey: settings.apiKey) { message in
-                        state = .failed(message)
-                    }
+                    DashboardWebView(
+                        apiKey: settings.apiKey,
+                        onFailure: { state = .failed($0) },
+                        onOpenSettings: { showingSettings = true },
+                        onThemeChange: { webDark = $0 }
+                    )
                     .id(settings.apiKey)
                     .ignoresSafeArea()
                 case .failed(let message):
@@ -50,7 +54,7 @@ struct DashboardScreen: View {
             }
         }
         .background(Color(red: 11 / 255, green: 11 / 255, blue: 13 / 255))
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(webDark ? .dark : .light)
         .task { await connect() }
     }
 

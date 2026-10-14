@@ -80,7 +80,7 @@ export default function RecentActivities() {
     <Section title="Recent activities" subtitle="Runs & football · click a row to see its laps">
       <StateWrap loading={loading} error={error} empty={!all.length}>
         {data && (
-          <div>
+          <div className="md:-mx-2 md:overflow-x-auto">
             <div className="space-y-2 md:hidden">
               {shown.map((a) => {
                 const open = openId === a.activity_id;
@@ -105,7 +105,7 @@ export default function RecentActivities() {
                 );
               })}
             </div>
-            <table className="hidden w-full text-sm md:table">
+            <table className="hidden w-full text-sm md:table md:min-w-[34rem]">
               <thead className="font-body text-micro uppercase tracking-[0.12em] text-ink-muted">
                 <tr className="text-left">
                   <th className="px-2 py-2 font-semibold">Date</th>

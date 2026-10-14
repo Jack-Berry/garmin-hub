@@ -4,12 +4,21 @@ import WebKit
 struct DashboardWebView: UIViewRepresentable {
     let apiKey: String
     let onFailure: (String) -> Void
+    let onOpenSettings: () -> Void
+    let onThemeChange: (Bool) -> Void
 
-    func makeCoordinator() -> Coordinator { Coordinator(onFailure: onFailure) }
+    func makeCoordinator() -> Coordinator {
+        Coordinator(
+            onFailure: onFailure,
+            onOpenSettings: onOpenSettings,
+            onThemeChange: onThemeChange
+        )
+    }
 
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.setURLSchemeHandler(HubSchemeHandler(apiKey: apiKey), forURLScheme: "hub")
+        config.userContentController.add(context.coordinator, name: "garminHub")
         let literal = String(data: try! JSONSerialization.data(withJSONObject: apiKey, options: .fragmentsAllowed), encoding: .utf8)!
         config.userContentController.addUserScript(WKUserScript(
             source: "window.__GARMIN_HUB_APP__ = true; window.__HUB_API_KEY__ = \(literal);",
@@ -21,10 +30,13 @@ struct DashboardWebView: UIViewRepresentable {
         webView.isOpaque = false
         webView.backgroundColor = UIColor(red: 11 / 255, green: 11 / 255, blue: 13 / 255, alpha: 1)
         webView.scrollView.backgroundColor = webView.backgroundColor
-        webView.scrollView.bounces = false
-        webView.scrollView.alwaysBounceVertical = false
+        webView.scrollView.bounces = true
+        webView.scrollView.alwaysBounceVertical = true
         webView.scrollView.contentInsetAdjustmentBehavior = .never
         webView.allowsLinkPreview = false
+        let refresh = UIRefreshControl()
+        refresh.addTarget(context.coordinator, action: #selector(Coordinator.refresh(_:)), for: .valueChanged)
+        webView.scrollView.refreshControl = refresh
         context.coordinator.webView = webView
         webView.load(URLRequest(url: URL(string: "hub://dashboard/")!))
         return webView
@@ -32,11 +44,43 @@ struct DashboardWebView: UIViewRepresentable {
 
     func updateUIView(_ webView: WKWebView, context: Context) {}
 
-    final class Coordinator: NSObject, WKNavigationDelegate {
+    static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "garminHub")
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         weak var webView: WKWebView?
         let onFailure: (String) -> Void
+        let onOpenSettings: () -> Void
+        let onThemeChange: (Bool) -> Void
 
-        init(onFailure: @escaping (String) -> Void) { self.onFailure = onFailure }
+        init(
+            onFailure: @escaping (String) -> Void,
+            onOpenSettings: @escaping () -> Void,
+            onThemeChange: @escaping (Bool) -> Void
+        ) {
+            self.onFailure = onFailure
+            self.onOpenSettings = onOpenSettings
+            self.onThemeChange = onThemeChange
+        }
+
+        @objc func refresh(_ sender: UIRefreshControl) {
+            webView?.load(URLRequest(url: URL(string: "hub://dashboard/")!))
+            sender.endRefreshing()
+        }
+
+        func userContentController(
+            _ userContentController: WKUserContentController,
+            didReceive message: WKScriptMessage
+        ) {
+            guard let body = message.body as? [String: Any],
+                  let action = body["action"] as? String else { return }
+            if action == "openSettings" {
+                onOpenSettings()
+            } else if action == "theme", let dark = body["dark"] as? Bool {
+                onThemeChange(dark)
+            }
+        }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
             if (error as? URLError)?.code == .cancelled { return }

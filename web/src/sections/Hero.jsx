@@ -74,7 +74,7 @@ function Carousel({ slides }) {
 
 function Tile({ label, value, sub, accent }) {
   return (
-    <div className="flex min-w-0 basis-1/2 flex-col justify-center border-b border-line px-4 py-4 sm:flex-1 sm:basis-auto sm:border-b-0 sm:px-5 sm:py-5">
+    <div className="flex min-w-0 basis-1/2 flex-col justify-center border-b border-line px-4 py-4 sm:flex-1 sm:basis-0 sm:border-b-0 sm:px-5 sm:py-5">
       <div className="font-body text-nano font-semibold uppercase tracking-[0.18em] text-ink-muted">
         {label}
       </div>

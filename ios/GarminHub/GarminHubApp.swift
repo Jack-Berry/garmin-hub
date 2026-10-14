@@ -10,12 +10,12 @@ struct GarminHubApp: App {
                 if settings.apiKey.isEmpty {
                     NavigationStack { SettingsView(firstRun: true) }
                         .environmentObject(settings)
+                        .preferredColorScheme(.dark)
                 } else {
                     DashboardScreen()
                         .environmentObject(settings)
                 }
             }
-            .preferredColorScheme(.dark)
         }
     }
 }

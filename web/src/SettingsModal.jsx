@@ -263,6 +263,25 @@ export default function SettingsModal({ onClose }) {
         </header>
 
         <div className="space-y-6 p-5">
+          {window.__GARMIN_HUB_APP__ === true && (
+            <div className="flex items-center justify-between gap-3 border-b border-line pb-5">
+              <div>
+                <h3 className="font-display text-label font-bold uppercase tracking-[0.1em] text-ink">
+                  App connection
+                </h3>
+                <p className="mt-1 font-body text-micro text-ink-muted">
+                  Update the API key in the native secure settings screen.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => window.webkit?.messageHandlers?.garminHub?.postMessage({ action: 'openSettings' })}
+                className="shrink-0 rounded-lg border border-line px-3 py-2 text-sm font-medium text-ink-secondary transition hover:bg-surface-2"
+              >
+                Change API key
+              </button>
+            </div>
+          )}
           <div className="border-b border-line pb-6">
             <AccentPicker />
           </div>

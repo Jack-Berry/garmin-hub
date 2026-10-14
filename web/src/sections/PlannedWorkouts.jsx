@@ -22,7 +22,7 @@ function PlannedRow({ w, onChanged }) {
   return (
     <li className="flex flex-col items-stretch gap-3 py-3 sm:flex-row sm:items-center sm:justify-between sm:py-2">
       <div className="min-w-0">
-        <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2 sm:flex-nowrap">
           <span className="truncate font-body text-sm font-medium text-ink">{w.title}</span>
           {w.is_race ? <Badge tone="race">Race</Badge> : null}
           {overridden ? <Badge tone="slate">manual</Badge> : null}

@@ -107,8 +107,17 @@ body,
 }
 
 .app-coach {
+  top: var(--app-top, 0px);
   height: calc(var(--app-height, 100dvh) - 3.75rem - env(safe-area-inset-bottom));
   padding-top: env(safe-area-inset-top);
+}
+
+.app-mode.keyboard-open .app-tabs {
+  display: none;
+}
+
+.app-mode.keyboard-open .app-coach {
+  height: var(--app-height, 100dvh);
 }
 
 @media (max-width: 767px) {
