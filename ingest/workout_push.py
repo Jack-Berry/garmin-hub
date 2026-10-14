@@ -88,31 +88,36 @@ def has_schedule_id(g, schedule_id, date_str):
     )
 
 
-def find_idempotent_push(g, date_str, workout_name, request_key):
+def find_idempotent_push(g, date_str, _workout_name, request_key):
     """Find a prior Garmin Hub push after an uncertain client outcome.
 
-    Calendar title/date narrow the candidates; the uploaded workout description
-    carries the stable request key so an unrelated same-name workout is never
-    adopted.
+    The date narrows candidates; the uploaded workout description carries the
+    stable request key. Detail lookup errors fail closed so a transient Garmin
+    read failure can never turn into a duplicate upload.
     """
     if not request_key:
         return None
     cal = g.get_scheduled_workouts(int(date_str[:4]), int(date_str[5:7]))
     for item in (cal.get("calendarItems", []) if isinstance(cal, dict) else []):
         if (str(item.get("itemType", "")).lower() != "workout"
-                or item.get("date") != date_str
-                or (item.get("title") or item.get("workoutName")) != workout_name):
+                or item.get("date") != date_str):
             continue
         wid = item.get("workoutId")
         if wid is None:
             continue
-        try:
-            workout = g.get_workout_by_id(wid)
-        except Exception:
-            continue
+        workout = g.get_workout_by_id(wid)
         if workout.get("description") == f"Garmin Hub request {request_key}":
             return wid, item.get("id")
     return None
+
+
+def is_not_found(error):
+    """Recognise Garmin's common not-found error shapes for retry cleanup."""
+    status = getattr(error, "status_code", None)
+    if status is None:
+        status = getattr(getattr(error, "response", None), "status_code", None)
+    message = str(error).lower()
+    return status == 404 or "404" in message or "not found" in message
 
 
 # --- Test workouts ------------------------------------------------------------

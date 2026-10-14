@@ -466,12 +466,13 @@ def cmd_reconcile(params):
             old_sid = params.get("schedule_id")
             date_str = params.get("date")
             if date_str and old_sid is None:
-                old_sid = wp.find_schedule_id(g, wid, date_str)
-                if old_sid is None:
-                    out = {"workout_id": wid, "removed": True, "adopted": True}
-                else:
+                try:
                     wp.delete(g, wid)
                     out = {"workout_id": wid, "removed": True}
+                except Exception as e:
+                    if not wp.is_not_found(e):
+                        raise
+                    out = {"workout_id": wid, "removed": True, "adopted": True}
             elif date_str and not wp.has_schedule_id(g, old_sid, date_str):
                 out = {"workout_id": wid, "unscheduled": True, "adopted": True}
             elif old_sid is None:
@@ -496,7 +497,9 @@ def cmd_reconcile(params):
                 else:
                     wp.unschedule(g, int(old_sid))
             except Exception as e:
-                if old_sid is None:
+                if wp.is_not_found(e):
+                    pass
+                elif old_sid is None:
                     warning = (f"new session is on Garmin but deleting the old "
                                f"workout {old_wid} failed ({e}) — it is double-listed; "
                                f"delete the old one in Garmin Connect")

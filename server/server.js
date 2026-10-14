@@ -20,6 +20,7 @@ const { DEFAULT_ORIGINS, resolveHost, cors, keyGate, mountDashboard } = require(
 const { createHealthHandler, createStatusHandler } = require('./system-status');
 const { pacerInput, createWriteGate } = require('./garmin-write');
 const { scheduleId: exactScheduleId } = require('./schedule-id');
+const { planFinished } = require('./plan-date');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -592,7 +593,9 @@ const runPacer = (mode, params, timeoutMs) =>
       const error = new Error('Pacer timed out; Garmin may already have applied the request. Retry to check and adopt the existing workout.');
       error.outcomeUnknown = true;
       reject(error);
-    }, Number(process.env.PACER_TIMEOUT_MS) || timeoutMs);
+    }, (['push', 'reconcile'].includes(mode)
+      ? Number(process.env.PACER_TIMEOUT_MS) || timeoutMs
+      : timeoutMs));
     child.stdout.on('data', (d) => { out += d; });
     child.stderr.on('data', (d) => { err += d; });
     child.on('error', (e) => { clearTimeout(timer); reject(new Error(`Failed to start pacer: ${e.message}`)); });
@@ -794,16 +797,6 @@ app.post('/api/plan/save', handler(async (req, res) => {
   res.json({ plan_id: planId, sessions: sessions.length, from, to });
 }));
 
-// A plan's "finished" line: the goal-race date when one is parseable from the
-// free-text goal_race ("Telford 10K on 2026-09-13"), else the last session
-// date. SQL fragment used by the auto-complete check and activation retirement.
-const PLAN_FINISHED_SQL =
-  `COALESCE(CASE
-     WHEN to_char(to_date(substring(goal_race from '\\d{4}-\\d{2}-\\d{2}'), 'YYYY-MM-DD'), 'YYYY-MM-DD')
-          = substring(goal_race from '\\d{4}-\\d{2}-\\d{2}')
-     THEN to_date(substring(goal_race from '\\d{4}-\\d{2}-\\d{2}'), 'YYYY-MM-DD')
-   END, date_to) < $1::date`;
-
 // Current plan + its push state — drives the dashboard activation card.
 // Sessions carry schedule_id as TEXT so negative 60-bit hashes stay exact and
 // push-next can key on them. Push state per session is workout_id:
@@ -866,9 +859,14 @@ const PLAN_SELECT =
 
 app.get('/api/plan/current', handler(async (req, res) => {
   const today = localDate();
-  await writeDb.run(
-    `UPDATE plans SET status = 'completed'
-     WHERE status = 'active' AND ${PLAN_FINISHED_SQL}`, [today]);
+  const ending = await db.get(
+    `SELECT plan_id, goal_race, date_to FROM plans
+     WHERE status = 'active' ORDER BY created_at DESC LIMIT 1`);
+  if (ending && planFinished(ending.goal_race, ending.date_to, today)) {
+    await writeDb.run(
+      `UPDATE plans SET status = 'completed'
+       WHERE plan_id = $1 AND status = 'active'`, [ending.plan_id]);
+  }
   await writeDb.run(
     `UPDATE plans SET status = 'active'
      WHERE plan_id = (
@@ -964,9 +962,10 @@ async function pushNextSession(req, res) {
   if (!next) {
     if (plan.status !== 'active') {
       const active = await db.get(
-        `SELECT plan_id, date_from, date_to, ${PLAN_FINISHED_SQL} AS finished
-         FROM plans WHERE status = 'active' AND plan_id != $2
-         ORDER BY created_at DESC LIMIT 1`, [today, planId]);
+        `SELECT plan_id, goal_race, date_from, date_to
+         FROM plans WHERE status = 'active' AND plan_id != $1
+         ORDER BY created_at DESC LIMIT 1`, [planId]);
+      if (active) active.finished = planFinished(active.goal_race, active.date_to, today);
       const overlaps = active != null
         && active.date_from <= plan.date_to && plan.date_from <= active.date_to;
       const status = active && !active.finished && !overlaps ? 'queued' : 'active';

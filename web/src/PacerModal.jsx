@@ -86,6 +86,10 @@ export default function PacerModal({ onClose }) {
     setError(null);
     try {
       const res = await api.pacerPush(params);
+      if (res.outcome_unknown) {
+        setError(res.error || 'Garmin may have accepted this workout. Retry to check and adopt it.');
+        return;
+      }
       setPushed(res);
     } catch (e) {
       setError(e.message || 'Push failed');

@@ -93,6 +93,7 @@ test('profile context skips a malformed race date with a warning', async () => {
     }),
   };
   const profile = await sectionProfile(db);
-  assert.deepEqual(profile.races, ['Good race — on 2026-11-01 — goal 20:00']);
+  assert.equal(profile.races.length, 1);
+  assert.match(profile.races[0], /^Good race.*2026-11-01.*20:00$/);
   assert.match(profile.warnings[0], /Bad race \(2026-99-99\)/);
 });

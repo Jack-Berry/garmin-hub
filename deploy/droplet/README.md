@@ -181,8 +181,16 @@ docker exec garmin-hub-postgres rm /tmp/restore.dump
 rm restore.dump .env.restore
 rm -rf .garth-restore
 # The restored GARMINHUB_RO_PASSWORD and GARMINHUB_RW_PASSWORD must match the
-# passwords already assigned to the live Postgres roles. If they do not, use
-# the postgres administrator to ALTER ROLE for both roles before starting app.
+# passwords already assigned to the live Postgres roles. Align them before app
+# starts (safe psql variable quoting keeps password text out of the SQL):
+set -a; . deploy/droplet/.env; set +a
+docker exec -i garmin-hub-postgres psql -U postgres -d postgres \
+  -v ro_password="$GARMINHUB_RO_PASSWORD" \
+  -v rw_password="$GARMINHUB_RW_PASSWORD" <<'SQL'
+ALTER ROLE garminhub_ro PASSWORD :'ro_password';
+ALTER ROLE garminhub_rw PASSWORD :'rw_password';
+SQL
+unset GARMINHUB_RO_PASSWORD GARMINHUB_RW_PASSWORD
 docker compose --project-name garmin-hub --env-file deploy/droplet/.env \
   -f deploy/droplet/compose.yml up -d app
 set -a; . deploy/droplet/.env; set +a

@@ -22,6 +22,8 @@ class FakeGarmin:
         self.next_workout = 10
         self.next_schedule = 101
         self.fail_after_schedule = True
+        self.delete_calls = []
+        self.delete_error = None
 
     def get_scheduled_workouts(self, year, month):
         return {"calendarItems": list(self.items)}
@@ -38,10 +40,11 @@ class IdempotencyTests(unittest.TestCase):
         fake.find_idempotent_push = real_wp.find_idempotent_push
         fake.upload = self.upload
         fake.schedule = self.schedule
-        fake.delete = lambda g, wid: None
+        fake.delete = self.delete
         fake.find_schedule_id = self.find_schedule
         fake.has_schedule_id = lambda g, sid, date: any(
             str(i["id"]) == str(sid) and i["date"] == date for i in g.items)
+        fake.is_not_found = real_wp.is_not_found
         fake.unschedule = lambda g, sid: g.items.__setitem__(
             slice(None), [i for i in g.items if str(i["id"]) != str(sid)])
         self.old = sys.modules.get("workout_push")
@@ -70,6 +73,11 @@ class IdempotencyTests(unittest.TestCase):
             raise TimeoutError("response lost after Garmin accepted it")
         return sid, {}
 
+    def delete(self, g, wid):
+        g.delete_calls.append(wid)
+        if g.delete_error:
+            raise g.delete_error
+
     def find_schedule(self, g, wid, date):
         return next((i["id"] for i in g.items
                      if i["workoutId"] == wid and i["date"] == date), None)
@@ -89,6 +97,42 @@ class IdempotencyTests(unittest.TestCase):
                              "itemType": "workout", "title": "Tempo"})
         self.assertIsNone(real_wp.find_idempotent_push(
             self.g, "2026-10-20", "Tempo", "stable-key"))
+
+    def test_title_change_does_not_prevent_adoption(self):
+        self.g.workouts[9] = {"workoutName": "Renamed",
+                              "description": "Garmin Hub request stable-key"}
+        self.g.items.append({"id": 99, "workoutId": 9, "date": "2026-10-20",
+                             "itemType": "workout", "title": "Different title"})
+        self.assertEqual(real_wp.find_idempotent_push(
+            self.g, "2026-10-20", "Tempo", "stable-key"), (9, 99))
+
+    def test_detail_lookup_error_fails_closed(self):
+        self.g.items.append({"id": 99, "workoutId": 9, "date": "2026-10-20",
+                             "itemType": "workout", "title": "Tempo"})
+        self.g.get_workout_by_id = lambda wid: (_ for _ in ()).throw(
+            TimeoutError("Garmin detail timeout"))
+        with self.assertRaises(TimeoutError):
+            p.cmd_push(SPEC)
+        self.assertEqual(self.g.next_workout, 10)
+
+    def test_remove_deletes_even_when_calendar_lookup_would_be_empty(self):
+        result = p.cmd_reconcile({"op": "remove", "workout_id": 77,
+                                  "date": "2026-10-20"})
+        self.assertEqual(self.g.delete_calls, [77])
+        self.assertTrue(result["removed"])
+
+    def test_remove_treats_not_found_as_already_removed(self):
+        self.g.delete_error = RuntimeError("404 workout not found")
+        result = p.cmd_reconcile({"op": "remove", "workout_id": 77,
+                                  "date": "2026-10-20"})
+        self.assertTrue(result["removed"])
+        self.assertTrue(result["adopted"])
+
+    def test_replace_retry_does_not_warn_when_old_workout_is_gone(self):
+        self.g.fail_after_schedule = False
+        self.g.delete_error = RuntimeError("404 workout not found")
+        result = p.cmd_reconcile({"op": "replace", "replace_workout_id": 7, **SPEC})
+        self.assertIsNone(result["warning"])
 
     def test_move_retry_adopts_target_schedule(self):
         self.g.fail_after_schedule = False

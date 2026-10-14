@@ -238,6 +238,8 @@ Local always-on test deployment via launchd (`deploy/local-macos/`, see its `REA
 
 ## Known rough edges (consolidate later)
 
+- **Known edge - timeout between upload and schedule.** If the pacer process is killed after upload but before scheduling, Garmin may retain an unscheduled workout in the library; retry adoption can only identify scheduled workouts.
+
 - **Coach honesty contract and trap eval.** Chat, day insights, the detailed report, and planning share one rule: verify athlete claims against the data, lead with an independent assessment and numbers, disagree plainly, separate evidence from judgement, state confidence, and surface material risks. The brief carries the compact version. `node server/eval/coach-traps.mjs --dry-run` validates and builds the 12 fixture requests without an API call. A live run needs `ANTHROPIC_API_KEY`; `--coach /path/to/server/coach.js` runs the same cases against another checkout for a baseline. Never print the key or run the live eval without approval.
 
 - **Migrations:** `db/schema.pg.sql` is canonical, applied via `CREATE TABLE IF NOT EXISTS` (`db/setup_local.sh` / `ingest/init_db.py`) — so it **cannot alter existing tables**. A schema change to an existing table = an `ALTER TABLE` run against the live DB **plus** the matching edit to `schema.pg.sql` (so fresh setups agree). The SQLite-era one-script-per-change `migrate_*.py` files are retired to `attic/`. Still no formal migration tool; adopt one if schema churn picks up.

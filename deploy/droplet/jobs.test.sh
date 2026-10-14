@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
+real_sha256sum=$(command -v sha256sum)
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/garmin-jobs-test.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/bin" "$tmp/status" "$tmp/backups"
@@ -35,7 +36,7 @@ STUB
 cat > "$tmp/bin/sha256sum" <<'STUB'
 #!/bin/sh
 [ "${SHA256_FAIL:-0}" = 1 ] && exit 11
-/sbin/sha256sum "$@"
+"$REAL_SHA256SUM" "$@"
 STUB
 cat > "$tmp/bin/mv" <<'STUB'
 #!/bin/sh
@@ -48,7 +49,7 @@ chmod +x "$tmp/bin/docker" "$tmp/bin/date" "$tmp/bin/sha256sum" "$tmp/bin/mv"
 
 run_job() {
   PATH="$tmp/bin:$PATH" DOCKER_LOG="$tmp/docker.log" GARMIN_HUB_ROOT="$repo" \
-    MV_LOG="$tmp/mv.log" \
+    MV_LOG="$tmp/mv.log" REAL_SHA256SUM="$real_sha256sum" \
     GARMIN_HUB_STATUS_DIR="$tmp/status" GARMIN_HUB_BACKUP_DIR="$tmp/backups" \
     "$repo/deploy/droplet/jobs.sh" "$@"
 }
