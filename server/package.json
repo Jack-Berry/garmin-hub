@@ -7,7 +7,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node --test hosting.test.js"
+    "test": "node --test *.test.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.69.0",

@@ -12,8 +12,11 @@ find server -maxdepth 1 -name '*.js' -print | sort | while IFS= read -r file; do
   node --check "$file"
 done
 
-echo "== Focused hosting tests =="
-node --test server/hosting.test.js
+echo "== Focused server tests =="
+node --test server/*.test.js
+
+echo "== Coach trap eval dry run =="
+node server/eval/coach-traps.mjs --dry-run
 
 echo "== Secret-free web build =="
 (cd web && HUB_HOSTED_BUILD=1 VITE_API_BASE= env -u VITE_API_SECRET npm run build)
@@ -25,7 +28,10 @@ echo "web/dist secret scan passed"
 
 echo "== Python syntax =="
 find ingest -maxdepth 1 -name '*.py' -print | sort | \
-  xargs python3.13 -m py_compile
+  xargs /usr/local/bin/python3.13 -m py_compile
+
+echo "== Garmin non-TTY login check =="
+(cd ingest && /usr/local/bin/python3.13 -m unittest test_login.py)
 
 echo "== Compose config =="
 if command -v docker >/dev/null 2>&1; then

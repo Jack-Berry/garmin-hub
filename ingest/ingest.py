@@ -155,28 +155,41 @@ def upsert(conn, table, pk_cols, row):
 
 
 def prompt_mfa():
-    """Interactive MFA — Garmin calls this only when a code is required."""
+    """Interactive MFA. Garmin calls this only when a code is required."""
     return input("Enter Garmin MFA / 2FA code: ").strip()
 
 
-def login():
-    """Resume a cached garth session if possible, else do a full (possibly
-    MFA-prompting) login and persist tokens to TOKENSTORE."""
+class GarminReauthRequired(RuntimeError):
+    pass
+
+
+def login(client_factory=garminconnect.Garmin, tokenstore=TOKENSTORE, stdin=sys.stdin):
+    """Resume cached tokens, or perform an interactive login that saves them."""
+    tokenstore = Path(tokenstore)
     email = os.getenv("GARMIN_EMAIL")
     password = os.getenv("GARMIN_PASSWORD")
-    if not email or not password:
-        raise SystemExit("GARMIN_EMAIL / GARMIN_PASSWORD not set in ingest/.env")
 
-    g = garminconnect.Garmin(email, password, prompt_mfa=prompt_mfa)
-    try:
-        g.login(str(TOKENSTORE))   # resume from cached tokens (no MFA)
-        print("Resumed cached Garmin session.")
-    except Exception:
-        print("No valid cached session — performing full login.")
-        g.login()                  # full login; prompt_mfa fires if needed
-        g.garth.dump(str(TOKENSTORE))
-        print(f"Saved session tokens to {TOKENSTORE}")
-    return g
+    if tokenstore.exists():
+        cached = client_factory()
+        try:
+            cached.login(str(tokenstore))
+            print("Resumed cached Garmin session.")
+            return cached
+        except Exception as error:
+            print(f"Cached Garmin session is invalid: {error}")
+
+    if not getattr(stdin, "isatty", lambda: False)():
+        raise GarminReauthRequired(
+            "Garmin login expired: re-authorise interactively and copy the token cache")
+    if not email or not password:
+        raise GarminReauthRequired(
+            "Garmin login expired: GARMIN_EMAIL / GARMIN_PASSWORD are required")
+
+    print("Performing interactive Garmin login.")
+    fresh = client_factory(email, password, prompt_mfa=prompt_mfa)
+    fresh.login(str(tokenstore))
+    print(f"Saved session tokens to {tokenstore}")
+    return fresh
 
 
 def months_between(start, end):
@@ -787,10 +800,8 @@ def ingest_lactate_threshold(g, conn, summary):
 # =========================================================================
 # Main
 # =========================================================================
-def main():
-    load_dotenv(ENV_PATH)
-
-    summary = {
+def new_summary():
+    return {
         "activities": {"inserted": 0, "updated": 0},
         "laps": {"inserted": 0, "updated": 0},
         "planned": {"inserted": 0, "updated": 0, "deleted": 0},
@@ -802,9 +813,40 @@ def main():
         "errors": [],
     }
 
+
+def record_ingest_state(conn, summary):
+    ok = not summary["errors"]
+    state = ("no errors" if ok
+             else f"{len(summary['errors'])} error(s): "
+                  + "; ".join(summary["errors"][:3]))
+    try:
+        upsert(conn, "ingest_state", ["id"], {
+            "id": 1,
+            "last_run_at": datetime.now(timezone.utc),
+            "ok": ok,
+            "summary": state[:500],
+        })
+        conn.commit()
+    except Exception as error:
+        conn.rollback()
+        print(f"  (could not record ingest_state: {error})")
+
+
+def main():
+    load_dotenv(ENV_PATH)
+
+    summary = new_summary()
+
     conn = psycopg.connect(os.getenv("DATABASE_URL", DEFAULT_DSN))
 
-    g = login()
+    try:
+        g = login()
+    except Exception as error:
+        print(f"Garmin login failed: {error}")
+        summary["errors"].append("Garmin login expired: re-authorise")
+        record_ingest_state(conn, summary)
+        conn.close()
+        raise SystemExit(1) from error
 
     for label, fn in (("activities", ingest_activities),
                       ("planned", ingest_planned),
@@ -827,21 +869,7 @@ def main():
     # the launchd schedules, the API's Refresh spawn, and a manual terminal run.
     # Its own try/except — bookkeeping must never be the thing that fails a
     # run that actually pulled data.
-    ok = not summary["errors"]
-    state = ("no errors" if ok
-             else f"{len(summary['errors'])} error(s): "
-                  + "; ".join(summary["errors"][:3]))
-    try:
-        upsert(conn, "ingest_state", ["id"], {
-            "id": 1,
-            "last_run_at": datetime.now(timezone.utc),
-            "ok": ok,
-            "summary": state[:500],
-        })
-        conn.commit()
-    except Exception as e:
-        conn.rollback()
-        print(f"  (could not record ingest_state: {e})")
+    record_ingest_state(conn, summary)
 
     conn.close()
 

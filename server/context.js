@@ -326,6 +326,7 @@ async function sectionRecovery(db, asOf) {
       resting_hr: avg('resting_hr'),
       sleep_score: avg('sleep_score'),
       readiness_score: avg('readiness_score'),
+      readiness_on_waking: avg('readiness_wake_score'),
     },
   };
 }
@@ -387,16 +388,27 @@ async function sectionUpcoming(db, today) {
   }));
 }
 
-// Weekly mileage (runs only), newest first — the last 5 ISO weeks.
-// date_trunc('week') is ISO Monday-start, matching the old SQLite expression.
-async function sectionWeeklyMileage(db) {
+// Weekly mileage (runs only), newest first, with real Monday labels. The
+// current partial week is always present, including an explicit zero.
+async function sectionWeeklyMileage(db, today = localDate()) {
   const weekRows = await db.all(
     `SELECT to_char(date_trunc('week', start_time_local), 'YYYY-MM-DD') AS week_start,
             SUM(distance_m) AS m
      FROM activities
      WHERE activity_group = 'run' AND distance_m > 0 AND start_time_local IS NOT NULL
-     GROUP BY week_start ORDER BY week_start DESC LIMIT 5`);
-  return weekRows.map((w) => +(w.m / 1000).toFixed(1));
+     GROUP BY week_start ORDER BY week_start DESC LIMIT 6`);
+  const day = new Date(`${today}T12:00:00`);
+  const mondayOffset = (day.getDay() + 6) % 7;
+  const currentMonday = shiftDate(today, -mondayOffset);
+  const byWeek = new Map(weekRows.map((w) => [w.week_start, +(w.m / 1000).toFixed(1)]));
+  return Array.from({ length: 5 }, (_, index) => {
+    const week_start = shiftDate(currentMonday, index * -7);
+    return {
+      week_start,
+      km: byWeek.get(week_start) ?? 0,
+      complete: index > 0,
+    };
+  });
 }
 
 // Personal records (Garmin bests) + current race predictions. Compact strings
@@ -432,9 +444,11 @@ async function sectionRecords(db) {
 // Derived signals + flags — computed here, not left to the model. Pure: a fold
 // over the recovery and weekly-mileage sections, no DB of its own.
 function deriveSignals(recovery, weekly_km) {
-  const priorWeeks = weekly_km.slice(1);
-  const priorAvg = priorWeeks.length
-    ? +(priorWeeks.reduce((a, b) => a + b, 0) / priorWeeks.length).toFixed(1)
+  const completeWeeks = weekly_km.filter((week) => week.complete);
+  const comparisonWeek = completeWeeks[0] || null;
+  const baselineWeeks = completeWeeks.slice(1);
+  const priorAvg = baselineWeeks.length
+    ? +(baselineWeeks.reduce((sum, week) => sum + week.km, 0) / baselineWeeks.length).toFixed(1)
     : null;
 
   const latest = recovery.latest;
@@ -446,20 +460,26 @@ function deriveSignals(recovery, weekly_km) {
   if (latest.hrv_status && latest.hrv_status !== 'BALANCED') {
     flags.push(`HRV status ${latest.hrv_status}`);
   }
-  if (['LOW', 'POOR'].includes(latest.readiness_level)) {
-    flags.push(`readiness ${latest.readiness_level}`);
+  const wakeLevel = latest.readiness_level_on_waking ||
+    (latest.readiness_measured === 'on_waking' ? latest.readiness_level : null);
+  const wakeScore = latest.readiness_on_waking ??
+    (latest.readiness_measured === 'on_waking' ? latest.readiness_score : null);
+  if (['LOW', 'POOR'].includes(wakeLevel)) {
+    flags.push(`readiness ${wakeLevel}`);
   }
-  if (recovery.avg_14d.readiness_score != null && latest.readiness_score != null &&
-      latest.readiness_score < recovery.avg_14d.readiness_score - 10) {
+  if (recovery.avg_14d.readiness_on_waking != null && wakeScore != null &&
+      wakeScore < recovery.avg_14d.readiness_on_waking - 10) {
     flags.push('readiness below 14d average');
   }
-  if (priorAvg != null && weekly_km[0] > priorAvg * 1.3) {
+  if (priorAvg != null && comparisonWeek.km > priorAvg * 1.3) {
     flags.push('weekly mileage spike vs prior weeks');
   }
 
   return {
-    current_week_km: weekly_km[0] ?? null,
-    prior_weeks_km: priorWeeks,
+    current_week: weekly_km[0] || null,
+    current_week_km: weekly_km[0]?.km ?? null,
+    prior_weeks: completeWeeks,
+    prior_weeks_km: completeWeeks.map((week) => week.km),
     prior_weeks_avg_km: priorAvg,
     flags,
   };
@@ -481,7 +501,7 @@ async function buildContext(db) {
     sectionRecentRuns(db, today),
     sectionRecovery(db, today),
     sectionUpcoming(db, today),
-    sectionWeeklyMileage(db),
+    sectionWeeklyMileage(db, today),
     sectionRecords(db),
   ]);
 
@@ -497,6 +517,7 @@ async function buildContext(db) {
     recent_runs,
     recovery,
     upcoming,
+    weekly_mileage: weekly_km,
     signals: deriveSignals(recovery, weekly_km),
     personal_records: records.personal_records,
     race_predictions: records.race_predictions,

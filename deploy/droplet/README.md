@@ -56,8 +56,24 @@ rm -rf .garth
 ```
 
 The temporary copy contains credentials. Transfer it securely, remove it after
-the import, and never commit it. If the cache expires, run an interactive ingest
-once in the container so MFA can refresh the volume.
+the import, and never commit it.
+
+## Re-authorising Garmin
+
+Cron has no interactive terminal, so an expired Garmin session fails quickly
+and marks the dashboard update status as failed. Re-authorise on the Mac, where
+MFA can be entered, then copy the refreshed cache to the droplet:
+
+1. From the repository root on the Mac, run
+   `/usr/local/bin/python3.13 ingest/ingest.py` in a terminal and complete any
+   Garmin MFA prompt. A successful login refreshes `ingest/.garth` through the
+   garminconnect library.
+2. Securely copy the `ingest/.garth` directory to a temporary `.garth`
+   directory beside the droplet checkout. Do not print, inspect, or commit its
+   contents.
+3. Run the volume import command in the Garmin token cache section above.
+4. Remove the temporary droplet copy, then let the next cron run verify the
+   session. The dashboard status should return to healthy after that run.
 
 ## Move local data
 

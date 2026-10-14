@@ -1,5 +1,5 @@
-// AI coach — Claude client. Generates coaching text from the assembled training
-// context (see context.js). Analyst, not workout generator. Three tiers:
+// AI coach: Claude client. Generates coaching text from the assembled training
+// context (see context.js). Three tiers:
 //   - brief        : cheap 2-3 sentence daily glance (Sonnet)
 //   - detailed     : full multi-section daily report, on demand (Opus)
 //   - day insight  : on-demand per-day run report / planned tips (Sonnet)
@@ -17,12 +17,18 @@ const {
   localDate,
 } = require("./context");
 
-// Opus for the deep, on-demand detailed report only — depth is worth the cost
-// when explicitly requested.
-const MODEL = "claude-opus-4-8";
+// Opus for deep reports and planning, Sonnet for frequent interactions.
+const MODEL = "claude-opus-5-5";
 // Sonnet for everything frequent/interactive: chat, the daily brief, and the
 // per-day insights. Cheaper and fast enough for a glance.
-const CHAT_MODEL = "claude-sonnet-4-6";
+const CHAT_MODEL = "claude-sonnet-5-5";
+
+const requestConfig = (model, effort, max_tokens) => ({
+  model,
+  max_tokens,
+  thinking: { type: "adaptive" },
+  output_config: { effort },
+});
 
 // Shared memory fragment for the conversational modes that run through
 // createResolvingTools and so carry the memory tools. Writes are silent by
@@ -54,13 +60,19 @@ When \`readiness_measured\` is "after_exercise", the score is a CONSEQUENCE of t
 
 Judge how they went INTO a session by \`readiness_on_waking\` (plus HRV, resting HR and sleep, which are overnight measurements and so genuinely pre-run). For a specific completed run, get_activity_detail is exact: it reports the readings immediately before and after that run, which also settles double days.`;
 
+const HONESTY_RULES = `## Honest assessment
+
+Verify the athlete's claims about their training against the data before agreeing, and call a tool when the injected summary is not enough. Lead with your own assessment, then the supporting numbers, then a clear recommendation. Say plainly when you disagree and why. Distinguish "the data shows" from "my judgement is", and state your confidence.
+
+Hold your position when challenged without new information. Change it only when new facts justify the change, then leave the decision with the athlete. Name material risks and trade-offs they did not ask about, including injury or illness signals, load spikes, race proximity, and unrealistic goals. Do not flatter, praise the question, or soften a no into a maybe.`;
+
 // Static framing for the chat coach — the interactive sibling of the daily
 // insight. Same analyst-not-generator role; conversational rather than essay.
 const CHAT_SYSTEM = `You are this athlete's running coach and analyst, answering their questions in a chat.
 
 You have their full recent training context injected below as JSON: recent runs (including interval work-reps), recovery (HRV, resting HR, sleep, readiness), upcoming planned workouts, personal records, current Garmin race predictions, derived signals/flags, and their profile (shoes, goals, injuries/constraints). Use it — answer specifically with real numbers (paces, HR, HRV, mileage, dates) rather than generic advice. The athlete should never have to re-explain their training.
 
-You do NOT prescribe full workouts or write training plans — they use Runna for that. But you CAN answer practical questions: which shoes for a session, whether a goal is realistic given current fitness, why a run felt hard, what the recovery data suggests, how recent paces compare to goal paces.
+Plan building happens in planning mode. In chat, answer practical questions such as which shoes suit a session, whether a goal is realistic, why a run felt hard, what recovery data suggests, and how recent paces compare with goal paces.
 
 The injected context only covers roughly the next 14 days of planned workouts. When the athlete asks about scheduled sessions, races or their plan further out than that, call the get_scheduled_workouts tool (up to 12 weeks ahead) to read the real sessions rather than saying you can't see them.
 
@@ -68,9 +80,11 @@ Recent runs are summarised to whole-run averages plus a one-line work-rep summar
 
 ${READINESS_RULES}
 
+${HONESTY_RULES}
+
 ${MEMORY_RULES}
 
-Be concise and conversational — this is a chat, not an essay. Short, direct answers. No headers or long bullet lists unless genuinely useful.`;
+Be concise and conversational. Concise means no padding, not no reasoning. Give enough evidence to support the assessment. No headers or long bullet lists unless genuinely useful.`;
 
 // --- Shared spec-authoring rules -------------------------------------------
 // One source for every blocks-spec rule used by unified planning mode:
@@ -194,6 +208,8 @@ Before proposing or editing anything, call get_scheduled_workouts for the dates 
 The Garmin calendar is the athlete's source of truth. Never claim a day is empty, or that a workout does not exist, without a get_scheduled_workouts call whose range covers that date.
 
 ${READINESS_RULES}
+
+${HONESTY_RULES}
 
 ## Assess before you propose (this governs the proposal)
 
@@ -342,9 +358,8 @@ ${GUARD_RULES}
 
 Same coach, different mode: specific, grounded in real numbers, concise.`;
 
-// Static system prompt — never changes between calls, so it's marked cacheable.
-// (Opus 4.8 only caches prefixes ≥4096 tokens, so this short prompt won't
-// actually cache yet; the breakpoint is correct and kicks in if it grows.)
+// Static system prompt. The following context block marks the combined prefix
+// cacheable, comfortably above the current models' minimum prefix size.
 const SYSTEM_PROMPT = `You are an analytical running coach reviewing one athlete's recent training and recovery data.
 
 Your job is insight and observation, NOT prescribing workouts. The athlete plans their training with Runna, so never tell them which session to run or write a training plan.
@@ -352,6 +367,8 @@ Your job is insight and observation, NOT prescribing workouts. The athlete plans
 Focus on how their body is responding to training: recovery trends (HRV vs baseline, resting HR, sleep, readiness), heart-rate behaviour, and the balance between training load and readiness. Comment on how recent sessions actually went and what the numbers suggest. Pay particular attention to signals.flags, these are pre-computed warnings; address any that are present. If a race appears in the upcoming list, factor in its proximity and the athlete's goal paces. Use the profile (shoes, goals, typical paces, injuries/constraints) for relevant context, for example how recent paces compare to goal paces, or whether an injury constraint bears on the current load. coach_memory holds durable facts remembered from past coach chats (race debriefs, illnesses, context for training gaps) — factor any relevant ones in.
 
 ${READINESS_RULES}
+
+${HONESTY_RULES}
 
 Be specific: cite actual numbers (paces, HR, HRV, mileage, dates). That specificity is the value, so keep it. Avoid generic advice ("stay hydrated", "listen to your body").
 
@@ -375,6 +392,8 @@ In plain, warm prose cover three things: how their body is responding right now 
 
 One trap to avoid: Garmin re-reads training readiness after a workout, so if \`recovery.latest.readiness_measured\` is "after_exercise" that score reflects a session they have ALREADY done today, not the state they woke in (\`readiness_on_waking\`). Never open with concern about a low readiness that is simply the cost of this morning's run.
 
+Check the athlete's framing against the data before agreeing. If it is wrong, say so plainly and give the key number and recommendation.
+
 This is a glance, not a report. Do NOT: analyse past runs in detail, use any section headers, open with a bold TL;DR line, or list out numbers. Include at most one concrete number, and only if it genuinely adds colour, the detailed report is where the depth lives. If signals.flags are present, work them in briefly and in passing.
 
 Style: second person, direct. Do NOT use em-dashes. Do NOT use the ~ symbol, write "around 4:00/km" instead.`;
@@ -387,17 +406,23 @@ The focus day carries every run logged on it (usually one; a double day carries 
 
 ${READINESS_RULES}
 
+${HONESTY_RULES}
+
 Be specific with real numbers (paces, HR, load). Keep to a few short sentences or a couple of tight bullets. One short markdown header at most, only if it helps. No bold TL;DR line. Do NOT use em-dashes or the ~ symbol. Second person.`;
 
 const DAY_PLANNED_SYSTEM = `You are this athlete's running coach giving practical tips for an UPCOMING planned workout.
 
 From the focus workout (title, distance, structured steps with any pace targets) and the backdrop context (current recovery and readiness, recent training load, goal paces, PRs), advise how to approach and execute it: what it's training, sensible pacing for the reps or segments, and any adjustment today's recovery or recent load warrants. If it's a race, factor its proximity and goal pace.
 
+${HONESTY_RULES}
+
 You do NOT rewrite the workout, they use Runna for that, you coach the execution. Be specific with paces and numbers. A few short sentences or tight bullets. One short markdown header at most. No bold TL;DR line. Do NOT use em-dashes or the ~ symbol. Second person.`;
 
 const DAY_ROUTINE_SYSTEM = `You are this athlete's running coach commenting on a recurring non-running session in their week (e.g. football, gym, cycling).
 
 You have the session (activity, intensity 1-10, whether it has been logged today) plus the backdrop context (recovery, recent runs, upcoming planned runs, goal paces). Treat it as cross-training that affects running load and recovery. For an upcoming or expected session, advise how hard to go given current recovery and any nearby running workouts, and how to protect the next run. For a completed one, note how it adds to the week's load and what that means for upcoming runs.
+
+${HONESTY_RULES}
 
 You do NOT coach the sport itself, only how it fits their running. A few short sentences. One short markdown header at most. No bold TL;DR line. Do NOT use em-dashes or the ~ symbol. Second person.`;
 
@@ -429,6 +454,44 @@ const extractText = (response) =>
     .map((b) => b.text)
     .join("")
     .trim();
+
+const ensureAvailable = (response) => {
+  if (response.stop_reason === "refusal") {
+    throw new Error("Coach unavailable: the model refused this request.");
+  }
+  return response;
+};
+
+const visibleText = (response) => {
+  ensureAvailable(response);
+  const text = extractText(response);
+  if (!text) throw new Error("Coach unavailable: the model returned no answer.");
+  return response.stop_reason === "max_tokens"
+    ? `${text}\n\n[Coach note: this answer reached its length limit and may be incomplete.]`
+    : text;
+};
+
+// Mark only the latest user turn cacheable in the outgoing request. The stored
+// conversation is never mutated, and prior assistant thinking blocks remain in
+// their original order and shape.
+function cacheLatestUser(convo) {
+  const messages = [...convo];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role !== "user") continue;
+    const content = typeof messages[i].content === "string"
+      ? [{ type: "text", text: messages[i].content }]
+      : messages[i].content.map((block) => ({ ...block }));
+    if (content.length) {
+      content[content.length - 1] = {
+        ...content[content.length - 1],
+        cache_control: { type: "ephemeral" },
+      };
+    }
+    messages[i] = { ...messages[i], content };
+    break;
+  }
+  return messages;
+}
 
 // --- On-demand scheduled-workout tool -----------------------------------
 // The injected context only carries the next ~14 days of planned workouts, to
@@ -563,12 +626,29 @@ async function runForgetTool(input) {
 }
 
 const COACH_TOOLS = [SCHEDULED_TOOL, ACTIVITY_TOOL, REMEMBER_TOOL, FORGET_TOOL];
-const runCoachTool = (db, b) =>
+const executeCoachTool = (db, b) =>
   b.name === "get_scheduled_workouts" ? runScheduledTool(db, b.input)
     : b.name === "get_activity_detail" ? runActivityTool(db, b.input)
     : b.name === "remember_fact" ? runRememberTool(db, b.input)
     : b.name === "forget_fact" ? runForgetTool(b.input)
     : `Unknown tool ${b.name}.`;
+
+async function runCoachTool(db, block) {
+  try {
+    return {
+      type: "tool_result",
+      tool_use_id: block.id,
+      content: await executeCoachTool(db, block),
+    };
+  } catch (error) {
+    return {
+      type: "tool_result",
+      tool_use_id: block.id,
+      is_error: true,
+      content: `Tool failed: ${error && error.message ? error.message : "unknown error"}`,
+    };
+  }
+}
 
 const MAX_TOOL_ROUNDS = 4;
 
@@ -598,32 +678,40 @@ const runActivityTool = (db, input) =>
 // (non-tool_use) response. `convo` is the
 // working message array — mutated with the internal tool round-trips, which stay
 // server-side (the client only ever sees the final reply text).
-async function createResolvingTools(db, params, convo) {
+async function createResolvingTools(db, params, convo, options = {}) {
+  const api = options.client || getClient();
+  const tools = options.tools === false ? null : COACH_TOOLS;
   for (let i = 0; i < MAX_TOOL_ROUNDS; i++) {
-    const response = await getClient().messages.create({
+    const response = ensureAvailable(await api.messages.create({
       ...params,
-      tools: COACH_TOOLS,
-      messages: convo,
-    });
+      ...(tools ? { tools } : {}),
+      messages: cacheLatestUser(convo),
+    }));
     if (response.stop_reason !== "tool_use") return response;
+    if (!tools) throw new Error("Coach unavailable: an unexpected tool call was requested.");
     convo.push({ role: "assistant", content: response.content });
     convo.push({
       role: "user",
-      // The tool executor is async now — resolve every tool_use block before
+      // The tool executor is async now. Resolve every tool_use block before
       // the results turn is pushed (a pending Promise must never be sent).
       content: await Promise.all(
         response.content
           .filter((b) => b.type === "tool_use")
-          .map(async (b) => ({
-            type: "tool_result",
-            tool_use_id: b.id,
-            content: await runCoachTool(db, b),
-          })),
+          .map((b) => runCoachTool(db, b)),
       ),
     });
   }
-  // Round cap hit — one final call with no tools so it must answer in prose.
-  return getClient().messages.create({ ...params, messages: convo });
+  // Keep tools declared because the conversation contains tool_use blocks.
+  // A final user turn asks for an answer now without another tool round.
+  convo.push({
+    role: "user",
+    content: "Tool round limit reached. Answer now from the results already returned. Do not call another tool.",
+  });
+  return ensureAvailable(await api.messages.create({
+    ...params,
+    tools,
+    messages: cacheLatestUser(convo),
+  }));
 }
 
 // Glance brief (Sonnet). Returns { text, context, model } so the caller can
@@ -631,17 +719,23 @@ async function createResolvingTools(db, params, convo) {
 async function generateBrief(db) {
   const context = await buildContext(db);
   const response = await getClient().messages.create({
-    model: CHAT_MODEL,
-    max_tokens: 300,
-    system: [{ type: "text", text: withPolicy(BRIEF_SYSTEM) }],
+    ...requestConfig(CHAT_MODEL, "low", 1200),
+    system: [
+      { type: "text", text: withPolicy(BRIEF_SYSTEM) },
+      {
+        type: "text",
+        text: `Today's training context as JSON:\n\n${JSON.stringify(context)}`,
+        cache_control: { type: "ephemeral" },
+      },
+    ],
     messages: [
       {
         role: "user",
-        content: `Today's training context as JSON. Write today's check-in.\n\n${JSON.stringify(context)}`,
+        content: "Write today's check-in.",
       },
     ],
   });
-  return { text: extractText(response), context, model: CHAT_MODEL };
+  return { text: visibleText(response), context, model: CHAT_MODEL };
 }
 
 // Detailed multi-section report (Opus), generated on demand. Stateless — the
@@ -649,23 +743,26 @@ async function generateBrief(db) {
 async function generateDetailedReport(db) {
   const context = await buildContext(db);
   const response = await getClient().messages.create({
-    model: MODEL,
-    max_tokens: 1024,
+    ...requestConfig(MODEL, "medium", 6000),
     system: [
       {
         type: "text",
         text: withPolicy(SYSTEM_PROMPT),
+      },
+      {
+        type: "text",
+        text: `Today's training context as JSON:\n\n${JSON.stringify(context)}`,
         cache_control: { type: "ephemeral" },
       },
     ],
     messages: [
       {
         role: "user",
-        content: `Here is today's training context as JSON. Write today's detailed coaching report.\n\n${JSON.stringify(context)}`,
+        content: "Write today's detailed coaching report.",
       },
     ],
   });
-  return { text: extractText(response), model: MODEL };
+  return { text: visibleText(response), model: MODEL };
 }
 
 // On-demand per-day insight (Sonnet). Branches on what's on `date`: a completed
@@ -705,8 +802,7 @@ async function generateDayInsight(db, date) {
         : "Analyse how this session went."
       : "Give tips for executing this planned workout.";
   const response = await getClient().messages.create({
-    model: CHAT_MODEL,
-    max_tokens: 600,
+    ...requestConfig(CHAT_MODEL, "low", 1800),
     system: [
       { type: "text", text: withPolicy(system) },
       {
@@ -725,7 +821,7 @@ async function generateDayInsight(db, date) {
       },
     ],
   });
-  return { text: extractText(response), kind: focus.kind, model: CHAT_MODEL };
+  return { text: visibleText(response), kind: focus.kind, model: CHAT_MODEL };
 }
 
 // Interactive chat reply. `messages` is the conversation so far — an array of
@@ -733,13 +829,12 @@ async function generateDayInsight(db, date) {
 // (the server is stateless, no chat persistence). Fresh context is built and
 // injected as a cacheable system prompt on every call so every reply is
 // grounded in current training data. Returns the assistant reply text.
-async function chatReply(db, messages) {
-  const context = await buildContext(db);
+async function chatReply(db, messages, options = {}) {
+  const context = options.context || await buildContext(db);
   const response = await createResolvingTools(
     db,
     {
-      model: CHAT_MODEL,
-      max_tokens: 800,
+      ...requestConfig(CHAT_MODEL, "medium", 4000),
       system: [
         { type: "text", text: withPolicy(CHAT_SYSTEM) },
         {
@@ -750,8 +845,9 @@ async function chatReply(db, messages) {
       ],
     },
     [...messages],
+    { tools: options.tools, client: options.client },
   );
-  return extractText(response);
+  return visibleText(response);
 }
 
 // Extract one structured directive from the reply. Each fence is checked in
@@ -807,9 +903,9 @@ const planComplete = (text) => {
 async function planReply(db, messages, recentPushes = []) {
   const context = await buildPlanningContext(db, recentPushes);
   const params = {
-    model: MODEL,
-    // A complete multi-week plan can contain 20+ buildable sessions.
-    max_tokens: 16000,
+    // A complete multi-week plan can contain 20+ buildable sessions, and the
+    // limit now includes adaptive thinking as well as visible output.
+    ...requestConfig(MODEL, "high", 24000),
     system: [
       { type: "text", text: withPolicy(PLANNING_SYSTEM) },
       {
@@ -822,6 +918,7 @@ async function planReply(db, messages, recentPushes = []) {
   const call = (msgs) => createResolvingTools(db, params, [...msgs]);
 
   let response = await call(messages);
+  ensureAvailable(response);
   let raw = extractText(response);
   let directive = extractDirective(raw);
 
@@ -834,12 +931,13 @@ async function planReply(db, messages, recentPushes = []) {
       : "it is not strictly valid JSON in the documented session-spec, full-plan or edit-directive shape (no comments, no trailing commas, one fenced ```json block)";
     response = await call([
       ...messages,
-      { role: "assistant", content: raw },
+      { role: "assistant", content: response.content },
       {
         role: "user",
         content: `[App notice: your last reply appeared to present structured planning output, but nothing valid could be extracted — ${reason}. Re-emit the complete intended session, plan or edit as a single fenced json block.]`,
       },
     ]);
+    ensureAvailable(response);
     raw = extractText(response);
     directive = extractDirective(raw);
   }
@@ -870,4 +968,9 @@ module.exports = {
   chatReply,
   planReply,
   MODEL,
+  CHAT_MODEL,
+  SUPPORTS_CONTEXT_INJECTION: true,
+  createResolvingTools,
+  runCoachTool,
+  visibleText,
 };

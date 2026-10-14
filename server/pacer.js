@@ -6,7 +6,7 @@
 // the build + upload happens in pacer_cli.py after the user approves a preview.
 const Anthropic = require('@anthropic-ai/sdk');
 
-const MODEL = 'claude-sonnet-4-6';
+const MODEL = 'claude-sonnet-5-5';
 
 // When the model has every parameter and the user has confirmed, it emits a
 // fenced ```json block holding exactly this shape. The server parses it out.
@@ -62,19 +62,32 @@ function extractParams(text) {
 async function pacerChat(messages, today) {
   const response = await getClient().messages.create({
     model: MODEL,
-    max_tokens: 600,
-    system: systemPrompt(today),
+    max_tokens: 2000,
+    thinking: { type: 'adaptive' },
+    output_config: { effort: 'low' },
+    system: [{
+      type: 'text',
+      text: systemPrompt(today),
+      cache_control: { type: 'ephemeral' },
+    }],
     messages,
   });
+  if (response.stop_reason === 'refusal') {
+    throw new Error('Coach unavailable: the model refused this request.');
+  }
   const raw = response.content
     .filter((b) => b.type === 'text')
     .map((b) => b.text)
     .join('')
     .trim();
+  if (!raw) throw new Error('Coach unavailable: the model returned no answer.');
   const params = extractParams(raw);
   // Strip the json block from the visible reply; leave any lead-in confirmation.
-  const reply = raw.replace(/```json[\s\S]*?```/i, '').trim()
+  let reply = raw.replace(/```json[\s\S]*?```/i, '').trim()
     || 'Great — here are your pacer details. Building a preview…';
+  if (response.stop_reason === 'max_tokens') {
+    reply += '\n\n[Coach note: this answer reached its length limit and may be incomplete.]';
+  }
   return { reply, params };
 }
 
