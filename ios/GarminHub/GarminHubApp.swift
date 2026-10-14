@@ -6,13 +6,16 @@ struct GarminHubApp: App {
 
     var body: some Scene {
         WindowGroup {
-            if settings.apiKey.isEmpty {
-                NavigationStack { SettingsView(firstRun: true) }
-                    .environmentObject(settings)
-            } else {
-                DashboardScreen()
-                    .environmentObject(settings)
+            Group {
+                if settings.apiKey.isEmpty {
+                    NavigationStack { SettingsView(firstRun: true) }
+                        .environmentObject(settings)
+                } else {
+                    DashboardScreen()
+                        .environmentObject(settings)
+                }
             }
+            .preferredColorScheme(.dark)
         }
     }
 }

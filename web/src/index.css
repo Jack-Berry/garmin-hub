@@ -74,5 +74,52 @@
   }
   body {
     @apply antialiased;
+    margin: 0;
+    min-width: 0;
+    background: var(--surface-0);
+  }
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+  max-width: 100%;
+}
+
+.app-mode,
+.app-mode body {
+  overscroll-behavior: none;
+  touch-action: pan-x pan-y;
+  background: #0b0b0d;
+}
+
+.app-shell > header {
+  padding-top: env(safe-area-inset-top);
+}
+
+.app-content {
+  padding-bottom: calc(4.75rem + env(safe-area-inset-bottom));
+}
+
+.app-tabs {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+.app-coach {
+  height: calc(var(--app-height, 100dvh) - 3.75rem - env(safe-area-inset-bottom));
+  padding-top: env(safe-area-inset-top);
+}
+
+@media (max-width: 767px) {
+  .mobile-sheet {
+    width: 100%;
+    height: var(--app-height, 100dvh);
+    max-height: none;
+    margin: 0;
+    border: 0;
+    border-radius: 0;
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
   }
 }

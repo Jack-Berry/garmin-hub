@@ -20,7 +20,17 @@ function ActivityDetail({ id }) {
     <div className="bg-surface-2 px-4 py-3">
       <StateWrap loading={loading} error={error} empty={!laps || !laps.length}>
         {laps && (
-          <table className="w-full text-xs">
+          <>
+          <div className="space-y-2 md:hidden">
+            {laps.map((l) => (
+              <div key={l.lap_index} className="grid grid-cols-4 gap-2 border-b border-line pb-2 font-mono text-[11px] text-ink-secondary last:border-0">
+                <span>#{l.lap_index}</span><span>{km(l.distance_m)}</span>
+                <span>{paceFromMps(l.avg_speed_mps)}</span><span>{l.avg_hr ?? '-'} bpm</span>
+                {l.intensity_type && <span className="col-span-4"><Badge tone={intensityTone(l.intensity_type)}>{l.intensity_type.toLowerCase()}</Badge></span>}
+              </div>
+            ))}
+          </div>
+          <table className="hidden w-full text-xs md:table">
             <thead className="font-body text-nano uppercase tracking-[0.1em] text-ink-muted">
               <tr className="text-left">
                 <th className="py-1 pr-3 font-semibold">Lap</th>
@@ -48,6 +58,7 @@ function ActivityDetail({ id }) {
               ))}
             </tbody>
           </table>
+          </>
         )}
       </StateWrap>
     </div>
@@ -69,8 +80,32 @@ export default function RecentActivities() {
     <Section title="Recent activities" subtitle="Runs & football · click a row to see its laps">
       <StateWrap loading={loading} error={error} empty={!all.length}>
         {data && (
-          <div className="-mx-2 overflow-x-auto">
-            <table className="w-full min-w-[34rem] text-sm">
+          <div>
+            <div className="space-y-2 md:hidden">
+              {shown.map((a) => {
+                const open = openId === a.activity_id;
+                return (
+                  <div key={a.activity_id} className="overflow-hidden rounded-lg border border-line">
+                    <button onClick={() => setOpenId(open ? null : a.activity_id)} className={`w-full p-3 text-left ${open ? 'bg-surface-2' : ''}`}>
+                      <div className="flex min-w-0 items-start justify-between gap-3">
+                        <span className="flex min-w-0 items-center gap-2">
+                          <Icon name={ACT_ICON[a.activity_group] || 'run'} className="shrink-0 text-base text-ink-muted" />
+                          <span className="truncate font-body text-sm font-medium text-ink">{a.name}</span>
+                        </span>
+                        <span className="shrink-0 font-mono text-[11px] text-ink-muted">{shortDate(a.start_time_local)}</span>
+                      </div>
+                      <div className="mt-2 grid grid-cols-4 gap-2 font-mono text-[11px] tabular-nums text-ink-secondary">
+                        <span>{km(a.distance_m)}</span><span>{duration(a.duration_s)}</span>
+                        <span>{a.activity_group === 'football' ? '-' : pace(a.distance_m, a.duration_s)}</span>
+                        <span>{a.avg_hr ?? '-'} bpm</span>
+                      </div>
+                    </button>
+                    {open && <ActivityDetail id={a.activity_id} />}
+                  </div>
+                );
+              })}
+            </div>
+            <table className="hidden w-full text-sm md:table">
               <thead className="font-body text-micro uppercase tracking-[0.12em] text-ink-muted">
                 <tr className="text-left">
                   <th className="px-2 py-2 font-semibold">Date</th>

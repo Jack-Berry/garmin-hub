@@ -35,8 +35,8 @@ const alreadyPushed = (msgs, spec) =>
 const toPayload = (msgs) =>
   msgs.map((m) => ({ role: m.role, content: m.apiContent ?? m.content }));
 
-export default function ChatWidget() {
-  const [open, setOpen] = useState(false);
+export default function ChatWidget({ appMode = false, active = true }) {
+  const [open, setOpen] = useState(appMode);
   const [mode, setMode] = useState('chat'); // 'chat' | 'planning'
   const [messages, setMessages] = useState([]); // [{role, content, spec?, preview?, previewError?, pushed?, plan?, savedPlan?}]
   const [input, setInput] = useState('');
@@ -384,7 +384,8 @@ export default function ChatWidget() {
   };
 
   // Collapsed: just the launcher button.
-  if (!open) {
+  if (appMode && !active) return null;
+  if (!open && !appMode) {
     return (
       <button
         onClick={() => setOpen(true)}
@@ -398,11 +399,13 @@ export default function ChatWidget() {
 
   return (
     <div
-      className={`fixed bottom-5 right-5 z-40 flex flex-col overflow-hidden rounded-2xl border bg-surface-1 shadow-xl ${
+      className={`fixed z-40 flex flex-col overflow-hidden border bg-surface-1 shadow-xl ${appMode
+        ? 'app-coach inset-x-0 top-0 h-[var(--app-height)] w-full rounded-none border-0'
+        : 'bottom-5 right-5 rounded-2xl'} ${
         planning
-          ? 'h-[620px] w-[560px]'
-          : 'h-[500px] w-[360px]'
-      } max-w-[calc(100vw-2.5rem)] ${planning ? 'border-acc' : 'border-line'}`}
+          ? appMode ? '' : 'h-[620px] w-[560px]'
+          : appMode ? '' : 'h-[500px] w-[360px]'
+      } ${appMode ? '' : 'max-w-[calc(100vw-2.5rem)]'} ${planning ? 'border-acc' : 'border-line'}`}
     >
       <header className="flex items-center justify-between border-b border-line px-4 py-3">
         <div>
@@ -461,13 +464,15 @@ export default function ChatWidget() {
               )}
             </>
           )}
-          <button
-            onClick={() => setOpen(false)}
-            aria-label="Minimise chat"
-            className="rounded-lg border border-line px-2.5 py-1 text-sm text-ink-secondary transition hover:bg-surface-2"
-          >
-            ✕
-          </button>
+          {!appMode && (
+            <button
+              onClick={() => setOpen(false)}
+              aria-label="Minimise chat"
+              className="rounded-lg border border-line px-2.5 py-1 text-sm text-ink-secondary transition hover:bg-surface-2"
+            >
+              ✕
+            </button>
+          )}
         </div>
       </header>
 
@@ -625,7 +630,7 @@ export default function ChatWidget() {
         </div>
       )}
 
-      <div className="border-t border-line p-3">
+      <div className="coach-composer border-t border-line p-3">
         <div className="flex items-end gap-2">
           <textarea
             ref={inputRef}
@@ -654,8 +659,8 @@ export default function ChatWidget() {
         // card, in-flow after a save. Closing it at any point is safe — the flow
         // is entirely server-state-derived, so the dashboard card picks up
         // exactly where this left off (it is the resume path).
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="w-full max-w-lg rounded-2xl border border-line bg-surface-1 p-5 shadow-xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-0 sm:p-4">
+          <div className="mobile-sheet w-full max-w-lg overflow-y-auto rounded-2xl border border-line bg-surface-1 p-4 shadow-xl sm:p-5">
             <div className="mb-1 flex justify-end">
               <button
                 onClick={() => setActivateFor(null)}

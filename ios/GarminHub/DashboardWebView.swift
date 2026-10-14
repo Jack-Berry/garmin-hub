@@ -12,16 +12,19 @@ struct DashboardWebView: UIViewRepresentable {
         config.setURLSchemeHandler(HubSchemeHandler(apiKey: apiKey), forURLScheme: "hub")
         let literal = String(data: try! JSONSerialization.data(withJSONObject: apiKey, options: .fragmentsAllowed), encoding: .utf8)!
         config.userContentController.addUserScript(WKUserScript(
-            source: "window.__HUB_API_KEY__ = \(literal);",
+            source: "window.__GARMIN_HUB_APP__ = true; window.__HUB_API_KEY__ = \(literal);",
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
-        webView.scrollView.alwaysBounceVertical = true
-        let refresh = UIRefreshControl()
-        refresh.addTarget(context.coordinator, action: #selector(Coordinator.refresh(_:)), for: .valueChanged)
-        webView.scrollView.refreshControl = refresh
+        webView.isOpaque = false
+        webView.backgroundColor = UIColor(red: 11 / 255, green: 11 / 255, blue: 13 / 255, alpha: 1)
+        webView.scrollView.backgroundColor = webView.backgroundColor
+        webView.scrollView.bounces = false
+        webView.scrollView.alwaysBounceVertical = false
+        webView.scrollView.contentInsetAdjustmentBehavior = .never
+        webView.allowsLinkPreview = false
         context.coordinator.webView = webView
         webView.load(URLRequest(url: URL(string: "hub://dashboard/")!))
         return webView
@@ -34,11 +37,6 @@ struct DashboardWebView: UIViewRepresentable {
         let onFailure: (String) -> Void
 
         init(onFailure: @escaping (String) -> Void) { self.onFailure = onFailure }
-
-        @objc func refresh(_ sender: UIRefreshControl) {
-            webView?.load(URLRequest(url: URL(string: "hub://dashboard/")!))
-            sender.endRefreshing()
-        }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
             if (error as? URLError)?.code == .cancelled { return }

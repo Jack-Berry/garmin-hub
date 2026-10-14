@@ -45,10 +45,10 @@ export function SectionTitle({ title, subtitle }) {
 export function Section({ title, subtitle, children }) {
   return (
     <section className="rounded-xl border border-line bg-surface-1">
-      <header className="border-b border-line px-5 py-4">
+      <header className="border-b border-line px-4 py-4 sm:px-5">
         <SectionTitle title={title} subtitle={subtitle} />
       </header>
-      <div className="p-5">{children}</div>
+      <div className="p-4 sm:p-5">{children}</div>
     </section>
   );
 }

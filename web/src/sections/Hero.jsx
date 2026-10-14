@@ -37,12 +37,12 @@ function Carousel({ slides }) {
       onFocusCapture={() => setPaused(true)}
       onBlurCapture={() => setPaused(false)}
     >
-      <div className="relative h-[264px] px-5 pt-5">
+      <div className="relative h-[300px] px-3 pt-4 sm:h-[264px] sm:px-5 sm:pt-5">
         {slides.map((s, i) => (
           <div
             key={s.key}
             aria-hidden={i !== idx}
-            className={`absolute inset-x-5 bottom-0 top-5 transition-opacity duration-500 ${
+            className={`absolute inset-x-3 bottom-0 top-4 transition-opacity duration-500 sm:inset-x-5 sm:top-5 ${
               i === idx ? 'opacity-100' : 'pointer-events-none opacity-0'
             }`}
           >
@@ -74,11 +74,11 @@ function Carousel({ slides }) {
 
 function Tile({ label, value, sub, accent }) {
   return (
-    <div className="flex flex-1 flex-col justify-center px-5 py-5">
+    <div className="flex min-w-0 basis-1/2 flex-col justify-center border-b border-line px-4 py-4 sm:flex-1 sm:basis-auto sm:border-b-0 sm:px-5 sm:py-5">
       <div className="font-body text-nano font-semibold uppercase tracking-[0.18em] text-ink-muted">
         {label}
       </div>
-      <div className={`mt-2 font-display text-[3.25rem] font-extrabold leading-none ${accent ? 'text-acc' : 'text-ink'}`}>
+      <div className={`mt-2 font-display text-[2.1rem] font-extrabold leading-none sm:text-[3.25rem] ${accent ? 'text-acc' : 'text-ink'}`}>
         {value}
         {sub && <span className="ml-1 align-baseline font-body text-base font-medium text-ink-muted">{sub}</span>}
       </div>
@@ -93,7 +93,7 @@ function Tile({ label, value, sub, accent }) {
 function MetricRow({ recovery, sevenDayKm }) {
   const r = (recovery && recovery[0]) || {};
   return (
-    <div className="flex flex-wrap divide-line sm:divide-x">
+    <div className="grid grid-cols-2 divide-x divide-line sm:flex sm:flex-wrap sm:divide-x">
       <Tile label="VO₂max" value={r.vo2max ?? '—'} />
       <Tile label="Resting HR" value={r.resting_hr != null ? Math.round(r.resting_hr) : '—'} />
       {/* Latest HRV is the live/current reading — accented, per the reference. */}
@@ -138,7 +138,7 @@ function chatSeedFor(day) {
   }
 }
 
-export default function Hero() {
+export default function Hero({ view = 'all' }) {
   const [day, setDay] = useState(null); // clicked week-strip cell, or null
   const today = new Date();
   const monday = new Date(today);
@@ -175,22 +175,35 @@ export default function Hero() {
     <>
       {/* This Week is the most-glanceable view, so it's a permanent band rather
           than a carousel slide that cycling could hide. */}
-      <section className="rounded-xl border border-line bg-surface-1 px-5 py-5">
-        <StateWrap {...merge(planned, acts, profile)}>
-          <WeekStrip planned={planned.data} activities={acts.data} routines={profile.data?.routines} onSelectDay={setDay} />
-        </StateWrap>
-      </section>
+      {(view === 'all' || view === 'today') && (
+        <>
+          <section className="rounded-xl border border-line bg-surface-1 px-3 py-4 sm:px-5 sm:py-5">
+            <StateWrap {...merge(planned, acts, profile)}>
+              <WeekStrip planned={planned.data} activities={acts.data} routines={profile.data?.routines} onSelectDay={setDay} />
+            </StateWrap>
+          </section>
+          <DailyInsight />
+        </>
+      )}
 
-      <DailyInsight />
+      {(view === 'all' || view === 'trends') && (
+        <section className="overflow-hidden rounded-xl border border-line bg-surface-1">
+          <Carousel slides={slides} />
+          {view === 'all' && <div className="border-t border-line">
+            <StateWrap {...merge(recovery, acts)}>
+              <MetricRow recovery={recovery.data} sevenDayKm={sevenDayKm} />
+            </StateWrap>
+          </div>}
+        </section>
+      )}
 
-      <section className="overflow-hidden rounded-xl border border-line bg-surface-1">
-        <Carousel slides={slides} />
-        <div className="border-t border-line">
+      {view === 'today' && (
+        <section className="overflow-hidden rounded-xl border border-line bg-surface-1">
           <StateWrap {...merge(recovery, acts)}>
             <MetricRow recovery={recovery.data} sevenDayKm={sevenDayKm} />
           </StateWrap>
-        </div>
-      </section>
+        </section>
+      )}
 
       {day && (
         <InsightModal

@@ -105,7 +105,7 @@ export function PlanReview({ plan, active, saving, saved, onSave, onActivate }) 
         })}
       </div>
 
-      <div className="mt-3 flex items-center justify-between border-t border-line pt-3">
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-line pt-3">
         <span className="font-mono text-[11px] text-ink-muted">
           {sessions.length} sessions
           {invalid.length > 0 && (
@@ -116,7 +116,7 @@ export function PlanReview({ plan, active, saving, saved, onSave, onActivate }) 
           // Saved = a dormant draft. Activation is OFFERED here (9d-3), never
           // auto-started — declining costs nothing; the dashboard card is the
           // later route.
-          <span className="flex items-center gap-3 text-xs text-ink-secondary">
+          <span className="flex flex-wrap items-center justify-end gap-3 text-xs text-ink-secondary">
             <span>Saved ✓ <span className="font-mono">{saved.plan_id}</span></span>
             {onActivate && (
               <button

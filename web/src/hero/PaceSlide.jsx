@@ -35,6 +35,12 @@ const FOOT_MODE = [
   { key: 'speed', label: 'Max speed' },
 ];
 
+// Activity totals can include malformed or sub-step-speed records. Letting a
+// 55 s/km value into the auto domain flattens every real run and produces
+// nonsense axis ticks. Keep the chart to plausible whole-run averages.
+const MIN_RUN_PACE = 150;
+const MAX_RUN_PACE = 720;
+
 // ~12 weeks back from now.
 const cutoff = () => {
   const d = new Date();
@@ -74,7 +80,7 @@ export default function PaceSlide({ activities }) {
     rows = [...runs]
       .reverse()
       .map((a) => ({ date: shortDate(a.start_time_local), sec: secPerKm(a.distance_m, a.duration_s) }))
-      .filter((r) => r.sec != null);
+      .filter((r) => r.sec >= MIN_RUN_PACE && r.sec <= MAX_RUN_PACE);
     // Pad the data range so the line isn't glued to the axis edges.
     const secs = rows.map((r) => r.sec);
     const lo = secs.length ? Math.floor((Math.min(...secs) - 15) / 15) * 15 : 270;
@@ -98,14 +104,14 @@ export default function PaceSlide({ activities }) {
 
   return (
     <div className="flex h-full flex-col">
-      <header className="mb-3 flex items-start justify-between gap-3">
+      <header className="mb-3 flex items-start justify-between gap-2">
         <div>
           <h2 className="font-display text-[0.8125rem] font-bold uppercase tracking-[0.14em] text-ink">
             Activity trend
           </h2>
           <p className="mt-1 font-body text-nano uppercase tracking-[0.18em] text-ink-muted">{subtitle}</p>
         </div>
-        <div className="flex flex-col items-end gap-1.5">
+        <div className="flex shrink-0 flex-col items-end gap-1.5">
           <div className="inline-flex rounded-lg border border-line p-0.5">
             {TABS.map((t) => (
               <button key={t.key} onClick={() => setTab(t.key)} className={`${seg} ${tab === t.key ? segOn : segOff}`}>
@@ -142,7 +148,7 @@ export default function PaceSlide({ activities }) {
           <p className="text-sm text-ink-muted">No matching sessions.</p>
         ) : (
           <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={rows} margin={{ top: 8, right: 8, bottom: 0, left: -4 }}>
+            <LineChart data={rows} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke={GRID} vertical={false} />
               <XAxis dataKey="date" tick={{ fontSize: 11, fill: AXIS }} tickLine={false} axisLine={false} />
               {isRun ? (

@@ -30,11 +30,11 @@ function workoutLabel(title) {
 function ActivityBlock({ name, detail, accent }) {
   return (
     <div className="flex max-w-full flex-col items-start">
-      <div className={`max-w-full truncate font-display text-[1.25rem] font-bold uppercase leading-none ${accent ? 'text-acc' : 'text-ink'}`}>
+      <div className={`max-w-full truncate font-display text-[0.68rem] font-bold uppercase leading-none sm:text-[1.25rem] ${accent ? 'text-acc' : 'text-ink'}`}>
         {name}
       </div>
       {detail && (
-        <div className="mt-1.5 font-mono text-nano tabular-nums text-ink-muted">{detail}</div>
+        <div className="mt-1 font-mono text-[0.48rem] tabular-nums text-ink-muted sm:mt-1.5 sm:text-nano">{detail}</div>
       )}
     </div>
   );
@@ -86,7 +86,7 @@ export default function WeekStrip({ planned, activities, routines, onSelectDay }
           Planned vs done · tap a day for detail
         </p>
       </header>
-      <div className="grid grid-cols-7 gap-px">
+      <div className="grid min-w-0 grid-cols-7 gap-px">
         {days.map((d, i) => {
           const date = ymd(d);
           const plan = plannedByDate[date];
@@ -123,20 +123,20 @@ export default function WeekStrip({ planned, activities, routines, onSelectDay }
                 status,
                 routine: routineState ? { activity: routine.activity, state: routineState } : null,
               })}
-              className={`flex flex-col border-t-2 px-1.5 py-2 text-left transition hover:bg-surface-2 ${
+              className={`flex min-w-0 flex-col border-t-2 px-0.5 py-2 text-left transition hover:bg-surface-2 sm:px-1.5 ${
                 isToday ? 'border-acc' : 'border-line'
               }`}
             >
               <div className="flex items-baseline justify-between">
-                <span className={`font-body text-nano font-bold uppercase tracking-[0.12em] ${isToday ? 'text-acc' : 'text-ink-muted'}`}>
-                  {DOW[i]}
+                <span className={`font-body text-[0.48rem] font-bold uppercase tracking-[0.05em] sm:text-nano sm:tracking-[0.12em] ${isToday ? 'text-acc' : 'text-ink-muted'}`}>
+                  <span className="sm:hidden">{DOW[i][0]}</span><span className="hidden sm:inline">{DOW[i]}</span>
                 </span>
-                <span className="font-mono text-nano tabular-nums text-ink-muted">
+                <span className="font-mono text-[0.48rem] tabular-nums text-ink-muted sm:text-nano">
                   {d.getDate()}
                 </span>
               </div>
 
-              <div className="mt-4 flex min-h-[56px] flex-col items-start gap-2">
+              <div className="mt-3 flex min-h-[42px] min-w-0 flex-col items-start gap-1.5 sm:mt-4 sm:min-h-[56px] sm:gap-2">
                 {act ? (
                   <ActivityBlock
                     accent={!!plan?.is_race}
@@ -156,7 +156,7 @@ export default function WeekStrip({ planned, activities, routines, onSelectDay }
                 )}
 
                 {!hasRun && !routineState && (
-                  <div className="font-display text-[1.25rem] font-bold uppercase leading-none text-ink-muted">Rest</div>
+                  <div className="font-display text-[0.68rem] font-bold uppercase leading-none text-ink-muted sm:text-[1.25rem]">Rest</div>
                 )}
               </div>
             </button>

@@ -79,7 +79,7 @@ export default function DailyInsight() {
 
   return (
     <section className="overflow-hidden rounded-xl border border-line bg-surface-1">
-      <header className="flex items-center justify-between gap-3 px-6 pt-5 pb-3">
+      <header className="flex items-start justify-between gap-3 px-4 pb-3 pt-4 sm:items-center sm:px-6 sm:pt-5">
         <div>
           <h2 className="font-body text-label font-bold uppercase tracking-[0.16em] text-acc">
             Coach's Daily Brief
@@ -91,22 +91,22 @@ export default function DailyInsight() {
         <button
           onClick={regenerate}
           disabled={gen === 'running'}
-          className={genBtn}
+          className={`${genBtn} shrink-0 text-right`}
           aria-label="Generate today's brief"
         >
           <Icon name="refresh" className={gen === 'running' ? 'animate-spin' : ''} />
-          {gen === 'running' ? 'Thinking…' : card ? 'Regenerate' : "Generate today's brief"}
+          <span className="hidden sm:inline">{gen === 'running' ? 'Thinking…' : card ? 'Regenerate' : "Generate today's brief"}</span>
         </button>
       </header>
 
-      <div className="px-6 pb-6">
+      <div className="min-w-0 px-4 pb-5 sm:px-6 sm:pb-6">
         {loading ? (
           <p className="text-sm text-ink-muted">Loading…</p>
         ) : error ? (
           <p className="text-sm text-sem-red">Couldn't load: {error.message}</p>
         ) : card ? (
           <>
-            <Markdown className="font-body text-[17px] leading-relaxed text-ink [&_strong]:font-semibold [&_strong]:text-acc">
+            <Markdown className="break-words font-body text-[15px] leading-relaxed text-ink sm:text-[17px] [&_strong]:font-semibold [&_strong]:text-acc">
               {card.content}
             </Markdown>
 

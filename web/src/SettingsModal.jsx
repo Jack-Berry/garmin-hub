@@ -237,11 +237,11 @@ export default function SettingsModal({ onClose }) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-4 backdrop-blur-sm sm:p-8"
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-0 backdrop-blur-sm sm:p-8"
       onClick={onClose}
     >
       <div
-        className="my-auto w-full max-w-2xl rounded-2xl border border-line bg-surface-1 shadow-xl"
+        className="mobile-sheet my-auto w-full max-w-2xl overflow-y-auto rounded-2xl border border-line bg-surface-1 shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
         <header className="flex items-center justify-between border-b border-line px-5 py-4">

@@ -22,7 +22,7 @@ struct DashboardScreen: View {
                         state = .failed(message)
                     }
                     .id(settings.apiKey)
-                    .ignoresSafeArea(edges: .bottom)
+                    .ignoresSafeArea()
                 case .failed(let message):
                     ContentUnavailableView {
                         Label("Dashboard unavailable", systemImage: "exclamationmark.triangle")
@@ -36,6 +36,7 @@ struct DashboardScreen: View {
             }
             .navigationTitle("Garmin Hub")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar(state == .ready ? .hidden : .visible, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Settings", systemImage: "gearshape") { showingSettings = true }
@@ -48,6 +49,8 @@ struct DashboardScreen: View {
                     .environmentObject(settings)
             }
         }
+        .background(Color(red: 11 / 255, green: 11 / 255, blue: 13 / 255))
+        .preferredColorScheme(.dark)
         .task { await connect() }
     }
 

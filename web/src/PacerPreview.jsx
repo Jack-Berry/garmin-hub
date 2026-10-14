@@ -70,11 +70,11 @@ export function PacerPreview({ preview, date }) {
   let intervalN = 0;
   return (
     <div className="rounded-xl border border-line bg-surface-2 p-4">
-      <div className="flex items-baseline justify-between">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h3 className="font-body text-sm font-semibold text-ink">{preview.name}</h3>
         <span className="font-mono text-xs text-ink-muted">{shortDate(date)}</span>
       </div>
-      <div className="mt-1 flex gap-4 font-mono text-xs text-ink-muted">
+      <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 font-mono text-xs text-ink-muted">
         <span>{(preview.total_distance_m / 1000).toFixed(2)} km total</span>
         <span>est. {duration(preview.est_duration_s)}</span>
         <span>{intervalCount(preview.segments)} segments</span>

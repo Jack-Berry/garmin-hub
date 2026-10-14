@@ -128,62 +128,109 @@ function RefreshButton({ className, onRefreshed }) {
 }
 
 export default function App() {
+  // The native shell sets this explicit flag at document start. Width alone
+  // never enables app chrome, so narrow Safari keeps the responsive dashboard.
+  const appMode = window.__GARMIN_HUB_APP__ === true;
   const [dark, setDark] = useState(true);
+  const [tab, setTab] = useState('today');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [pacerOpen, setPacerOpen] = useState(false);
   // Bumping this remounts <main>, so all sections refetch from the API.
   const [refreshKey, setRefreshKey] = useState(0);
 
   const topBtn =
-    'inline-flex items-center gap-1.5 rounded-lg border border-line px-3 py-1.5 font-body text-micro font-semibold uppercase tracking-[0.1em] text-ink-secondary transition hover:bg-surface-2 hover:text-ink';
+    'inline-flex h-9 items-center justify-center gap-1.5 rounded-lg border border-line px-2.5 font-body text-micro font-semibold uppercase tracking-[0.1em] text-ink-secondary transition hover:bg-surface-2 hover:text-ink md:h-auto md:px-3 md:py-1.5';
+
+  useEffect(() => {
+    if (!appMode) return;
+    document.documentElement.classList.add('app-mode');
+    const viewport = window.visualViewport;
+    const size = () => document.documentElement.style.setProperty(
+      '--app-height', `${viewport?.height || window.innerHeight}px`);
+    size();
+    viewport?.addEventListener('resize', size);
+    return () => {
+      document.documentElement.classList.remove('app-mode');
+      viewport?.removeEventListener('resize', size);
+    };
+  }, [appMode]);
+
+  const tabs = [
+    ['today', 'calendar', 'Today'],
+    ['trends', 'chart-line', 'Trends'],
+    ['activities', 'run', 'Activities'],
+    ['coach', 'message-circle', 'Coach'],
+  ];
 
   return (
     <AccentProvider dark={dark}>
     <div className={dark ? 'dark' : ''}>
-      <div className="min-h-screen bg-surface-0 text-ink transition-colors">
+      <div className={`min-h-screen bg-surface-0 text-ink transition-colors ${appMode ? 'app-shell' : ''}`}>
         <header className="sticky top-0 z-10 border-b border-line bg-surface-0/80 backdrop-blur">
-          <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
+          <div className="mx-auto flex max-w-5xl items-center justify-between gap-2 px-4 py-3 md:px-6 md:py-4">
             <div>
-              <h1 className="font-display text-[1.5rem] font-extrabold uppercase leading-none tracking-[0.02em] text-ink">Garmin Hub</h1>
-              <p className="mt-1 font-body text-nano uppercase tracking-[0.22em] text-ink-muted">Running dashboard</p>
+              <h1 className="whitespace-nowrap font-display text-lg font-extrabold uppercase leading-none tracking-[0.02em] text-ink md:text-[1.5rem]">Garmin Hub</h1>
+              <p className="mt-1 hidden font-body text-nano uppercase tracking-[0.22em] text-ink-muted md:block">Running dashboard</p>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex min-w-0 items-center gap-1.5 md:gap-2">
               <RefreshButton className={topBtn} onRefreshed={() => setRefreshKey((k) => k + 1)} />
               <button onClick={() => setPacerOpen(true)} className={topBtn} aria-label="New pacer" title="Build a pacing workout">
-                <Icon name="stopwatch" /> New pacer
+                <Icon name="stopwatch" /> <span className="hidden md:inline">New pacer</span>
               </button>
               <button onClick={() => setSettingsOpen(true)} className={topBtn} aria-label="Settings">
-                <Icon name="settings" /> Settings
+                <Icon name="settings" /> <span className="hidden md:inline">Settings</span>
               </button>
               <button onClick={() => setDark((d) => !d)} className={`${topBtn} text-acc hover:text-acc`} aria-label="Toggle theme">
-                <Icon name={dark ? 'sun' : 'moon'} /> {dark ? 'Light' : 'Dark'}
+                <Icon name={dark ? 'sun' : 'moon'} /> <span className="hidden md:inline">{dark ? 'Light' : 'Dark'}</span>
               </button>
             </div>
           </div>
         </header>
 
-        <main key={refreshKey} className="mx-auto max-w-5xl space-y-5 px-6 py-6">
-          <Hero />
+        <main key={refreshKey} className={`mx-auto max-w-5xl space-y-4 px-3 py-4 md:space-y-5 md:px-6 md:py-6 ${appMode ? 'app-content' : ''}`}>
+          {(!appMode || tab === 'today') && <Hero view={appMode ? 'today' : 'all'} />}
           {/* Saved-plan activation (Stage 9c): push to Garmin + the guided
               cancel-Runna step. Renders only while there's choreography left. */}
-          <PlanActivation />
+          {(!appMode || tab === 'today') && <PlanActivation />}
           {/* Lower dashboard — a full-width Recovery band on top, then Recent
               activities (wide, table) beside Upcoming planned (narrow, list).
               The two columns top-align and collapse to a single column on
               narrow widths. */}
-          <Recovery />
+          {(!appMode || tab === 'trends') && (
+            <>
+              {appMode && <Hero view="trends" />}
+              <Recovery />
+            </>
+          )}
           {/* [&>*]:min-w-0 stops the fr tracks blowing out wider than the shared
               max-w-5xl width — without it the table/badges force the columns
               (and the section's right edge) past the dashboard's right margin. */}
-          <div className="grid grid-cols-1 gap-5 lg:grid-cols-[1.5fr_1fr] lg:items-start [&>*]:min-w-0">
-            <RecentActivities />
-            <PlannedWorkouts />
-          </div>
+          {(!appMode || tab === 'activities') && (
+            <div className="grid grid-cols-1 gap-4 md:gap-5 lg:grid-cols-[1.5fr_1fr] lg:items-start [&>*]:min-w-0">
+              <RecentActivities />
+              <PlannedWorkouts />
+            </div>
+          )}
         </main>
 
         {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
         {pacerOpen && <PacerModal onClose={() => setPacerOpen(false)} />}
-        <ChatWidget />
+        <ChatWidget appMode={appMode} active={!appMode || tab === 'coach'} />
+        {appMode && (
+          <nav className="app-tabs fixed inset-x-0 bottom-0 z-30 grid grid-cols-4 border-t border-line bg-surface-1/95 backdrop-blur" aria-label="App sections">
+            {tabs.map(([key, icon, label]) => (
+              <button
+                key={key}
+                onClick={() => setTab(key)}
+                className={`flex min-w-0 flex-col items-center gap-1 py-2 font-body text-nano font-semibold uppercase tracking-[0.08em] ${tab === key ? 'text-acc' : 'text-ink-muted'}`}
+                aria-current={tab === key ? 'page' : undefined}
+              >
+                <Icon name={icon} className="text-xl" />
+                {label}
+              </button>
+            ))}
+          </nav>
+        )}
       </div>
     </div>
     </AccentProvider>

@@ -73,11 +73,11 @@ function MetricModal({ metric, rows, onClose }) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-4 backdrop-blur-sm sm:p-8"
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-0 backdrop-blur-sm sm:p-8"
       onClick={onClose}
     >
       <div
-        className="my-auto flex w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-line bg-surface-1 shadow-xl"
+        className="mobile-sheet my-auto flex w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-line bg-surface-1 shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
         <header className="flex items-center justify-between gap-3 border-b border-line px-5 py-4">
@@ -97,7 +97,7 @@ function MetricModal({ metric, rows, onClose }) {
             ✕
           </button>
         </header>
-        <div className="px-5 py-5">
+        <div className="min-h-0 flex-1 px-3 py-5 sm:px-5">
           <ResponsiveContainer width="100%" height={320}>
             <LineChart data={rows} margin={{ top: 8, right: 12, bottom: 0, left: -4 }}>
               <CartesianGrid strokeDasharray="3 3" stroke={GRID} vertical={false} />
@@ -134,12 +134,12 @@ export default function Recovery() {
 
   return (
     <section className="overflow-hidden rounded-xl border border-line bg-surface-1">
-      <div className="p-5">
+      <div className="p-4 sm:p-5">
         <StateWrap loading={loading} error={error} empty={!data || !data.length}>
           {data && (
             <div className="flex flex-col gap-x-6 gap-y-4 lg:flex-row lg:items-center lg:justify-between">
               {/* Left: title + the two trend sparklines side by side. */}
-              <div className="flex items-center gap-5">
+              <div className="flex flex-wrap items-center gap-4 sm:gap-5">
                 <div className="shrink-0">
                   <h2 className="font-display text-[0.8125rem] font-bold uppercase tracking-[0.14em] text-ink">
                     Recovery trends
@@ -179,8 +179,21 @@ export default function Recovery() {
 
       {/* Full day-by-day history — collapsed by default, unfolds below the band. */}
       {data && showHistory && (
-        <div className="overflow-x-auto border-t border-line px-5 py-4">
-          <table className="w-full min-w-[28rem]">
+        <div className="border-t border-line px-4 py-4 sm:px-5">
+          <div className="space-y-2 md:hidden">
+            {shown.map((r) => (
+              <div key={r.calendar_date} className="rounded-lg border border-line p-3">
+                <div className="font-mono text-xs text-ink">{shortDate(r.calendar_date)}</div>
+                <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-2">
+                  <StripStat label="HRV" value={r.hrv_last_night ?? '-'} />
+                  <StripStat label="Rest HR" value={r.resting_hr != null ? Math.round(r.resting_hr) : '-'} />
+                  <StripStat label="Sleep" value={r.sleep_score ?? '-'} />
+                  <StripStat label="Readiness" value={r.readiness_score ?? '-'} />
+                </div>
+              </div>
+            ))}
+          </div>
+          <table className="hidden w-full md:table">
             <thead>
               <tr className="text-left">
                 {['Date', 'HRV', 'Rest HR', 'Sleep', 'Readiness'].map((h) => (

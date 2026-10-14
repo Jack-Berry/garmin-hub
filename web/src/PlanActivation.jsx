@@ -185,7 +185,7 @@ export function ActivationFlow({ variant = 'card', expectPlanId = null }) {
 
   const body = (
     <>
-      <div className="flex items-baseline justify-between">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
         <div>
           <h2 className="font-display text-sm font-bold uppercase tracking-[0.1em] text-ink">
             {complete ? 'Plan live' : cancelStep ? 'Plan on Garmin — retire Runna' : 'Activate plan'}
@@ -232,7 +232,7 @@ export function ActivationFlow({ variant = 'card', expectPlanId = null }) {
               “Runna’s already gone” below if you’ve definitely cancelled.
             </p>
           )}
-          <div className="flex items-center gap-3">
+          <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-center">
             <button
               onClick={refreshAfterCancel}
               disabled={phase !== 'idle'}
@@ -280,8 +280,8 @@ export function ActivationFlow({ variant = 'card', expectPlanId = null }) {
               );
             })}
           </div>
-          <div className="mt-3 flex items-center justify-between">
-            <p className="max-w-[65%] text-xs leading-relaxed text-ink-muted">
+          <div className="mt-3 flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-xs leading-relaxed text-ink-muted sm:max-w-[65%]">
               {hasRunna
                 ? `Pushes each session to Garmin one at a time. ${plan.runna_remaining} Runna workout${plan.runna_remaining === 1 ? '' : 's'} overlap this plan — Runna stays untouched until every session has landed, then you’ll be prompted to cancel it.`
                 : 'Pushes each session to Garmin one at a time. No Runna workouts overlap this plan — it goes live as soon as every session has landed.'}

@@ -20,9 +20,9 @@ function PlannedRow({ w, onChanged }) {
   };
 
   return (
-    <li className="flex items-center justify-between gap-3 py-2">
+    <li className="flex flex-col items-stretch gap-3 py-3 sm:flex-row sm:items-center sm:justify-between sm:py-2">
       <div className="min-w-0">
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
           <span className="truncate font-body text-sm font-medium text-ink">{w.title}</span>
           {w.is_race ? <Badge tone="race">Race</Badge> : null}
           {overridden ? <Badge tone="slate">manual</Badge> : null}
@@ -36,7 +36,7 @@ function PlannedRow({ w, onChanged }) {
           {w.estimated_distance_m != null && <span> · {km(w.estimated_distance_m)}</span>}
         </div>
       </div>
-      <div className="flex shrink-0 items-center gap-2">
+      <div className="flex shrink-0 items-center justify-between gap-2 sm:justify-end">
         <button
           onClick={() => set(w.is_race ? 0 : 1)}
           disabled={busy}
