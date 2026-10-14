@@ -18,7 +18,7 @@ function ForgetButton({ onClick }) {
 
 // Facts the coach has silently remembered from chats. This is deliberately
 // separate from Settings because it is conversation context, not a preference.
-export default function CoachMemory({ onClose }) {
+export default function CoachMemory({ onClose, appMode = false }) {
   const { data, loading, error } = useFetch(() => api.coachMemory());
   const [facts, setFacts] = useState(null);
   const [delError, setDelError] = useState(null);
@@ -35,7 +35,10 @@ export default function CoachMemory({ onClose }) {
   };
 
   return (
-    <div className="absolute inset-0 z-10 flex flex-col bg-surface-1">
+    <div
+      className="absolute inset-0 z-10 flex flex-col bg-surface-1"
+      style={appMode ? { paddingTop: 'env(safe-area-inset-top)' } : undefined}
+    >
       <header className="flex items-center justify-between border-b border-line px-4 py-3">
         <div className="border-l-2 border-l-acc pl-3">
           <h3 className="font-display text-label font-bold uppercase tracking-[0.1em] text-ink">

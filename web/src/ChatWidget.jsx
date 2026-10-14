@@ -426,13 +426,22 @@ export default function ChatWidget({ appMode = false, active = true }) {
         </div>
         <div className="flex items-center gap-1">
           {planning ? (
-            <button
-              onClick={() => enterMode('chat')}
-              disabled={pending}
-              className="rounded-lg border border-line px-2 py-1 text-xs text-ink-secondary transition hover:bg-surface-2 disabled:opacity-50"
-            >
-              Exit planning
-            </button>
+            <>
+              <button
+                onClick={() => setMemoryOpen(true)}
+                title="View what the coach remembers"
+                className="rounded-lg border border-line px-2 py-1 text-xs text-ink-secondary transition hover:bg-surface-2"
+              >
+                Memory
+              </button>
+              <button
+                onClick={() => enterMode('chat')}
+                disabled={pending}
+                className="rounded-lg border border-line px-2 py-1 text-xs text-ink-secondary transition hover:bg-surface-2 disabled:opacity-50"
+              >
+                Exit planning
+              </button>
+            </>
           ) : (
             <>
               <button
@@ -683,7 +692,7 @@ export default function ChatWidget({ appMode = false, active = true }) {
           </div>
         </div>
       )}
-      {memoryOpen && <CoachMemory onClose={() => setMemoryOpen(false)} />}
+      {memoryOpen && <CoachMemory appMode={appMode} onClose={() => setMemoryOpen(false)} />}
     </div>
   );
 }

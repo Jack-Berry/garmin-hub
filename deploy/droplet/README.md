@@ -154,8 +154,8 @@ VITE_API_SECRET=<same production API secret>
 Run `bash deploy/local-macos/install.sh`. With a non-local `VITE_API_BASE`, the
 installer detects hosted mode and rebuilds/restarts only the web agent. It never
 copies or loads the local API, ingest, or daily agents. Move any existing local
-plists out of
-`~/Library/LaunchAgents` keeps them disabled after login. Leave the web plist
+plists out of `~/Library/LaunchAgents` to keep them disabled after login. Leave
+the web plist
 in place:
 
 ```sh

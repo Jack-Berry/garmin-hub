@@ -23,12 +23,21 @@ run_cmd() {
   fi
 }
 
-mkdir -p "$LA" "$HOME/Library/Logs"
+if [ "$DRY_RUN" -eq 1 ]; then
+  echo "+ mkdir -p $LA $HOME/Library/Logs"
+else
+  mkdir -p "$LA" "$HOME/Library/Logs"
+fi
 
 # Hosted Mac cutover: the bundle talks to the droplet, so only the local web
 # preview agent belongs on this Mac. Do not print the value because this file
 # also carries the API secret in normal installations.
 API_BASE="$(awk -F= '/^VITE_API_BASE=/{sub(/^[^=]*=/, ""); print; exit}' "$REPO/web/.env.local" 2>/dev/null || true)"
+API_BASE="${API_BASE//$'\r'/}"
+case "$API_BASE" in
+  \"*\") API_BASE="${API_BASE:1:${#API_BASE}-2}" ;;
+  \'*\') API_BASE="${API_BASE:1:${#API_BASE}-2}" ;;
+esac
 case "$API_BASE" in
   ""|http://localhost|http://localhost:*|https://localhost|https://localhost:*|http://127.0.0.1|http://127.0.0.1:*|https://127.0.0.1|https://127.0.0.1:*) HOSTED=0 ;;
   *) HOSTED=1 ;;
@@ -80,7 +89,11 @@ for l in $LABELS; do
     launchctl unload    "$LA/com.garminhub.$l.plist" 2>/dev/null || true
     launchctl load -w   "$LA/com.garminhub.$l.plist"
   fi
-  echo "    loaded com.garminhub.$l"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "+ would load com.garminhub.$l"
+  else
+    echo "    loaded com.garminhub.$l"
+  fi
 done
 
 echo

@@ -34,7 +34,7 @@ export default function GarminRecords() {
           <p className="mt-1 font-body text-micro text-ink-muted">Predicted times at current fitness</p>
           <div className="mt-2">
             <StateWrap loading={preds.loading} error={preds.error} empty={preds.data === null}>
-              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+              <div className="grid min-w-0 grid-cols-2 gap-2">
                 {(preds.data?.predictions || []).map((p) => <RecordCard key={p.label} label={p.label} value={p.display} accent />)}
               </div>
               {preds.data?.calendar_date && <p className="mt-2 font-mono text-nano text-ink-muted">As of {preds.data.calendar_date}</p>}

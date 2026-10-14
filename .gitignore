@@ -35,6 +35,7 @@ yarn-error.log*
 .pnpm-debug.log*
 dist/
 build/
+.stage10b-evidence/
 .cache/
 
 # --- Env / tooling ---
