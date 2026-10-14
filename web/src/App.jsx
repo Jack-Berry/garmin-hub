@@ -4,7 +4,7 @@ import Hero from './sections/Hero';
 import RecentActivities from './sections/RecentActivities';
 import Recovery from './sections/Recovery';
 import PlannedWorkouts from './sections/PlannedWorkouts';
-import GarminRecords from './Records';
+import { PersonalRecords } from './Records';
 import SettingsModal from './SettingsModal';
 import PacerModal from './PacerModal';
 import ChatWidget from './ChatWidget';
@@ -325,9 +325,9 @@ export default function App() {
               narrow widths. */}
           {(!appMode || tab === 'trends') && (
             <>
+              {appMode && <PersonalRecords />}
               {appMode && <Hero view="trends" />}
               <Recovery />
-              {appMode && <GarminRecords />}
             </>
           )}
           {/* [&>*]:min-w-0 stops the fr tracks blowing out wider than the shared
@@ -335,11 +335,11 @@ export default function App() {
               (and the section's right edge) past the dashboard's right margin. */}
           {(!appMode || tab === 'activities') && (
             <div className="grid grid-cols-1 gap-4 md:gap-5 lg:grid-cols-[1.5fr_1fr] lg:items-start [&>*]:min-w-0">
-              <RecentActivities />
               <div className="space-y-4 md:space-y-5">
-                <PlannedWorkouts />
-                {!appMode && <GarminRecords />}
+                <RecentActivities />
+                {!appMode && <PersonalRecords />}
               </div>
+              <PlannedWorkouts />
             </div>
           )}
         </main>

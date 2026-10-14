@@ -9,6 +9,7 @@ import WeekStrip from '../hero/WeekStrip';
 import PaceSlide from '../hero/PaceSlide';
 import LoadSlide from '../hero/LoadSlide';
 import BalanceSlide from '../hero/BalanceSlide';
+import { PredictionsRow } from '../Records';
 
 // Auto-cycling carousel: advances every 12s, pauses on hover / focus / any
 // interaction, with manual arrows + clickable dots. Slides are kept mounted
@@ -193,6 +194,7 @@ export default function Hero({ view = 'all' }) {
             <StateWrap {...merge(recovery, acts)}>
               <MetricRow recovery={recovery.data} sevenDayKm={sevenDayKm} />
             </StateWrap>
+            <PredictionsRow />
           </div>}
         </section>
       )}
@@ -202,6 +204,7 @@ export default function Hero({ view = 'all' }) {
           <StateWrap {...merge(recovery, acts)}>
             <MetricRow recovery={recovery.data} sevenDayKm={sevenDayKm} />
           </StateWrap>
+          <PredictionsRow />
         </section>
       )}
 
