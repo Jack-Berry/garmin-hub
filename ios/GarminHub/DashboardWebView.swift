@@ -10,7 +10,7 @@ struct DashboardWebView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.setURLSchemeHandler(HubSchemeHandler(apiKey: apiKey), forURLScheme: "hub")
-        let literal = String(data: try! JSONSerialization.data(withJSONObject: apiKey), encoding: .utf8)!
+        let literal = String(data: try! JSONSerialization.data(withJSONObject: apiKey, options: .fragmentsAllowed), encoding: .utf8)!
         config.userContentController.addUserScript(WKUserScript(
             source: "window.__HUB_API_KEY__ = \(literal);",
             injectionTime: .atDocumentStart,
