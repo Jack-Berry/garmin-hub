@@ -140,6 +140,8 @@ export default function App() {
   const [pacerOpen, setPacerOpen] = useState(false);
   // Bumping this remounts <main>, so all sections refetch from the API.
   const [refreshKey, setRefreshKey] = useState(0);
+  const appShell = useRef(null);
+  const appScroll = useRef(null);
   const pullStart = useRef(null);
   const pullAmount = useRef(0);
   const [pullDistance, setPullDistance] = useState(0);
@@ -196,6 +198,20 @@ export default function App() {
     if (appMode) postNative({ action: 'theme', dark });
   }, [appMode, dark]);
 
+  useEffect(() => {
+    if (!appMode) return;
+    const shell = appShell.current;
+    const stopNativeOverscroll = (event) => {
+      if (!pullStart.current || event.touches.length !== 1) return;
+      const touch = event.touches[0];
+      const dx = Math.abs(touch.clientX - pullStart.current.x);
+      const dy = touch.clientY - pullStart.current.y;
+      if (dy > 8 && dy > dx) event.preventDefault();
+    };
+    shell?.addEventListener('touchmove', stopNativeOverscroll, { passive: false });
+    return () => shell?.removeEventListener('touchmove', stopNativeOverscroll);
+  }, [appMode]);
+
   const tabs = [
     ['today', 'calendar', 'Today'],
     ['trends', 'chart-line', 'Trends'],
@@ -210,7 +226,25 @@ export default function App() {
   const pullHandlers = appMode ? {
     onTouchStart: (event) => {
       const touch = event.touches[0];
-      if (event.currentTarget.scrollTop <= 0 && event.touches.length === 1) {
+      const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+      const modalOpen = document.querySelector('.mobile-sheet, [role="dialog"], [aria-modal="true"]');
+      pullStart.current = null;
+      pullAmount.current = 0;
+      setPullDistance(0);
+      let nestedScroller = false;
+      let node = target;
+      while (node && node !== event.currentTarget) {
+        if (node !== appScroll.current) {
+          const { overflowY } = getComputedStyle(node);
+          if (/(auto|scroll|overlay)/.test(overflowY) && node.scrollHeight > node.clientHeight + 1) {
+            if (node.scrollTop > 0) return;
+            nestedScroller = true;
+          }
+        }
+        node = node.parentElement;
+      }
+      if (!modalOpen && !target?.closest('.mobile-sheet, [role="dialog"], [aria-modal="true"], .fixed.inset-0')
+          && !nestedScroller && appScroll.current?.scrollTop <= 0 && event.touches.length === 1) {
         pullStart.current = { x: touch.clientX, y: touch.clientY };
       }
     },
@@ -244,8 +278,8 @@ export default function App() {
   return (
     <AccentProvider dark={dark}>
     <div className={dark ? 'dark' : ''}>
-      <div className={`min-h-screen bg-surface-0 text-ink transition-colors ${appMode ? 'app-shell' : ''}`}>
-        <div className={appMode ? 'app-scroll' : ''} {...pullHandlers}>
+      <div ref={appShell} className={`min-h-screen bg-surface-0 text-ink transition-colors ${appMode ? 'app-shell' : ''}`} {...pullHandlers}>
+        <div ref={appScroll} className={appMode ? 'app-scroll' : ''}>
         {appMode && (
           <div
             className="app-pull-indicator"
