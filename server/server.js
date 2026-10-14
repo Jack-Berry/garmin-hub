@@ -30,17 +30,17 @@ if (!API_SECRET) {
   process.exit(1);
 }
 
-// JSON body parsing + CORS pinned to the known frontend origins (no wildcard).
+// CORS is pinned to the known frontend origins (no wildcard).
 // The custom auth header makes browsers preflight every request, so OPTIONS is
 // answered here, BEFORE the auth gate (preflights never carry custom headers).
 const ORIGINS = (process.env.CORS_ORIGINS || DEFAULT_ORIGINS.join(','))
   .split(',').map((s) => s.trim());
-app.use(express.json());
 app.use(cors(ORIGINS));
 
 // The one auth gate for every /api route. Kept as a single middleware so it's
 // trivially replaceable if hosting brings its own auth (e.g. Cloudflare Access).
 app.use('/api', keyGate(API_SECRET));
+app.use(express.json());
 
 // Curated column lists, derived once from the schema (everything but raw_json).
 // Async, so they're awaited in start() below — routes never see them empty.

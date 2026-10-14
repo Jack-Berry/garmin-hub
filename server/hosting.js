@@ -1,4 +1,5 @@
 const path = require('path');
+const crypto = require('crypto');
 const express = require('express');
 
 const DEFAULT_ORIGINS = [
@@ -22,8 +23,10 @@ function cors(origins = DEFAULT_ORIGINS) {
 }
 
 function keyGate(secret) {
+  const expected = Buffer.from(secret);
   return (req, res, next) => {
-    if (req.get('X-Api-Key') !== secret) {
+    const supplied = Buffer.from(req.get('X-Api-Key') || '');
+    if (supplied.length !== expected.length || !crypto.timingSafeEqual(supplied, expected)) {
       return res.status(401).json({ error: 'unauthorized' });
     }
     next();

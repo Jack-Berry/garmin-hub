@@ -14,7 +14,7 @@ struct DashboardWebView: UIViewRepresentable {
         config.userContentController.addUserScript(WKUserScript(
             source: "window.__HUB_API_KEY__ = \(literal);",
             injectionTime: .atDocumentStart,
-            forMainFrameOnly: false
+            forMainFrameOnly: true
         ))
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
@@ -41,10 +41,12 @@ struct DashboardWebView: UIViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            if (error as? URLError)?.code == .cancelled { return }
             onFailure("The dashboard could not be loaded. Check the droplet and try again.")
         }
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            if (error as? URLError)?.code == .cancelled { return }
             onFailure("The dashboard could not be reached. Check your connection and try again.")
         }
 
@@ -75,7 +77,12 @@ final class HubSchemeHandler: NSObject, WKURLSchemeHandler {
         guard let remote = parts.url else { schemeTask.didFailWithError(URLError(.badURL)); return }
         var request = URLRequest(url: remote)
         request.httpMethod = schemeTask.request.httpMethod
-        request.httpBody = schemeTask.request.httpBody
+        do {
+            request.httpBody = try Self.bodyData(from: schemeTask.request)
+        } catch {
+            schemeTask.didFailWithError(error)
+            return
+        }
         for (name, value) in schemeTask.request.allHTTPHeaderFields ?? [:] {
             request.setValue(value, forHTTPHeaderField: name)
         }
@@ -112,5 +119,21 @@ final class HubSchemeHandler: NSObject, WKURLSchemeHandler {
     private func finish(_ identifier: ObjectIdentifier) -> Bool {
         lock.lock(); defer { lock.unlock() }
         return tasks.removeValue(forKey: identifier) != nil
+    }
+
+    private static func bodyData(from request: URLRequest) throws -> Data? {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return nil }
+
+        stream.open()
+        defer { stream.close() }
+        var body = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            if count == 0 { return body }
+            if count < 0 { throw stream.streamError ?? URLError(.cannotDecodeContentData) }
+            body.append(buffer, count: count)
+        }
     }
 }

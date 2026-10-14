@@ -16,6 +16,7 @@ attic/*.db
 
 # --- Data dumps (probe/debug JSON) ---
 *_dump.json
+/deploy/droplet/backups/
 
 # --- Python ---
 __pycache__/

@@ -65,7 +65,7 @@ The hosted schema comes only from `db/schema.pg.sql`. Dump data from the Mac,
 copy the dump to the droplet, and restore it after the first compose start:
 
 ```sh
-pg_dump -h localhost -U postgres -d garminhub --data-only -Fc \
+pg_dump -h localhost -d garminhub --data-only -Fc \
   -f garminhub-data.dump
 scp garminhub-data.dump deploy@178.128.168.63:/home/deploy/garmin-hub/
 ```
@@ -86,13 +86,15 @@ droplet as a migration checkpoint.
 
 ## Cron and backups
 
-Install these entries with `crontab -e` as `deploy`. The daily job runs ingest
-first and skips the brief if ingest fails. All HTTP errors fail the brief step.
+Install these entries with `crontab -e` as `deploy`. This host stays on UTC
+because it also runs other projects. Debian cron ignores `CRON_TZ`, so the
+daily job is invoked at both possible UTC hours and proceeds only when the
+London hour is 10. It runs ingest first and skips the brief if ingest fails.
+All HTTP errors fail the brief step.
 
 ```cron
-CRON_TZ=Europe/London
 17 1-23/2 * * * /home/deploy/garmin-hub/deploy/droplet/jobs.sh ingest >> /home/deploy/garmin-hub/ingest.log 2>&1
-0 10 * * * /home/deploy/garmin-hub/deploy/droplet/jobs.sh daily >> /home/deploy/garmin-hub/daily.log 2>&1
+0 9,10 * * * /home/deploy/garmin-hub/deploy/droplet/jobs.sh daily >> /home/deploy/garmin-hub/daily.log 2>&1
 15 3 * * * /home/deploy/garmin-hub/deploy/droplet/jobs.sh backup >> /home/deploy/garmin-hub/backup.log 2>&1
 ```
 
@@ -149,15 +151,32 @@ VITE_API_BASE=https://hub.berrydev.co.uk
 VITE_API_SECRET=<same production API secret>
 ```
 
-Run `bash deploy/local-macos/install.sh`, then unload the local jobs again since
-the installer reloads all agents:
+Run `bash deploy/local-macos/install.sh`, then unload and park the local jobs
+since the installer reloads all agents. Moving their plists out of
+`~/Library/LaunchAgents` keeps them disabled after login. Leave the web plist
+in place:
 
 ```sh
-launchctl unload "$HOME/Library/LaunchAgents/com.garminhub.api.plist"
-launchctl unload "$HOME/Library/LaunchAgents/com.garminhub.ingest.plist" 2>/dev/null || true
-launchctl unload "$HOME/Library/LaunchAgents/com.garminhub.daily.plist"
+parked="$HOME/Library/LaunchAgents/garminhub-hosted-disabled"
+mkdir -p "$parked"
+for label in api ingest daily; do
+  plist="$HOME/Library/LaunchAgents/com.garminhub.$label.plist"
+  launchctl unload "$plist" 2>/dev/null || true
+  mv "$plist" "$parked/"
+done
 ```
 
 To return to fully local development, set `VITE_API_BASE=http://localhost:3001`
-and the local `VITE_API_SECRET`, run `install.sh`, and keep all local agents
-loaded. No source edit is needed in either direction.
+and the local `VITE_API_SECRET`, restore the three parked plists, then run the
+installer to rebuild the dashboard and reload all four agents:
+
+```sh
+parked="$HOME/Library/LaunchAgents/garminhub-hosted-disabled"
+for label in api ingest daily; do
+  mv "$parked/com.garminhub.$label.plist" "$HOME/Library/LaunchAgents/"
+done
+rmdir "$parked"
+bash deploy/local-macos/install.sh
+```
+
+No source edit is needed in either direction.

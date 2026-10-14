@@ -14,8 +14,14 @@ async function fixture() {
   const app = express();
   app.use(cors(DEFAULT_ORIGINS));
   app.use('/api', keyGate(SECRET));
+  app.use(express.json());
   app.get('/api/health', (req, res) => res.json({ ok: true }));
+  app.post('/api/echo', (req, res) => res.json(req.body));
   app.use('/api', (req, res) => res.sendStatus(404));
+  app.use((err, req, res, next) => {
+    if (err instanceof SyntaxError) return res.sendStatus(400);
+    next(err);
+  });
   mountDashboard(app, SECRET, dist);
   const server = await new Promise((resolve) => {
     const listening = app.listen(0, '127.0.0.1', () => resolve(listening));
@@ -31,11 +37,17 @@ test('host defaults to loopback and respects HOST', () => {
   assert.equal(resolveHost({ HOST: '0.0.0.0' }), '0.0.0.0');
 });
 
-test('401 without key on /api/health and /; 200 with key on both', async () => {
+test('gate rejects missing and wrong keys of either length, and accepts the right key', async () => {
   const app = await fixture();
   try {
     assert.equal((await fetch(`${app.base}/api/health`)).status, 401);
     assert.equal((await fetch(`${app.base}/`)).status, 401);
+    assert.equal((await fetch(`${app.base}/api/health`, {
+      headers: { 'X-Api-Key': 'focused-test-kex' },
+    })).status, 401);
+    assert.equal((await fetch(`${app.base}/api/health`, {
+      headers: { 'X-Api-Key': 'short' },
+    })).status, 401);
     assert.equal((await fetch(`${app.base}/api/health`, {
       headers: { 'X-Api-Key': SECRET },
     })).status, 200);
@@ -62,6 +74,24 @@ test('CORS allows localhost and hub://dashboard before auth', async () => {
       method: 'OPTIONS', headers: { Origin: 'https://example.com' },
     });
     assert.equal(denied.headers.get('access-control-allow-origin'), null);
+  } finally {
+    await app.close();
+  }
+});
+
+test('API gate runs before JSON parsing', async () => {
+  const app = await fixture();
+  try {
+    const options = {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{',
+    };
+    assert.equal((await fetch(`${app.base}/api/echo`, options)).status, 401);
+    assert.equal((await fetch(`${app.base}/api/echo`, {
+      ...options,
+      headers: { ...options.headers, 'X-Api-Key': SECRET },
+    })).status, 400);
   } finally {
     await app.close();
   }
