@@ -17,6 +17,7 @@ const {
 const { generateBrief, generateDetailedReport, generateDayInsight, chatReply, planReply } = require('./coach');
 const { pacerChat } = require('./pacer');
 const { DEFAULT_ORIGINS, resolveHost, cors, keyGate, mountDashboard } = require('./hosting');
+const { createHealthHandler, createStatusHandler } = require('./system-status');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -64,7 +65,13 @@ const handler = (fn) => async (req, res) => {
   }
 };
 
-app.get('/api/health', (req, res) => res.json({ ok: true }));
+app.get('/api/health', createHealthHandler(db));
+
+app.get('/api/status', createStatusHandler({
+  db,
+  statusDir: process.env.JOB_STATUS_DIR || path.resolve(__dirname, '..', 'deploy', 'droplet', 'job-status'),
+  backupDir: process.env.BACKUP_DIR || path.resolve(__dirname, '..', 'deploy', 'droplet', 'backups'),
+}));
 
 // List activities, most recent first. ?limit (default 30), ?from, ?to on date.
 app.get('/api/activities', handler(async (req, res) => {

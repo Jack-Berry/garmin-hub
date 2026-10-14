@@ -8,7 +8,7 @@ if [ "${1:-}" = "--dry-run" ]; then
   DRY_RUN=1
 fi
 
-REPO="/Users/jackberry/Code/Projects/garmin-hub"
+REPO="${GARMIN_HUB_REPO:-/Users/jackberry/Code/Projects/garmin-hub}"
 DEPLOY="$REPO/deploy/local-macos"
 LA="$HOME/Library/LaunchAgents"
 LABELS="api web daily ingest"
@@ -44,20 +44,23 @@ case "$API_BASE" in
 esac
 
 if [ "$HOSTED" -eq 1 ]; then
-  echo "Hosted mode: building the web bundle and restarting only com.garminhub.web."
+  echo "Hosted mode: building web and installing web plus offsite."
   run_cmd bash -c "cd '$REPO/web' && npm run build"
   run_cmd cp "$DEPLOY/com.garminhub.web.plist" "$LA/"
-  if [ "$DRY_RUN" -eq 1 ]; then
-    echo "+ launchctl unload $LA/com.garminhub.web.plist (ignored if absent)"
-  else
-    launchctl unload "$LA/com.garminhub.web.plist" 2>/dev/null || true
-  fi
-  run_cmd launchctl load -w "$LA/com.garminhub.web.plist"
+  run_cmd cp "$DEPLOY/com.garminhub.offsite.plist" "$LA/"
+  for l in web offsite; do
+    if [ "$DRY_RUN" -eq 1 ]; then
+      echo "+ launchctl unload/load com.garminhub.$l"
+    else
+      launchctl unload "$LA/com.garminhub.$l.plist" 2>/dev/null || true
+      launchctl load -w "$LA/com.garminhub.$l.plist"
+    fi
+  done
   echo "Hosted mode leaves api, ingest and daily untouched."
   exit 0
 fi
 
-echo "Local mode: installing and reloading api, web, daily and ingest."
+echo "Local mode: installing and reloading api, web, daily and ingest. Offsite is unchanged."
 
 echo "[1/4] Stopping any manually-started dev servers (node server.js / vite preview)…"
 if [ "$DRY_RUN" -eq 1 ]; then

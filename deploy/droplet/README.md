@@ -118,6 +118,45 @@ Backups are custom-format `pg_dump` files under `deploy/droplet/backups` and
 files older than 14 days are removed. Copy backups off the droplet and test a
 restore periodically.
 
+Each host job writes its latest result atomically under
+`deploy/droplet/job-status`. The app sees that directory at
+`/run/garmin-hub-status` and the backups directory at
+`/var/lib/garmin-hub/backups`; both mounts are read-only. The key-gated
+`GET /api/status` endpoint combines these files with `ingest_state`, today's
+daily coach note, and the newest dump. `GET /api/health` also verifies the read
+database pool, so a database outage makes the container health check fail.
+
+The Mac offsite pull records its result through the narrow direct command:
+
+```sh
+deploy/droplet/jobs.sh mark offsite ok "snapshot verified"
+deploy/droplet/jobs.sh mark offsite fail "pull failed"
+```
+
+Do not use `mark` for ingest, daily, or backup. Those commands own their own
+status. A skipped daily invocation outside the 10:00 London hour leaves the
+previous status untouched.
+
+### Restore from a Mac snapshot
+
+Mac snapshots live under `~/Backups/garmin-hub/<timestamp>`. Choose a verified
+snapshot and copy its dump to the checkout, then follow the normal restore
+sequence below with that dump. In summary:
+
+```sh
+snapshot="$HOME/Backups/garmin-hub/<timestamp>"
+scp "$snapshot/deploy/droplet/backups/<backup>.dump" \
+  deploy@178.128.168.63:/home/deploy/garmin-hub/restore.dump
+docker cp restore.dump garmin-hub-postgres:/tmp/restore.dump
+docker exec garmin-hub-postgres pg_restore -U postgres -d garminhub \
+  --data-only --disable-triggers /tmp/restore.dump
+```
+
+Restore `deploy/droplet/.env` with mode 600 without printing it. Restore
+`ingest/.garth` into the named token volume using the Garmin token cache steps
+above, then ensure the cache remains owned by uid 65532. Remove temporary
+copies from the droplet after the app and ingest have been verified.
+
 To restore, stop the app, preserve a fresh dump, recreate the database, apply
 the canonical schema, remove its one seeded row, then restore data only:
 

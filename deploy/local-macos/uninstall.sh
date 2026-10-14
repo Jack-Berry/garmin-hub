@@ -1,9 +1,9 @@
 #!/bin/bash
 # Tear down the Garmin Hub local always-on test deployment.
-# Stops + removes the three launchd services. Logs are left in place.
+# Stops and removes all Garmin Hub launchd services. Logs are left in place.
 LA="$HOME/Library/LaunchAgents"
 
-for l in api web daily; do
+for l in api web daily ingest offsite; do
   launchctl unload -w "$LA/com.garminhub.$l.plist" 2>/dev/null || true
   rm -f "$LA/com.garminhub.$l.plist"
   echo "removed com.garminhub.$l"

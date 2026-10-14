@@ -15,6 +15,13 @@ done
 echo "== Focused server tests =="
 node --test server/*.test.js
 
+echo "== Deployment script syntax and tests =="
+sh -n deploy/droplet/jobs.sh
+bash -n deploy/local-macos/offsite-backup.sh deploy/local-macos/install.sh deploy/local-macos/uninstall.sh
+bash deploy/droplet/jobs.test.sh
+bash deploy/local-macos/offsite-backup.test.sh
+bash deploy/local-macos/install.test.sh
+
 echo "== Coach trap eval dry run =="
 node server/eval/coach-traps.mjs --dry-run
 

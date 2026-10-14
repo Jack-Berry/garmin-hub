@@ -38,6 +38,7 @@ async function post(path, body) {
 
 export const api = {
   health: () => get('/api/health'),
+  status: () => get('/api/status'),
   activities: (params = {}) => get(`/api/activities${qs(params)}`),
   activity: (id) => get(`/api/activities/${id}`),
   planned: (params = {}) => get(`/api/planned${qs(params)}`),

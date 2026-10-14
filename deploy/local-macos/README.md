@@ -29,13 +29,36 @@ rebuilds the frontend, copies the plists, and loads all four services. Local
 mode means `VITE_API_BASE` is empty or points at localhost.
 
 When `VITE_API_BASE` points at a hosted URL, the installer detects hosted mode,
-builds the frontend, and installs and restarts only `com.garminhub.web`. It
-does not copy or load the API, ingest, or daily agents. Use `--dry-run` to
+builds the frontend, and installs and restarts `com.garminhub.web` plus
+`com.garminhub.offsite`. It does not copy or load the API, ingest, or daily
+agents. Use `--dry-run` to
 print the actions without running them.
 
 ```bash
 bash deploy/local-macos/install.sh --dry-run
 ```
+
+## Hosted offsite backups
+
+`com.garminhub.offsite` runs at 04:30 local time. It pulls the droplet database
+dumps, deployment environment, and Garmin token cache over ssh into a dated
+snapshot under `~/Backups/garmin-hub`. SSH uses `~/.ssh/id_ed25519` and
+`~/.ssh/known_hosts` with strict host checking. Snapshots have directory mode
+700 and file mode 600, use hard links to unchanged files in the previous
+snapshot, and are retained for 30 days.
+
+The script verifies the newest non-empty dump with `pg_restore --list` when
+that command is installed. It records success or failure in the droplet's
+offsite job status and logs through launchd to
+`~/Library/Logs/garmin-hub-offsite.log`. Preview the transfer without creating
+a snapshot or changing remote status:
+
+```bash
+bash deploy/local-macos/offsite-backup.sh --dry-run
+```
+
+The local-mode installer leaves the offsite agent unchanged. This preserves the
+parked hosted setup while running the local API, ingest, and daily services.
 
 - **API:** http://localhost:3001  (health: http://localhost:3001/api/health)
 - **Dashboard:** http://localhost:4173

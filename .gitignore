@@ -16,7 +16,10 @@ attic/*.db
 
 # --- Data dumps (probe/debug JSON) ---
 *_dump.json
-/deploy/droplet/backups/
+/deploy/droplet/backups/*
+!/deploy/droplet/backups/.gitkeep
+/deploy/droplet/job-status/*
+!/deploy/droplet/job-status/.gitkeep
 
 # --- Python ---
 __pycache__/
@@ -36,6 +39,7 @@ yarn-error.log*
 dist/
 build/
 .stage10b-evidence/
+.safety-net-evidence/
 .cache/
 
 # --- Env / tooling ---

@@ -11,6 +11,7 @@ import ChatWidget from './ChatWidget';
 import PlanActivation from './PlanActivation';
 import { Icon } from './ui';
 import { AccentProvider } from './accent';
+import StatusChip from './StatusChip';
 
 // How stale the data may be before opening the dashboard pulls it itself.
 // 30 minutes: long enough that a reload, a second tab or a quick tab-switch
@@ -39,7 +40,7 @@ const ago = (min) => {
 // gated server-side so only genuinely stale data costs a Garmin pull. The
 // "Updated N ago" label is the honest part: stale data now says so instead of
 // looking current.
-function RefreshButton({ className, onRefreshed }) {
+function RefreshButton({ className, onRefreshed, refreshKey }) {
   // 'idle' | 'running' | 'ok' | 'error'
   const [status, setStatus] = useState('idle');
   const [message, setMessage] = useState('');
@@ -111,6 +112,7 @@ function RefreshButton({ className, onRefreshed }) {
           {lastOk ? '' : 'Ingest issue · '}Updated {ago(age)}
         </span>
       )}
+      <StatusChip refreshKey={refreshKey} />
       <button
         onClick={() => refresh(false)}
         disabled={status === 'running'}
@@ -122,7 +124,7 @@ function RefreshButton({ className, onRefreshed }) {
           name={status === 'ok' ? 'check' : 'refresh'}
           className={status === 'running' ? 'animate-spin' : ''}
         />
-        {label}
+        <span className="hidden sm:inline">{label}</span>
       </button>
       {status === 'error' && (
         <p className="absolute right-0 top-full mt-1 w-56 text-right text-xs text-sem-red">{message}</p>
@@ -300,7 +302,7 @@ export default function App() {
               <p className="mt-1 hidden font-body text-nano uppercase tracking-[0.22em] text-ink-muted md:block">Running dashboard</p>
             </div>
             <div className="flex min-w-0 items-center gap-1.5 md:gap-2">
-              <RefreshButton className={topBtn} onRefreshed={() => setRefreshKey((k) => k + 1)} />
+              <RefreshButton className={topBtn} refreshKey={refreshKey} onRefreshed={() => setRefreshKey((k) => k + 1)} />
               <button onClick={() => setPacerOpen(true)} className={topBtn} aria-label="New pacer" title="Build a pacing workout">
                 <Icon name="stopwatch" /> <span className="hidden md:inline">New pacer</span>
               </button>
