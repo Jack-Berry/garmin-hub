@@ -45,7 +45,11 @@ dumps, deployment environment, and Garmin token cache over ssh into a dated
 snapshot under `~/Backups/garmin-hub`. SSH uses `~/.ssh/id_ed25519` and
 `~/.ssh/known_hosts` with strict host checking. Snapshots have directory mode
 700 and file mode 600, use hard links to unchanged files in the previous
-snapshot, and are retained for 30 days.
+snapshot, and are retained for 30 days. The token cache lives in the
+`garmin-hub-garth-cache` Docker volume, so it is streamed out of the running
+`garmin-hub` container with `tar` rather than copied from the checkout. The
+script runs under the system `/bin/bash` 3.2 that launchd uses, and its tests
+run it that way.
 
 The droplet verifies each archive with its matching Postgres 17 `pg_restore`
 before publishing it. The Mac pull checks the newest dump's `PGDMP` header and

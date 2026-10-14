@@ -9,6 +9,8 @@ REMOTE_ROOT=${GARMIN_HUB_REMOTE_ROOT:-/home/deploy/garmin-hub}
 BACKUP_ROOT=${GARMIN_HUB_BACKUP_ROOT:-$HOME/Backups/garmin-hub}
 SSH_KEY=${GARMIN_HUB_SSH_KEY:-$HOME/.ssh/id_ed25519}
 KNOWN_HOSTS=${GARMIN_HUB_KNOWN_HOSTS:-$HOME/.ssh/known_hosts}
+APP_CONTAINER=${GARMIN_HUB_APP_CONTAINER:-garmin-hub}
+GARTH_DIR=${GARMIN_HUB_GARTH_DIR:-/var/lib/garmin-hub/garth}
 STAMP=${GARMIN_HUB_SNAPSHOT_STAMP:-$(date +%Y-%m-%dT%H%M%S)}
 [[ "$STAMP" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{6}$ ]] || { echo "Invalid snapshot timestamp" >&2; exit 2; }
 SNAPSHOT="$BACKUP_ROOT/$STAMP"
@@ -28,6 +30,9 @@ mark_remote() {
 
 failed() {
   code=$?
+  # Bash 3.2 can report 0 here after an unbound-variable abort. Every success
+  # path disarms this trap first, so reaching it always means failure.
+  [ "$code" -ne 0 ] || code=1
   trap - EXIT
   [ -z "$dry_root" ] || rm -rf "$dry_root"
   if [ "$DRY_RUN" -eq 0 ]; then
@@ -61,18 +66,22 @@ fi
 
 backup_links=()
 env_links=()
-garth_links=()
 if [ -n "$previous" ]; then
   backup_links=(--link-dest="$previous/deploy/droplet/backups")
   env_links=(--link-dest="$previous/deploy/droplet")
-  garth_links=(--link-dest="$previous/ingest/.garth")
 fi
-rsync "${rsync_args[@]}" "${backup_links[@]}" \
+rsync "${rsync_args[@]}" ${backup_links[@]+"${backup_links[@]}"} \
   "$REMOTE:$REMOTE_ROOT/deploy/droplet/backups/" "$SNAPSHOT/deploy/droplet/backups/"
-rsync "${rsync_args[@]}" "${env_links[@]}" \
+rsync "${rsync_args[@]}" ${env_links[@]+"${env_links[@]}"} \
   "$REMOTE:$REMOTE_ROOT/deploy/droplet/.env" "$SNAPSHOT/deploy/droplet/.env"
-rsync "${rsync_args[@]}" "${garth_links[@]}" \
-  "$REMOTE:$REMOTE_ROOT/ingest/.garth/" "$SNAPSHOT/ingest/.garth/"
+# The Garmin token cache lives in a Docker volume, not the checkout, so stream
+# it out of the running app container.
+if [ "$DRY_RUN" -eq 0 ]; then
+  mkdir -p "$SNAPSHOT/ingest/.garth"
+  "${SSH[@]}" "$REMOTE" "docker exec $APP_CONTAINER tar -C $GARTH_DIR -cf - ." \
+    | tar -xf - -C "$SNAPSHOT/ingest/.garth"
+  [ -n "$(ls -A "$SNAPSHOT/ingest/.garth")" ] || { say "Garmin token cache is empty" >&2; exit 1; }
+fi
 
 if [ "$DRY_RUN" -eq 1 ]; then
   trap - EXIT

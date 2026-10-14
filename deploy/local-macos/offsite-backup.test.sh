@@ -28,13 +28,16 @@ case "$src" in
     printf '%s  garminhub-test.dump\n' "$hash" > "${dest%/}/garminhub-test.dump.sha256"
     ;;
   *.env) mkdir -p "$(dirname "$dest")"; printf 'private\n' > "$dest" ;;
-  *.garth/) mkdir -p "$dest"; printf token > "${dest%/}/token.json" ;;
 esac
 STUB
 cat > "$tmp/bin/ssh" <<'STUB'
 #!/bin/bash
 remote_command=${@: -1}
 eval "set -- $remote_command"
+if [ "$1" = docker ]; then
+  mkdir -p "$SSH_LOG.garth" && printf token > "$SSH_LOG.garth/garmin_tokens.json"
+  exec tar -C "$SSH_LOG.garth" -cf - .
+fi
 {
   for arg in "$@"; do printf '[%s]' "$arg"; done
   printf '\n'
@@ -48,6 +51,15 @@ common=(env PATH="$tmp/bin:$PATH" HOME="$tmp/home" SSH_LOG="$tmp/ssh.log" GARMIN
 grep -q 'Dry run complete' "$tmp/dry.log"
 [ ! -s "$tmp/ssh.log" ]
 cat "$tmp/dry.log"
+
+# First run: no earlier snapshot, so the --link-dest lists are empty. This
+# must work under the system /bin/bash 3.2 that launchd uses.
+GARMIN_HUB_SNAPSHOT_STAMP=2026-10-13T043000 env PATH="$tmp/bin:$PATH" HOME="$tmp/home" SSH_LOG="$tmp/ssh.log" \
+  GARMIN_HUB_BACKUP_ROOT="$tmp/first" /bin/bash "$repo/deploy/local-macos/offsite-backup.sh" > "$tmp/first.log"
+[ -f "$tmp/first/2026-10-13T043000/deploy/droplet/.env" ]
+[ -f "$tmp/first/2026-10-13T043000/ingest/.garth/garmin_tokens.json" ]
+grep -Fq '[mark][offsite][ok][snapshot 2026-10-13T043000 complete]' "$tmp/ssh.log"
+: > "$tmp/ssh.log"
 
 GARMIN_HUB_SNAPSHOT_STAMP=2026-10-14T043000 "${common[@]}" "$repo/deploy/local-macos/offsite-backup.sh" > "$tmp/run.log"
 snapshot="$tmp/home/Backups/garmin-hub/2026-10-14T043000"
