@@ -153,45 +153,115 @@ const lapSeconds = (lap) => lap.duration_s > 0
   ? Number(lap.duration_s)
   : lap.distance_m > 0 && lap.avg_speed_mps > 0 ? lap.distance_m / lap.avg_speed_mps : 0;
 
-const consume = (laps, start, step) => {
+// Active laps laid end to end on one distance axis. Pace inside a lap is
+// treated as constant, so any span of the axis can be timed pro rata.
+const lapAxis = (laps) => {
   let distance = 0;
   let seconds = 0;
-  let index = start;
-  const consumed = [];
-  while (index < laps.length) {
-    const lap = laps[index];
-    consumed.push(lap);
-    distance += Number(lap.distance_m || 0);
-    seconds += lapSeconds(lap);
-    index += 1;
-    if (step.distance_m > 0 && distance + 1 >= step.distance_m) break;
-    if (step.duration_s > 0 && seconds + 1 >= step.duration_s) break;
-    if (!(step.distance_m > 0) && !(step.duration_s > 0)) break;
-  }
-  return { consumed, distance, seconds, next: index };
+  return laps.map((lap) => {
+    const row = { lap, d0: distance, t0: seconds, d: Number(lap.distance_m), t: lapSeconds(lap) };
+    distance += row.d;
+    seconds += row.t;
+    return row;
+  });
 };
 
-// Walk every work step in order, including untargeted steps, and consume the
-// active laps covered by that step's distance or time. Only targeted steps are
-// returned for grading. Their actual pace is weighted by distance across every
-// consumed lap, so a 4 km planned rep is judged on all four 1 km auto-laps.
+const distanceAfter = (axis, fromD, durationS) => {
+  let left = durationS;
+  for (const row of axis) {
+    const from = Math.max(fromD, row.d0);
+    if (from >= row.d0 + row.d) continue;
+    const spanT = (row.d0 + row.d - from) * row.t / row.d;
+    if (spanT >= left) return from + left * row.d / row.t;
+    left -= spanT;
+  }
+  return Infinity;
+};
+
+const lapEndAfter = (axis, fromD) => {
+  const row = axis.find((item) => item.d0 + item.d > fromD + 1);
+  return row ? row.d0 + row.d : Infinity;
+};
+
+// A step is too coarse to grade when the laps touching it are much longer
+// than the step itself, e.g. 500 m pacer steps recorded as 1 km auto-laps.
+const COARSE_RATIO = 1.5;
+const MIN_COVERAGE = 0.5;
+
+// Each work step, targeted or not, takes its span of the active-lap distance
+// axis in order (distance steps by length, time steps by elapsed time). A
+// targeted step is graded on the time spent inside its span, so laps that
+// straddle a step boundary are split pro rata instead of drifting later steps.
 export const matchIntervals = (laps, steps) => {
   const actual = (laps || []).filter((lap) => activeLap(lap) && lap.distance_m > 0 && lap.avg_speed_mps > 0);
+  const axis = lapAxis(actual);
   const matches = [];
-  let lapIndex = 0;
+  let cursor = 0;
   for (const step of planSteps(steps)) {
-    const used = consume(actual, lapIndex, step);
-    lapIndex = used.next;
+    const from = cursor;
+    const to = step.distance_m > 0 ? from + step.distance_m
+      : step.duration_s > 0 ? distanceAfter(axis, from, step.duration_s)
+        : lapEndAfter(axis, from);
+    cursor = to;
     if (!step.targeted) continue;
-    if (!used.consumed.length || !(used.distance > 0) || !(used.seconds > 0)) {
-      matches.push({ ...step, laps: [], lap: null, pace: null, status: null });
-      continue;
+    let distance = 0;
+    let seconds = 0;
+    let touched = 0;
+    const used = [];
+    for (const row of axis) {
+      const overlap = Math.min(to, row.d0 + row.d) - Math.max(from, row.d0);
+      if (overlap <= 1) continue;
+      used.push(row.lap);
+      distance += overlap;
+      seconds += overlap * row.t / row.d;
+      touched += row.d;
     }
-    const pace = used.seconds / (used.distance / 1000);
-    const outside = pace < step.fast ? step.fast - pace : pace > step.slow ? pace - step.slow : 0;
-    matches.push({ ...step, laps: used.consumed, lap: used.consumed[0], pace, status: outside === 0 ? 'hit' : outside <= 10 ? 'close' : 'missed' });
+    const span = Number.isFinite(to) ? to - from : distance;
+    const base = { ...step, from, to, laps: used, lap: used[0] || null };
+    if (!(distance > 0) || distance < span * MIN_COVERAGE) {
+      matches.push({ ...base, pace: null, status: null });
+    } else if (touched > span * COARSE_RATIO) {
+      matches.push({ ...base, axis, pace: null, status: 'coarse' });
+    } else {
+      const pace = seconds / (distance / 1000);
+      matches.push({ ...base, pace, status: grade(pace, step) });
+    }
   }
-  return matches;
+  return byLapWhereCoarse(matches);
+};
+
+const grade = (pace, bounds) => {
+  const outside = pace < bounds.fast ? bounds.fast - pace : pace > bounds.slow ? pace - bounds.slow : 0;
+  return outside === 0 ? 'hit' : outside <= 10 ? 'close' : 'missed';
+};
+
+// Steps too short for the recorded laps are graded per lap instead: each lap
+// against the widest band of the steps it covers. That is the finest detail
+// the watch recorded, and it never invents splits inside a lap. A lap that is
+// mostly outside those steps (half easy, half rep) is shown but not graded.
+const LAP_COVERAGE = 0.8;
+const byLapWhereCoarse = (matches) => {
+  const out = [];
+  const seen = new Set();
+  for (const match of matches) {
+    if (match.status !== 'coarse') { out.push(match); continue; }
+    for (const lap of match.laps) {
+      if (seen.has(lap)) continue;
+      seen.add(lap);
+      const covered = matches.filter((item) => item.status === 'coarse' && item.laps.includes(lap));
+      const bounds = {
+        fast: Math.min(...covered.map((item) => item.fast)),
+        slow: Math.max(...covered.map((item) => item.slow)),
+      };
+      const pace = lapSeconds(lap) / (Number(lap.distance_m) / 1000);
+      const axisRow = match.axis.find((row) => row.lap === lap);
+      const inside = covered.reduce((sum, item) => sum
+        + Math.max(0, Math.min(item.to, axisRow.d0 + axisRow.d) - Math.max(item.from, axisRow.d0)), 0);
+      const status = inside >= axisRow.d * LAP_COVERAGE ? grade(pace, bounds) : 'mixed';
+      out.push({ ...bounds, byLap: true, steps: covered.length, laps: [lap], lap, pace, status });
+    }
+  }
+  return out;
 };
 
 export const plannedDistance = (steps) => {

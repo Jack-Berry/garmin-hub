@@ -189,14 +189,22 @@ function PlannedActual({ planned, laps, activity, dayActivities }) {
               ) : !isMatch ? (
                 <p className="mt-2 text-xs text-ink-muted">No matching plan for this activity.</p>
               ) : matches.length ? (
+                <>
+                {matches.some((match) => match.byLap) && (
+                  <p className="mt-2 text-xs text-ink-muted">Your laps are longer than the planned steps, so those steps are graded per lap. A lap that is mostly outside the steps is shown as mixed.</p>
+                )}
                 <div className="mt-2 grid gap-1.5 sm:grid-cols-2">
                   {matches.map((match, i) => (
                     <div key={i} className="flex items-center justify-between gap-3 rounded-md bg-surface-2 px-2.5 py-2 text-xs">
-                      <span className="min-w-0 text-ink-secondary">Rep {i + 1} · {paceLabel(match.fast, false)} to {paceLabel(match.slow)}</span>
-                      {match.status ? <Badge tone={tone[match.status]}>{match.status}</Badge> : <span className="text-ink-muted">No lap</span>}
+                      <span className="min-w-0 text-ink-secondary">
+                        {match.byLap ? `Lap ${match.lap.lap_index} (${match.steps} steps)` : `Rep ${matches.slice(0, i + 1).filter((item) => !item.byLap).length}`}
+                        {' · '}{paceLabel(match.fast, false)} to {paceLabel(match.slow)}
+                      </span>
+                      {tone[match.status] ? <Badge tone={tone[match.status]}>{match.status}</Badge> : <span className="text-ink-muted">{match.status === 'mixed' ? 'Mixed lap' : 'No lap'}</span>}
                     </div>
                   ))}
                 </div>
+                </>
               ) : (
                 <p className="mt-2 text-xs text-ink-muted">No pace-target work intervals to compare.</p>
               )}

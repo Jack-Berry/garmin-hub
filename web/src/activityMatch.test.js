@@ -87,3 +87,33 @@ test('only the closest plausible same-day run matches a planned distance', () =>
   assert.equal(planMatchesActivity(warmup, workout, [warmup, race]), false);
   assert.equal(planMatchesActivity(race, workout, [warmup, race]), true);
 });
+
+test('2026-07-12 grades 500 m pacer steps per 1 km lap without drifting', () => {
+  const spec = { distance_m: 10000, segment_m: 500, target: 'sub 44', strategy: 'negative' };
+  const paces = [269.2, 263.1, 264.7, 265.1, 268.4, 272.7, 267.6, 273.4, 271.4];
+  const laps = paces.map((pace, i) => ({ ...lap(i + 1, pace), intensity_type: 'INTERVAL' }));
+  laps.push({ ...lap(10, 251.4, 760), intensity_type: 'INTERVAL' });
+  const matches = matchIntervals(laps, spec);
+  assert.equal(matches.length, 10);
+  assert.ok(matches.every((row) => row.byLap && row.steps >= 1));
+  assert.deepEqual(matches.map((row) => row.lap.lap_index), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  assert.equal(matches[0].status, 'hit');
+  assert.equal(matches[9].status, 'hit');
+});
+
+test('a short lap straddling a step boundary is split pro rata', () => {
+  const plan = garmin([step(1500), step(2000, [255, 265]), step(1500)]);
+  const laps = [lap(1, 330), lap(2, 330, 500), lap(3, 260), lap(4, 260), lap(5, 330, 500), lap(6, 330)];
+  const [rep] = matchIntervals(laps, plan);
+  assert.deepEqual(rep.laps.map((item) => item.lap_index), [3, 4]);
+  assert.equal(rep.status, 'hit');
+  const offset = [lap(1, 330), lap(2, 330, 1250), lap(3, 260), lap(4, 260), lap(5, 330)];
+  assert.deepEqual(matchIntervals(offset, plan).map((row) => [row.lap.lap_index, row.status]),
+    [[2, 'mixed'], [3, 'hit'], [4, 'mixed']]);
+});
+
+test('a lap that is half easy and half rep is shown but not graded', () => {
+  const plan = garmin([step(1500), step(1000, [255, 265]), step(1500)]);
+  const rows = matchIntervals([lap(1, 330), lap(2, 300), lap(3, 260), lap(4, 330)], plan);
+  assert.deepEqual(rows.map((row) => [row.lap.lap_index, row.status]), [[2, 'mixed'], [3, 'mixed']]);
+});
