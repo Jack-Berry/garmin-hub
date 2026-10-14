@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/usr/local/bin/python3.13 -m py_compile ingest/pacer_cli.py)"
+    ]
+  }
+}

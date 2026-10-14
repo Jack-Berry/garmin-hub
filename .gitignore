@@ -45,3 +45,6 @@ build/
 
 # --- Temporary local test guide (delete when a hosted deployment lands) ---
 LOCAL_TEST_GUIDE.md
+
+# Claude Code machine-local settings
+.claude/settings.local.json
