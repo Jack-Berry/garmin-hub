@@ -114,9 +114,11 @@ All HTTP errors fail the brief step.
 15 3 * * * /home/deploy/garmin-hub/deploy/droplet/jobs.sh backup >> /home/deploy/garmin-hub/backup.log 2>&1
 ```
 
-Backups are custom-format `pg_dump` files under `deploy/droplet/backups` and
-files older than 14 days are removed. Copy backups off the droplet and test a
-restore periodically.
+Backups are custom-format `pg_dump` files under `deploy/droplet/backups`. The
+backup job lists each new archive with the Postgres 17 container's `pg_restore`
+before publishing it, then writes a matching `.sha256` sidecar. Dumps and
+sidecars older than 14 days are removed together. Copy backups off the droplet
+and test a restore periodically.
 
 Each host job writes its latest result atomically under
 `deploy/droplet/job-status`. The app sees that directory at
@@ -129,7 +131,7 @@ database pool, so a database outage makes the container health check fail.
 The Mac offsite pull records its result through the narrow direct command:
 
 ```sh
-deploy/droplet/jobs.sh mark offsite ok "snapshot verified"
+deploy/droplet/jobs.sh mark offsite ok "snapshot complete"
 deploy/droplet/jobs.sh mark offsite fail "pull failed"
 ```
 
@@ -139,26 +141,56 @@ previous status untouched.
 
 ### Restore from a Mac snapshot
 
-Mac snapshots live under `~/Backups/garmin-hub/<timestamp>`. Choose a verified
-snapshot and copy its dump to the checkout, then follow the normal restore
-sequence below with that dump. In summary:
+Mac snapshots live under `~/Backups/garmin-hub/<timestamp>`. Choose a snapshot
+whose pull completed successfully. First copy its dump and private files to
+temporary paths on the droplet without printing their contents:
 
 ```sh
 snapshot="$HOME/Backups/garmin-hub/<timestamp>"
 scp "$snapshot/deploy/droplet/backups/<backup>.dump" \
   deploy@178.128.168.63:/home/deploy/garmin-hub/restore.dump
+scp "$snapshot/deploy/droplet/.env" \
+  deploy@178.128.168.63:/home/deploy/garmin-hub/.env.restore
+rsync -a -e ssh "$snapshot/ingest/.garth/" \
+  deploy@178.128.168.63:/home/deploy/garmin-hub/.garth-restore/
+```
+
+Then run this complete sequence on the droplet from the repository root. It
+stops the app, preserves the current database, recreates the database, applies
+the canonical schema, restores the snapshot, restores `.env` and `.garth` with
+private modes, then starts and verifies the app:
+
+```sh
+docker compose --project-name garmin-hub --env-file deploy/droplet/.env \
+  -f deploy/droplet/compose.yml stop app
+deploy/droplet/jobs.sh backup
+docker exec garmin-hub-postgres dropdb -U postgres garminhub
+docker exec garmin-hub-postgres createdb -U postgres garminhub
+docker exec -i garmin-hub-postgres psql -U postgres -d garminhub \
+  < db/schema.pg.sql
+docker exec garmin-hub-postgres psql -U postgres -d garminhub \
+  -c 'TRUNCATE profile'
 docker cp restore.dump garmin-hub-postgres:/tmp/restore.dump
 docker exec garmin-hub-postgres pg_restore -U postgres -d garminhub \
   --data-only --disable-triggers /tmp/restore.dump
+install -m 600 .env.restore deploy/droplet/.env
+docker run --rm -v garmin-hub-garth-cache:/dest \
+  -v "$PWD/.garth-restore:/source:ro" alpine:3.21 sh -c \
+  'find /dest -mindepth 1 -delete && cp -a /source/. /dest/ && chown -R 65532:65532 /dest && find /dest -type d -exec chmod 700 {} + && find /dest -type f -exec chmod 600 {} +'
+docker exec garmin-hub-postgres rm /tmp/restore.dump
+rm restore.dump .env.restore
+rm -rf .garth-restore
+docker compose --project-name garmin-hub --env-file deploy/droplet/.env \
+  -f deploy/droplet/compose.yml start app
+set -a; . deploy/droplet/.env; set +a
+curl --fail --silent --show-error -H "X-Api-Key: $API_SECRET" \
+  https://hub.berrydev.co.uk/api/health
+unset API_SECRET
 ```
 
-Restore `deploy/droplet/.env` with mode 600 without printing it. Restore
-`ingest/.garth` into the named token volume using the Garmin token cache steps
-above, then ensure the cache remains owned by uid 65532. Remove temporary
-copies from the droplet after the app and ingest have been verified.
-
-To restore, stop the app, preserve a fresh dump, recreate the database, apply
-the canonical schema, remove its one seeded row, then restore data only:
+For a database-only restore, stop the app, preserve a fresh dump, recreate the
+database, apply the canonical schema, remove its one seeded row, then restore
+data only:
 
 ```sh
 docker compose --project-name garmin-hub --env-file deploy/droplet/.env \

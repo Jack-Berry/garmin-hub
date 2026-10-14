@@ -6,7 +6,7 @@ compose="docker compose --project-name garmin-hub --env-file deploy/droplet/.env
 status_dir=${GARMIN_HUB_STATUS_DIR:-deploy/droplet/job-status}
 
 json_string() {
-  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n\r\t' '   '
+  printf '%s' "$1" | LC_ALL=C tr -d '\000-\037' | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
 mark() {
@@ -55,19 +55,33 @@ run_daily() {
 }
 
 run_backup() {
-  backup_dir=deploy/droplet/backups
+  backup_dir=${GARMIN_HUB_BACKUP_DIR:-deploy/droplet/backups}
   mkdir -p "$backup_dir"
   stamp=$(date -u +%Y%m%dT%H%M%SZ)
   target="$backup_dir/garminhub-$stamp.dump"
   temporary="$backup_dir/.garminhub-$stamp.dump.tmp"
+  sidecar="$target.sha256"
+  sidecar_temporary="$backup_dir/.garminhub-$stamp.dump.sha256.tmp"
   $compose exec -T postgres pg_dump -U postgres -d garminhub -Fc > "$temporary"
   code=$?
   if [ "$code" -ne 0 ]; then
     rm -f "$temporary"
     return "$code"
   fi
-  mv "$temporary" "$target" || { code=$?; rm -f "$temporary"; return "$code"; }
-  find "$backup_dir" -type f -name 'garminhub-*.dump' -mtime +14 -delete
+  $compose exec -T postgres pg_restore --list < "$temporary" >/dev/null
+  code=$?
+  if [ "$code" -ne 0 ]; then
+    rm -f "$temporary"
+    return "$code"
+  fi
+  hash=$(sha256sum "$temporary" | awk '{print $1}') || { code=$?; rm -f "$temporary"; return "$code"; }
+  printf '%s  %s\n' "$hash" "$(basename "$target")" > "$sidecar_temporary" || {
+    code=$?; rm -f "$temporary" "$sidecar_temporary"; return "$code"
+  }
+  mv "$temporary" "$target" || { code=$?; rm -f "$temporary" "$sidecar_temporary"; return "$code"; }
+  mv "$sidecar_temporary" "$sidecar" || { code=$?; rm -f "$target" "$sidecar_temporary"; return "$code"; }
+  find "$backup_dir" -type f -name 'garminhub-*.dump' -mtime +14 \
+    -exec sh -c 'for dump do rm -f "$dump" "$dump.sha256"; done' sh {} +
 }
 
 case "${1:-}" in

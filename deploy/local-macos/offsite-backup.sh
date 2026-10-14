@@ -15,13 +15,15 @@ SNAPSHOT="$BACKUP_ROOT/$STAMP"
 SSH=(ssh -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$KNOWN_HOSTS")
 RSYNC_SSH="ssh -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KNOWN_HOSTS"
 dry_root=
+verified=0
 
 say() { printf '%s\n' "$*"; }
 
 mark_remote() {
   result=$1
   message=$2
-  "${SSH[@]}" "$REMOTE" "$REMOTE_ROOT/deploy/droplet/jobs.sh" mark offsite "$result" "$message"
+  printf -v remote_command '%q ' "$REMOTE_ROOT/deploy/droplet/jobs.sh" mark offsite "$result" "$message"
+  "${SSH[@]}" "$REMOTE" "${remote_command% }"
 }
 
 failed() {
@@ -29,14 +31,21 @@ failed() {
   trap - EXIT
   [ -z "$dry_root" ] || rm -rf "$dry_root"
   if [ "$DRY_RUN" -eq 0 ]; then
-    [ ! -d "$SNAPSHOT" ] || rm -rf "$SNAPSHOT"
+    if [ "$verified" -eq 0 ] && [ -d "$SNAPSHOT" ]; then rm -rf "$SNAPSHOT"; fi
     mark_remote fail "offsite pull failed with exit $code" || true
   fi
   exit "$code"
 }
 trap failed EXIT
 
-previous=$(find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | tail -1 || true)
+list_snapshots() {
+  find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while IFS= read -r candidate; do
+    name=${candidate##*/}
+    if [[ "$name" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{6}$ ]]; then printf '%s\n' "$candidate"; fi
+  done
+}
+
+previous=$(list_snapshots | sort | tail -1 || true)
 rsync_args=(-a -e "$RSYNC_SSH")
 if [ "$DRY_RUN" -eq 1 ]; then
   rsync_args+=(--dry-run --itemize-changes)
@@ -76,14 +85,26 @@ find "$SNAPSHOT" -type d -exec chmod 700 {} +
 find "$SNAPSHOT" -type f -exec chmod 600 {} +
 newest=$(find "$SNAPSHOT/deploy/droplet/backups" -type f -name 'garminhub-*.dump' -size +0c -print | sort | tail -1)
 [ -n "$newest" ] || { say "No non-empty database dump found" >&2; exit 1; }
-if command -v pg_restore >/dev/null 2>&1; then
-  pg_restore --list "$newest" >/dev/null
-  say "Verified newest dump with pg_restore."
-else
-  say "pg_restore is unavailable, so archive verification was skipped."
-fi
+sidecar="$newest.sha256"
+[ -f "$sidecar" ] || { say "Checksum sidecar is missing" >&2; exit 1; }
+[ "$(LC_ALL=C head -c 5 "$newest")" = PGDMP ] || { say "Newest dump has an invalid header" >&2; exit 1; }
+expected=$(awk 'NR == 1 { print $1 }' "$sidecar")
+[[ "$expected" =~ ^[0-9a-f]{64}$ ]] || { say "Checksum sidecar is invalid" >&2; exit 1; }
+actual=$(shasum -a 256 "$newest" | awk '{ print $1 }')
+[ "$actual" = "$expected" ] || { say "Newest dump checksum does not match" >&2; exit 1; }
+say "Newest dump header and checksum match."
 
-find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -mtime +30 -exec rm -rf {} +
-mark_remote ok "snapshot $STAMP verified"
+verified=1
 trap - EXIT
+newest_snapshot=$(list_snapshots | sort | tail -1)
+while IFS= read -r candidate; do
+  [ "$candidate" = "$newest_snapshot" ] && continue
+  name=${candidate##*/}
+  [[ "$name" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{6}$ ]] || continue
+  rm -rf "$candidate"
+done < <(find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -mtime +30 -print)
+
+if ! mark_remote ok "snapshot $STAMP complete"; then
+  say "Warning: snapshot is complete but remote status could not be updated." >&2
+fi
 say "Offsite snapshot complete: $SNAPSHOT"

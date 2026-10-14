@@ -47,9 +47,11 @@ snapshot under `~/Backups/garmin-hub`. SSH uses `~/.ssh/id_ed25519` and
 700 and file mode 600, use hard links to unchanged files in the previous
 snapshot, and are retained for 30 days.
 
-The script verifies the newest non-empty dump with `pg_restore --list` when
-that command is installed. It records success or failure in the droplet's
-offsite job status and logs through launchd to
+The droplet verifies each archive with its matching Postgres 17 `pg_restore`
+before publishing it. The Mac pull checks the newest dump's `PGDMP` header and
+the pulled SHA-256 sidecar, so it does not depend on the Mac's older
+`pg_restore`. It records success or failure in the droplet's offsite job status
+and logs through launchd to
 `~/Library/Logs/garmin-hub-offsite.log`. Preview the transfer without creating
 a snapshot or changing remote status:
 

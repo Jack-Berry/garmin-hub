@@ -28,12 +28,14 @@ export default function StatusChip({ refreshKey }) {
     return () => document.removeEventListener('pointerdown', close);
   }, []);
 
+  const hasData = Array.isArray(data?.checks);
+  const initialLoading = loading && !hasData;
   const checks = data?.checks || [];
   const warning = checks.find((check) => check.state === 'warn');
   const unknown = checks.find((check) => check.state === 'unknown');
   const problem = error || warning;
   const summary = error ? 'Status check failed' : warning?.reason || unknown?.reason || 'All systems healthy';
-  const icon = loading ? 'loader-2' : problem ? 'alert-triangle' : unknown ? 'help-circle' : 'circle-check';
+  const icon = initialLoading ? 'loader-2' : problem ? 'alert-triangle' : unknown ? 'help-circle' : 'circle-check';
 
   return (
     <div ref={root} className="relative min-w-0">
@@ -42,12 +44,12 @@ export default function StatusChip({ refreshKey }) {
         onClick={() => setOpen((value) => !value)}
         className={`inline-flex h-9 max-w-[12rem] items-center gap-1.5 rounded-lg border px-2 font-body text-micro font-semibold uppercase tracking-[0.08em] transition md:h-auto md:max-w-[20rem] md:py-1.5 ${problem ? 'border-sem-amber/50 bg-sem-amber/10 text-sem-amber' : 'border-line text-ink-muted hover:bg-surface-2'}`}
         aria-expanded={open}
-        aria-label={`System status: ${loading ? 'loading' : summary}`}
+        aria-label={`System status: ${initialLoading ? 'loading' : summary}`}
         title={summary}
         data-status-chip
       >
-        <Icon name={icon} className={loading ? 'animate-spin' : ''} />
-        <span className="hidden truncate md:inline">{loading ? 'Checking' : problem ? summary : 'Status'}</span>
+        <Icon name={icon} className={initialLoading ? 'animate-spin' : ''} />
+        <span className="hidden truncate md:inline">{initialLoading ? 'Checking' : problem ? summary : 'Status'}</span>
       </button>
       {open && (
         <div className="fixed inset-x-3 top-16 z-50 rounded-xl border border-line bg-surface-1 p-4 shadow-2xl sm:absolute sm:inset-x-auto sm:right-0 sm:top-full sm:mt-2 sm:w-80" role="dialog" aria-label="System status details" data-status-sheet>
@@ -55,9 +57,9 @@ export default function StatusChip({ refreshKey }) {
             <h2 className="font-display text-sm font-bold uppercase tracking-[0.12em]">System status</h2>
             <button type="button" onClick={() => setOpen(false)} className="text-ink-muted" aria-label="Close status"><Icon name="x" /></button>
           </div>
-          {loading && <p className="text-sm text-ink-muted">Checking jobs...</p>}
+          {initialLoading && <p className="text-sm text-ink-muted">Checking jobs...</p>}
           {error && <p className="text-sm text-sem-amber">Status endpoint unavailable: {error.message}</p>}
-          {!loading && !error && (
+          {hasData && (
             <ul className="divide-y divide-line">
               {checks.map((check) => (
                 <li key={check.name} className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 py-3 first:pt-0 last:pb-0">
