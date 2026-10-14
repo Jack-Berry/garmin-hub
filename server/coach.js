@@ -362,7 +362,7 @@ Same coach, different mode: specific, grounded in real numbers, concise.`;
 // cacheable, comfortably above the current models' minimum prefix size.
 const SYSTEM_PROMPT = `You are an analytical running coach reviewing one athlete's recent training and recovery data.
 
-Your job is insight and observation, NOT prescribing workouts. The athlete plans their training with Runna, so never tell them which session to run or write a training plan.
+Your job here is evidence-led analysis and clear recommendations, not building or editing workouts. Workout planning and calendar edits happen in planning mode; Runna may be one source on the calendar.
 
 Focus on how their body is responding to training: recovery trends (HRV vs baseline, resting HR, sleep, readiness), heart-rate behaviour, and the balance between training load and readiness. Comment on how recent sessions actually went and what the numbers suggest. Pay particular attention to signals.flags, these are pre-computed warnings; address any that are present. If a race appears in the upcoming list, factor in its proximity and the athlete's goal paces. Use the profile (shoes, goals, typical paces, injuries/constraints) for relevant context, for example how recent paces compare to goal paces, or whether an injury constraint bears on the current load. coach_memory holds durable facts remembered from past coach chats (race debriefs, illnesses, context for training gaps) — factor any relevant ones in.
 
@@ -392,7 +392,7 @@ In plain, warm prose cover three things: how their body is responding right now 
 
 One trap to avoid: Garmin re-reads training readiness after a workout, so if \`recovery.latest.readiness_measured\` is "after_exercise" that score reflects a session they have ALREADY done today, not the state they woke in (\`readiness_on_waking\`). Never open with concern about a low readiness that is simply the cost of this morning's run.
 
-Check the athlete's framing against the data before agreeing. If it is wrong, say so plainly and give the key number and recommendation.
+Make an independent, evidence-led assessment. Give the key signal and recommendation plainly, without flattery or false reassurance.
 
 This is a glance, not a report. Do NOT: analyse past runs in detail, use any section headers, open with a bold TL;DR line, or list out numbers. Include at most one concrete number, and only if it genuinely adds colour, the detailed report is where the depth lives. If signals.flags are present, work them in briefly and in passing.
 
@@ -416,7 +416,7 @@ From the focus workout (title, distance, structured steps with any pace targets)
 
 ${HONESTY_RULES}
 
-You do NOT rewrite the workout, they use Runna for that, you coach the execution. Be specific with paces and numbers. A few short sentences or tight bullets. One short markdown header at most. No bold TL;DR line. Do NOT use em-dashes or the ~ symbol. Second person.`;
+Do not rewrite the workout here; coach its execution. Workout changes belong in planning mode, regardless of their source. Be specific with paces and numbers. A few short sentences or tight bullets. One short markdown header at most. No bold TL;DR line. Do NOT use em-dashes or the ~ symbol. Second person.`;
 
 const DAY_ROUTINE_SYSTEM = `You are this athlete's running coach commenting on a recurring non-running session in their week (e.g. football, gym, cycling).
 
@@ -707,11 +707,18 @@ async function createResolvingTools(db, params, convo, options = {}) {
     role: "user",
     content: "Tool round limit reached. Answer now from the results already returned. Do not call another tool.",
   });
-  return ensureAvailable(await api.messages.create({
+  const finalResponse = ensureAvailable(await api.messages.create({
     ...params,
     tools,
+    // "none" disables tools for this turn. It is not the prohibited forced
+    // "any" or named "tool" choice on current Claude models.
+    tool_choice: { type: "none" },
     messages: cacheLatestUser(convo),
   }));
+  if (finalResponse.stop_reason === "tool_use") {
+    throw new Error("Coach unavailable: the tool round limit was reached before an answer.");
+  }
+  return finalResponse;
 }
 
 // Glance brief (Sonnet). Returns { text, context, model } so the caller can
@@ -897,6 +904,16 @@ const planComplete = (text) => {
   return lines.length > 0 && lines[lines.length - 1] === "[[PLAN_COMPLETE]]";
 };
 
+// A max-token response can end mid tool call. Replaying that tool_use as an
+// assistant turn without its tool_result is invalid, so retain only complete
+// thinking/text blocks. If no visible text survived, omit the assistant turn.
+const repairAssistantContent = (response, raw) => {
+  if (response.stop_reason !== "max_tokens") return response.content;
+  const complete = response.content.filter((block) => block.type !== "tool_use");
+  if (complete.some((block) => block.type === "text" && block.text)) return complete;
+  return raw || null;
+};
+
 // Unified planning turn (Opus). Returns exactly one structured branch:
 // {spec}, {edit}, {plan}, or none, plus visible prose and completion/error
 // flags. Preview, validation, persistence and Garmin writes remain in routes.
@@ -929,9 +946,10 @@ async function planReply(db, messages, recentPushes = []) {
     const reason = response.stop_reason === "max_tokens"
       ? "it was cut off before the closing fence — keep the prose brief and re-emit only the structured JSON"
       : "it is not strictly valid JSON in the documented session-spec, full-plan or edit-directive shape (no comments, no trailing commas, one fenced ```json block)";
+    const repairContent = repairAssistantContent(response, raw);
     response = await call([
       ...messages,
-      { role: "assistant", content: response.content },
+      ...(repairContent ? [{ role: "assistant", content: repairContent }] : []),
       {
         role: "user",
         content: `[App notice: your last reply appeared to present structured planning output, but nothing valid could be extracted — ${reason}. Re-emit the complete intended session, plan or edit as a single fenced json block.]`,
@@ -972,5 +990,6 @@ module.exports = {
   SUPPORTS_CONTEXT_INJECTION: true,
   createResolvingTools,
   runCoachTool,
+  repairAssistantContent,
   visibleText,
 };

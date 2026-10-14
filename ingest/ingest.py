@@ -188,7 +188,12 @@ def login(client_factory=garminconnect.Garmin, tokenstore=TOKENSTORE, stdin=sys.
     print("Performing interactive Garmin login.")
     fresh = client_factory(email, password, prompt_mfa=prompt_mfa)
     fresh.login(str(tokenstore))
-    print(f"Saved session tokens to {tokenstore}")
+    token_files = tokenstore.exists() and any(
+        path.is_file() for path in tokenstore.rglob("*"))
+    if token_files:
+        print(f"Saved session tokens to {tokenstore}")
+    else:
+        print(f"Warning: Garmin login succeeded but no session tokens were saved to {tokenstore}")
     return fresh
 
 

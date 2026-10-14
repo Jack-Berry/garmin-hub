@@ -32,6 +32,7 @@ test('readiness flags use the wake reading, not a post-exercise score', () => {
     readiness_on_waking: 88,
     readiness_level_on_waking: 'HIGH',
   }), weeks);
+  assert.deepEqual(Object.keys(signals), ['flags']);
   assert.equal(signals.flags.some((flag) => flag.startsWith('readiness')), false);
 
   const fallback = deriveSignals(baseRecovery({

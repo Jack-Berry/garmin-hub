@@ -476,11 +476,6 @@ function deriveSignals(recovery, weekly_km) {
   }
 
   return {
-    current_week: weekly_km[0] || null,
-    current_week_km: weekly_km[0]?.km ?? null,
-    prior_weeks: completeWeeks,
-    prior_weeks_km: completeWeeks.map((week) => week.km),
-    prior_weeks_avg_km: priorAvg,
     flags,
   };
 }
@@ -709,11 +704,11 @@ async function renderContextDump(db) {
     if (p.steps && p.steps.length) out.push(`    steps: ${p.steps.join(' | ')}`);
   });
 
-  // --- Signals ---
-  section('SIGNALS');
-  out.push(`Current week: ${c.signals.current_week_km ?? '—'}km`);
-  if (c.signals.prior_weeks_km.length) out.push(`Prior weeks: ${c.signals.prior_weeks_km.join(', ')}km`);
-  if (c.signals.prior_weeks_avg_km != null) out.push(`Prior weeks avg: ${c.signals.prior_weeks_avg_km}km`);
+  // --- Weekly mileage and signals ---
+  section('WEEKLY MILEAGE AND SIGNALS');
+  c.weekly_mileage.forEach((week) => {
+    out.push(`${week.week_start}: ${week.km}km (${week.complete ? 'complete' : 'current'})`);
+  });
   out.push(`Flags: ${c.signals.flags.length ? c.signals.flags.join('; ') : 'none'}`);
 
   // --- Personal records ---

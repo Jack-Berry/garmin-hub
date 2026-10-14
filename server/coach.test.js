@@ -4,6 +4,7 @@ const {
   CHAT_MODEL,
   chatReply,
   createResolvingTools,
+  repairAssistantContent,
   runCoachTool,
   visibleText,
 } = require('./coach');
@@ -53,11 +54,51 @@ test('tool loop keeps tools on the capped fallback and preserves thinking blocks
   assert.equal(calls.length, 5);
   assert.ok(calls.every((call) => Array.isArray(call.tools)));
   assert.match(calls.at(-1).messages.at(-1).content[0].text, /Answer now/);
+  assert.deepEqual(calls.at(-1).tool_choice, { type: 'none' });
   for (let index = 0; index < contents.length; index++) {
     const assistant = calls[index + 1].messages.find(
       (message) => message.role === 'assistant' && message.content === contents[index]);
     assert.ok(assistant, `round ${index} content was not passed back unchanged`);
   }
+});
+
+test('tool loop rejects a tool call on the answer-only fallback round', async () => {
+  const calls = [];
+  const responses = Array.from({ length: 5 }, (_, index) => ({
+    stop_reason: 'tool_use',
+    content: [{
+      type: 'tool_use',
+      id: `tool ${index}`,
+      name: 'get_scheduled_workouts',
+      input: {},
+    }],
+  }));
+  await assert.rejects(
+    createResolvingTools(
+      { all: async () => [] },
+      params,
+      [{ role: 'user', content: 'question' }],
+      { client: fakeClient(responses, calls) },
+    ),
+    /tool round limit was reached/,
+  );
+  assert.deepEqual(calls.at(-1).tool_choice, { type: 'none' });
+});
+
+test('planning repair drops dangling tool_use from a max-token response', () => {
+  const thinking = { type: 'thinking', thinking: 'reason', signature: 'sig' };
+  const text = { type: 'text', text: 'partial plan' };
+  const response = {
+    stop_reason: 'max_tokens',
+    content: [thinking, text, { type: 'tool_use', id: 'dangling', name: 'tool', input: {} }],
+  };
+  const repaired = repairAssistantContent(response, 'partial plan');
+  assert.deepEqual(repaired, [thinking, text]);
+  assert.equal(repaired.some((block) => block.type === 'tool_use'), false);
+  assert.equal(repairAssistantContent({
+    stop_reason: 'max_tokens',
+    content: [thinking, response.content[2]],
+  }, ''), null);
 });
 
 test('a throwing tool becomes an error tool_result', async () => {

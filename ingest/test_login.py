@@ -27,6 +27,14 @@ class StubClient:
         self.calls.append(("login", tokenstore))
 
 
+class PersistingClient(StubClient):
+    def login(self, tokenstore):
+        super().login(tokenstore)
+        store = Path(tokenstore)
+        store.mkdir()
+        (store / "oauth.json").write_text("stub")
+
+
 class StubCursor:
     def fetchone(self):
         return (True,)
@@ -81,7 +89,8 @@ class LoginTest(unittest.TestCase):
     def test_interactive_full_login_passes_tokenstore_to_library(self):
         calls = []
         with tempfile.TemporaryDirectory() as temp, patch.dict(
-                os.environ, {"GARMIN_EMAIL": "runner@example.com", "GARMIN_PASSWORD": "secret"}):
+                os.environ, {"GARMIN_EMAIL": "runner@example.com", "GARMIN_PASSWORD": "secret"}), \
+                patch("builtins.print") as printer:
             tokenstore = Path(temp) / ".garth"
             ingest.login(
                 client_factory=lambda *a, **k: StubClient(calls, *a, **k),
@@ -90,6 +99,21 @@ class LoginTest(unittest.TestCase):
             )
         self.assertEqual(calls[0][1], ("runner@example.com", "secret"))
         self.assertEqual(calls[1], ("login", str(tokenstore)))
+        printer.assert_any_call(
+            f"Warning: Garmin login succeeded but no session tokens were saved to {tokenstore}")
+
+    def test_full_login_reports_saved_only_when_token_file_exists(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as temp, patch.dict(
+                os.environ, {"GARMIN_EMAIL": "runner@example.com", "GARMIN_PASSWORD": "secret"}), \
+                patch("builtins.print") as printer:
+            tokenstore = Path(temp) / ".garth"
+            ingest.login(
+                client_factory=lambda *a, **k: PersistingClient(calls, *a, **k),
+                tokenstore=tokenstore,
+                stdin=Tty(),
+            )
+        printer.assert_any_call(f"Saved session tokens to {tokenstore}")
 
     def test_main_records_failed_state_when_login_fails(self):
         connection = StubConnection()
