@@ -112,12 +112,13 @@ def find_idempotent_push(g, date_str, _workout_name, request_key):
 
 
 def is_not_found(error):
-    """Recognise Garmin's common not-found error shapes for retry cleanup."""
+    """True only for a real HTTP 404. garminconnect raises "API Error <status>
+    - <body>", and other errors can mention 404 elsewhere (a URL holding a
+    workout id), so match the status, never a bare substring."""
     status = getattr(error, "status_code", None)
     if status is None:
         status = getattr(getattr(error, "response", None), "status_code", None)
-    message = str(error).lower()
-    return status == 404 or "404" in message or "not found" in message
+    return status == 404 or str(error).startswith("API Error 404")
 
 
 # --- Test workouts ------------------------------------------------------------

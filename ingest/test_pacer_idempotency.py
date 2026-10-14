@@ -122,7 +122,7 @@ class IdempotencyTests(unittest.TestCase):
         self.assertTrue(result["removed"])
 
     def test_remove_treats_not_found_as_already_removed(self):
-        self.g.delete_error = RuntimeError("404 workout not found")
+        self.g.delete_error = RuntimeError("API Error 404 - workout not found")
         result = p.cmd_reconcile({"op": "remove", "workout_id": 77,
                                   "date": "2026-10-20"})
         self.assertTrue(result["removed"])
@@ -130,7 +130,7 @@ class IdempotencyTests(unittest.TestCase):
 
     def test_replace_retry_does_not_warn_when_old_workout_is_gone(self):
         self.g.fail_after_schedule = False
-        self.g.delete_error = RuntimeError("404 workout not found")
+        self.g.delete_error = RuntimeError("API Error 404 - workout not found")
         result = p.cmd_reconcile({"op": "replace", "replace_workout_id": 7, **SPEC})
         self.assertIsNone(result["warning"])
 
@@ -146,6 +146,14 @@ class IdempotencyTests(unittest.TestCase):
         self.assertEqual(first["schedule_id"], second["schedule_id"])
         self.assertEqual(len([i for i in self.g.items if i["date"] == "2026-10-21"]), 1)
 
+
+
+class NotFoundMatchTest(unittest.TestCase):
+    def test_only_a_real_404_counts_as_not_found(self):
+        self.assertTrue(real_wp.is_not_found(Exception("API Error 404 - Not Found")))
+        self.assertFalse(real_wp.is_not_found(Exception("API Error 500 - workout 1404123456 failed")))
+        self.assertFalse(real_wp.is_not_found(ConnectionError("reset on /workout/1404123456")))
+        self.assertFalse(real_wp.is_not_found(Exception("API Error 400 - schedule not found")))
 
 if __name__ == "__main__":
     unittest.main()
