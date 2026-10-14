@@ -1,0 +1,9 @@
+.git
+**/.env
+**/.env.*
+!**/.env.example
+**/.garth
+**/node_modules
+**/dist
+ios/DerivedData
+deploy/droplet/backups

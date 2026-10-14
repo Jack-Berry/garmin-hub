@@ -6,7 +6,7 @@ deployment. Localhost only — no external access. Paths are hardcoded to
 
 ## What gets installed
 
-Three launchd user agents in `~/Library/LaunchAgents`:
+Four launchd user agents in `~/Library/LaunchAgents`:
 
 | Service | Label | What it does |
 |---|---|---|
@@ -25,14 +25,15 @@ bash /Users/jackberry/Code/Projects/garmin-hub/deploy/local-macos/install.sh
 ```
 
 This stops any manual `node server.js` / `vite` you have running, rebuilds the
-frontend, copies the plists, and loads all three services.
+frontend, copies the plists, and loads all four services.
 
 - **API:** http://localhost:3001  (health: http://localhost:3001/api/health)
 - **Dashboard:** http://localhost:4173
 
-> The dashboard talks to the API at `localhost:3001` (hardcoded default), so both
-> services must be up. If you change frontend code, re-run `install.sh` to rebuild
-> `dist` (the served bundle is the build, not live source).
+> The dashboard API comes from gitignored `web/.env.local`. Set
+> `VITE_API_BASE=http://localhost:3001` for local mode or
+> `VITE_API_BASE=https://hub.berrydev.co.uk` for the hosted backend, plus the
+> matching `VITE_API_SECRET`. Re-run `install.sh` after a change.
 
 ## Daily job — schedule behaviour
 
@@ -82,5 +83,5 @@ bash /Users/jackberry/Code/Projects/garmin-hub/deploy/local-macos/daily.sh
 bash /Users/jackberry/Code/Projects/garmin-hub/deploy/local-macos/uninstall.sh
 ```
 
-Removes all three services. Logs are left behind — delete them by hand if you
+Removes all four services. Logs are left behind; delete them by hand if you
 want (`rm ~/Library/Logs/garmin-hub-*.log ~/garmin-hub-cron.log`).

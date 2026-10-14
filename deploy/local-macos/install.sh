@@ -17,6 +17,9 @@ pkill -f "node_modules/.bin/vite" 2>/dev/null || true
 sleep 1
 
 echo "[2/4] Building the frontend (npm run build)…"
+# web/.env.local selects the API without a source edit. Use
+# VITE_API_BASE=http://localhost:3001 for local API mode, or
+# VITE_API_BASE=https://hub.berrydev.co.uk for the hosted backend.
 ( cd "$REPO/web" && npm run build )
 
 echo "[3/4] Installing plists into $LA …"

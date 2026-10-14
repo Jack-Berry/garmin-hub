@@ -11,7 +11,7 @@ A personal, single-user web app that ingests my Garmin running data and provides
 - **API:** Node + Express + `pg`, fully async. Two pools mirror a deliberate read/write split (see API section). Serves JSON to the frontend and handles AI-coach calls.
 - **Frontend:** React (JavaScript, not TypeScript) + Tailwind + Recharts. Fetch state flows through `useFetch` + the shared `StateWrap` wrapper — every section must render visible loading/error states, never silently fall through to empty data (the hero once rendered a confident fake "rest week" while the API was down).
 - **AI layer:** Node calls the Anthropic Claude API (Opus, daily). Uses a separate API key in `.env`.
-- **Host:** TBD — moving toward a proper hosted single-user deployment; provider not yet chosen. Until then, the local macOS launchd setup (see Build & deploy) is the running instance.
+- **Host:** One Docker Compose project on the DigitalOcean droplet. Caddy reaches the app over `connect-remote_default`; Postgres stays private. The local Mac dashboard and iPhone shell use the same hosted API and dashboard build.
 
 ## Data flow
 
@@ -24,7 +24,9 @@ garmin-hub/
   ingest/   Python ingest + Garmin client + .env + .garth/ token cache
   server/   Express API, db access (pg pools), Claude client
   web/      React + Tailwind frontend
+  ios/      SwiftUI and WKWebView iPhone shell (XcodeGen)
   db/       schema.pg.sql (canonical), setup_local.sh, README (roles + env vars)
+  deploy/   local macOS launchd and hosted droplet deployment
   attic/    retired SQLite-era artifacts (see attic/README.md) — nothing here runs
   CLAUDE.md
 ```
@@ -85,7 +87,7 @@ Garmin's own `race` boolean is unreliable — it's `false` even for workouts tit
 
 ## API
 
-`server/server.js`. **Auth:** every `/api/*` route sits behind one shared-secret middleware — requests must send `X-Api-Key` matching `API_SECRET` (`server/.env`; the server refuses to start without it) or get a 401. The frontend bakes the same value in at build time from `VITE_API_SECRET` (`web/.env.local`) — **the two must match, and changing the secret means a frontend rebuild**. CORS is pinned to the frontend origins (`:4173`/`:5173`, override via `CORS_ORIGINS`); the server binds `127.0.0.1` only; `daily.sh` reads the secret out of `server/.env` (a plain `grep`/`cut` of the `API_SECRET=` line — keep it unquoted, one line). Quirk: the custom header makes browsers **preflight every request**, and preflights never carry custom headers — so the CORS middleware answers OPTIONS **before** the auth gate; keep that ordering. All DB access is **async** (`pg` pools via `server/db.js`): reads go through the `db` pool (the SELECT-only `garminhub_ro` role — read-only is enforced by Postgres itself), writes through the `writeDb` pool (`garminhub_rw`), scoped so they can never clobber ingest-owned data. The curated column lists (everything but `raw_json`) come from `information_schema.columns` and are **awaited at startup before `app.listen`** — don't move that init after routes can fire. The narrowly-scoped DB writes:
+`server/server.js`. **Auth:** the shared `X-Api-Key` gate protects both `/api/*` and every built-dashboard file, so the public hostname returns 401 without `API_SECRET`. The server binds `HOST` with a loopback default; the container sets `0.0.0.0`. CORS allows the two localhost web origins and the iOS shell origin `hub://dashboard` (override via `CORS_ORIGINS`). The iOS shell injects its Keychain value at document start; a local Mac build can use `VITE_API_SECRET`. The hosted build contains no secret. Preflight OPTIONS remains before auth because it cannot carry the custom header. All DB access is **async** (`pg` pools via `server/db.js`): reads use the SELECT-only `garminhub_ro` pool and writes use the DML-only `garminhub_rw` pool. The curated column lists exclude `raw_json` and are awaited before `app.listen`; do not move that init after routes can fire. The narrowly scoped DB writes:
 
 - `POST /api/planned/:schedule_id/race-override` — body `{ override }` where override is `1` (force race), `0` (force not-race), or `null` (revert to auto). Writes **only** `is_race_override`.
 - `POST /api/profile` — replaces the single `profile` row (shoes/races/injuries/routines/notes/runna_ical_url). `GET /api/profile` returns parsed arrays.
@@ -202,7 +204,18 @@ Build proceeds in stages; don't build ahead of the current one.
     - **Prompt/copy generalisation:** the planning prompt distinguishes adapting an existing Runna skeleton from composing a bridge/gap plan from scratch. **Superseded in 9f:** the rule moved into the unified planning persona.
   - **9f — unified planning + whole-calendar editing.** ✅ Done. Merged the former planning/composer modes into one `PLANNING_SYSTEM`, one `planReply`, one `POST /api/coach/plan` route and one frontend Plan entry; the compose route, client method, mode and persona were removed. The planner can author a single session or a full reviewed plan in the same conversation. Editing now targets any identifiable future app/Garmin/Runna calendar row; reconcile accepts optional ids for direct unscheduling. Read paths use date-scoped app/Garmin mirror dedupe plus future-only Garmin detail overlays, and `planning.calendar` exposes stable all-source rows with exact text ids, editability and stale-spec markers. Plan lifecycle adds `queued`: non-overlapping pushed plans wait behind the active plan, promote on `/api/plan/current` once no active remains, and count as live for precedence.
 
-## Build & deploy (local macOS) — READ THIS
+## Build & deploy
+
+Production is `deploy/droplet/`: one Node and Python 3.13 image plus private
+Postgres, reached only through edge Caddy. Host cron runs ingest every two hours,
+the daily brief at 10:00 Europe/London, and a retained nightly `pg_dump`. Follow
+the runbook for first deploy, data migration, updates, rollback, and restore.
+
+The iPhone project is generated from `ios/project.yml`. Its `hub://dashboard`
+scheme proxies the dashboard, assets, and API to the droplet with the Keychain
+API key on every request. External links leave the shell and receive no key.
+
+### Local macOS
 
 Local always-on test deployment via launchd (`deploy/local-macos/`, see its `README.md`). **This trips people up:**
 

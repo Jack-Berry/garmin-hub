@@ -16,14 +16,14 @@ const {
 } = require('./planned');
 const { generateBrief, generateDetailedReport, generateDayInsight, chatReply, planReply } = require('./coach');
 const { pacerChat } = require('./pacer');
+const { DEFAULT_ORIGINS, resolveHost, cors, keyGate, mountDashboard } = require('./hosting');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+const HOST = resolveHost();
 
-// Shared-secret auth: single-user app, so no login/sessions — every /api
-// request must carry the secret in an X-Api-Key header (the frontend bakes it
-// in at build time via VITE_API_SECRET). Fail fast if unconfigured: an
-// unauthenticated API should never come up by accident.
+// Shared-secret auth: every API and dashboard request must carry X-Api-Key.
+// Fail fast if unconfigured so the public service never starts open.
 const API_SECRET = process.env.API_SECRET;
 if (!API_SECRET) {
   console.error('API_SECRET is not set (server/.env) — refusing to start unauthenticated.');
@@ -33,27 +33,14 @@ if (!API_SECRET) {
 // JSON body parsing + CORS pinned to the known frontend origins (no wildcard).
 // The custom auth header makes browsers preflight every request, so OPTIONS is
 // answered here, BEFORE the auth gate (preflights never carry custom headers).
-const ORIGINS = (process.env.CORS_ORIGINS || 'http://localhost:4173,http://localhost:5173')
+const ORIGINS = (process.env.CORS_ORIGINS || DEFAULT_ORIGINS.join(','))
   .split(',').map((s) => s.trim());
 app.use(express.json());
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  if (origin && ORIGINS.includes(origin)) res.header('Access-Control-Allow-Origin', origin);
-  res.header('Vary', 'Origin');
-  res.header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, X-Api-Key');
-  if (req.method === 'OPTIONS') return res.sendStatus(204);
-  next();
-});
+app.use(cors(ORIGINS));
 
 // The one auth gate for every /api route. Kept as a single middleware so it's
 // trivially replaceable if hosting brings its own auth (e.g. Cloudflare Access).
-app.use('/api', (req, res, next) => {
-  if (req.get('X-Api-Key') !== API_SECRET) {
-    return res.status(401).json({ error: 'unauthorized' });
-  }
-  next();
-});
+app.use('/api', keyGate(API_SECRET));
 
 // Curated column lists, derived once from the schema (everything but raw_json).
 // Async, so they're awaited in start() below — routes never see them empty.
@@ -1325,13 +1312,18 @@ app.post('/api/plan/session/:schedule_id/replace', withGarminLock(async (req, re
   });
 }));
 
+// The production dashboard is served by this process. Its files use the same
+// shared-secret gate as the API, so the public hostname never serves a byte to
+// an unauthenticated request. API misses remain JSON 404s, not SPA fallbacks.
+app.use('/api', (req, res) => res.status(404).json({ error: 'not found' }));
+mountDashboard(app, API_SECRET, path.resolve(__dirname, '..', 'web', 'dist'));
+
 // Async init: the column lists must exist before any route can run, so they
 // are awaited BEFORE the server starts listening (no startup race).
 async function start() {
   ACTIVITY_COLS = await cols('activities');
   LAP_COLS = await cols('laps');
-  // Loopback only — nothing on the LAN should reach the API directly.
-  app.listen(PORT, '127.0.0.1', () => console.log(`Garmin Hub API listening on 127.0.0.1:${PORT}`));
+  app.listen(PORT, HOST, () => console.log(`Garmin Hub listening on ${HOST}:${PORT}`));
 }
 
 start().catch((err) => {

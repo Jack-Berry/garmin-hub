@@ -1,9 +1,13 @@
-// Thin fetch wrapper over the Stage 2 Express API. Base URL is configurable
-// via VITE_API_URL; defaults to the local API port.
-const BASE = import.meta.env.VITE_API_URL || 'http://localhost:3001';
-// Shared API secret, baked in at build time (web/.env.local) — must match the
-// server's API_SECRET or every call 401s.
-const SECRET = import.meta.env.VITE_API_SECRET || '';
+// Empty means same origin, which is the production image default. The local
+// Mac build sets this to either localhost:3001 or the droplet in .env.local.
+const configuredBase = import.meta.env.VITE_API_BASE;
+const BASE = (configuredBase === ''
+  ? ''
+  : configuredBase || import.meta.env.VITE_API_URL || 'http://localhost:3001')
+  .replace(/\/$/, '');
+// The iOS shell injects its Keychain value before page scripts run. Local Mac
+// builds retain the Vite fallback; the production image sets neither value.
+const SECRET = window.__HUB_API_KEY__ || import.meta.env.VITE_API_SECRET || '';
 
 const qs = (params) => {
   const entries = Object.entries(params).filter(([, v]) => v != null && v !== '');

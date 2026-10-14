@@ -1,0 +1,10 @@
+schema_version: 1
+checks:
+  full:
+    role: required
+    argv: [sh, scripts/full-check.sh]
+    timeout_seconds: 1800
+    env_probes:
+      - [node, --version]
+      - [python3.13, --version]
+      - [xcodebuild, -version]

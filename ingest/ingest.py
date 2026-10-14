@@ -61,7 +61,7 @@ INGEST_DIR = Path(__file__).resolve().parent
 # The rw role is DML-only; DDL is db/schema.pg.sql, applied by db/setup_local.sh.
 DEFAULT_DSN = "postgres://garminhub_rw:garminhub_rw@localhost:5432/garminhub"
 ENV_PATH = INGEST_DIR / ".env"
-TOKENSTORE = INGEST_DIR / ".garth"   # gitignored garth token cache
+TOKENSTORE = Path(os.environ.get("TOKENSTORE", str(INGEST_DIR / ".garth")))
 
 # Garmin's lactate-threshold speed comes back needing a x10 scale to reach true
 # m/s (confirmed against Garmin Connect's displayed LT pace). Single named knob
