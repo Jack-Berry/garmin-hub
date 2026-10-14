@@ -65,7 +65,7 @@ export default function CoachMemory({ onClose, appMode = false }) {
               <div key={m.id} className="flex items-center gap-2">
                 <div className="min-w-0 flex-1 rounded-lg border border-line bg-surface-2 px-3 py-2">
                   <span className="font-mono text-nano text-ink-muted">{(m.created_at || '').slice(0, 10)}</span>
-                  <span className="ml-2 font-body text-sm text-ink">{m.content}</span>
+                  <span className="ml-2 break-words font-body text-sm text-ink">{m.content}</span>
                 </div>
                 <ForgetButton onClick={() => forget(m.id)} />
               </div>

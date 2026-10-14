@@ -23,7 +23,7 @@ export default function GarminRecords() {
           <p className="mt-1 font-body text-micro text-ink-muted">Your Garmin bests, updated by ingest</p>
           <div className="mt-2">
             <StateWrap loading={prs.loading} error={prs.error} empty={prs.data && !prs.data.length}>
-              <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+              <div className="grid grid-cols-2 gap-2">
                 {(prs.data || []).map((r) => <RecordCard key={r.type_id} label={r.label} value={r.value_display} sub={r.record_date} />)}
               </div>
             </StateWrap>
