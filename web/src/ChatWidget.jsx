@@ -57,30 +57,51 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
   const [copyState, setCopyState] = useState('idle');
   const [fallbackText, setFallbackText] = useState(null);
   const [memoryOpen, setMemoryOpen] = useState(false);
+  const [seedPrompt, setSeedPrompt] = useState(null);
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
   const seededRef = useRef(null);
+  const seedRequestRef = useRef(null);
 
   const planning = mode === 'planning';
 
-  // Activity detail can open the existing coach with a visible framing turn.
-  // Send it immediately so the coach can call get_activity_detail; the unique
-  // seed id prevents React effect replays from making a duplicate request.
+  const startSeed = async (nextSeed) => {
+    if (pending) return;
+    const opening = [{ role: 'user', content: nextSeed.message }];
+    seedRequestRef.current = nextSeed.id;
+    setSeedPrompt(null);
+    setMode('chat');
+    setMessages(opening);
+    setInput('');
+    setError(null);
+    setPending(true);
+    try {
+      const { reply } = await api.chat(opening);
+      if (seedRequestRef.current === nextSeed.id) {
+        setMessages([...opening, { role: 'assistant', content: reply }]);
+      }
+    } catch (e) {
+      if (seedRequestRef.current === nextSeed.id) setError(e.message || 'Something went wrong');
+    } finally {
+      if (seedRequestRef.current === nextSeed.id) setPending(false);
+    }
+  };
+
+  // Activity detail opens this panel, but an existing or in-flight thread is
+  // never replaced without confirmation. The athlete can keep the current
+  // thread, or start the seeded activity chat once any pending reply settles.
   useEffect(() => {
     if (!seed?.message || seededRef.current === seed.id) return;
     seededRef.current = seed.id;
-    const opening = [{ role: 'user', content: seed.message }];
     setOpen(true);
-    setMode('chat');
-    setMessages(opening);
-    setError(null);
-    setPending(true);
-    let alive = true;
-    api.chat(opening)
-      .then(({ reply }) => alive && setMessages([...opening, { role: 'assistant', content: reply }]))
-      .catch((e) => alive && setError(e.message || 'Something went wrong'))
-      .finally(() => alive && setPending(false));
-    return () => { alive = false; };
+    if (pending || planning || messages.length) {
+      setSeedPrompt(seed);
+      return;
+    }
+    startSeed(seed);
+    // The seed id is the event boundary. Current thread state is intentionally
+    // inspected only when that event arrives.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seed]);
 
   // Auto-grow the input with its content: reset to the natural (rows=3) height,
@@ -121,7 +142,7 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [messages, pending, open]);
+  }, [messages, pending, open, seedPrompt]);
 
   // Chat and planning threads can't share history (different system prompts),
   // so entering a mode starts fresh — same spirit as the accepted
@@ -445,11 +466,11 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
             Coach
           </h2>
           {planning ? (
-            <p className={`${appMode ? 'hidden' : 'mt-0.5'} font-body text-nano uppercase tracking-[0.18em] text-acc`}>
+            <p className="mt-0.5 font-body text-nano uppercase tracking-[0.18em] text-acc">
               Planning mode
             </p>
           ) : (
-            <p className={`${appMode ? 'hidden' : 'mt-0.5'} font-body text-nano uppercase tracking-[0.18em] text-ink-muted`}>
+            <p className="mt-0.5 font-body text-nano uppercase tracking-[0.18em] text-ink-muted">
               Asks the data, not the workout plan
             </p>
           )}
@@ -654,6 +675,26 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
           </div>
           )
         ))}
+        {seedPrompt && (
+          <div role="alertdialog" aria-label="Start activity chat" className="rounded-xl border border-line bg-surface-2 p-3 text-sm text-ink">
+            <p className="font-semibold">Start a new activity chat?</p>
+            <p className="mt-1 text-xs text-ink-secondary">
+              {pending
+                ? 'A coach reply is still in progress. Wait for it to finish before replacing this thread.'
+                : planning
+                  ? 'Your planning session will stay here unless you confirm a new activity chat.'
+                  : 'Your current coach thread will be replaced only if you confirm.'}
+            </p>
+            <div className="mt-3 flex gap-2">
+              <button onClick={() => setSeedPrompt(null)} className="rounded-lg border border-line px-3 py-1.5 text-xs font-medium text-ink-secondary transition hover:bg-surface-1">
+                Keep current thread
+              </button>
+              <button onClick={() => startSeed(seedPrompt)} disabled={pending} className="rounded-lg bg-acc px-3 py-1.5 text-xs font-semibold text-acc-ink transition hover:opacity-90 disabled:opacity-50">
+                Start activity chat
+              </button>
+            </div>
+          </div>
+        )}
         {pending && (
           <div className="flex justify-start">
             <div className="rounded-2xl rounded-bl-sm bg-surface-2 px-3 py-2 text-sm text-ink-muted">

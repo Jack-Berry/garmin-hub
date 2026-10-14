@@ -1,37 +1,89 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { matchIntervals, plannedWorkSteps } from './activityMatch.js';
+import { matchIntervals, planMatchesActivity, plannedDistance, plannedWorkSteps } from './activityMatch.js';
 
-const target = (fast, slow, type = 'interval') => ({
+const step = (distance, bounds = null, kind = 'interval') => ({
   type: 'ExecutableStepDTO',
-  stepType: { stepTypeKey: type },
-  targetType: { workoutTargetTypeKey: 'pace.zone' },
-  targetValueOne: 1000 / fast,
-  targetValueTwo: 1000 / slow,
+  stepType: { stepTypeKey: kind },
+  endCondition: { conditionTypeKey: 'distance' },
+  endConditionValue: distance,
+  targetType: { workoutTargetTypeKey: bounds ? 'pace.zone' : 'no.target' },
+  targetValueOne: bounds ? 1000 / bounds[0] : null,
+  targetValueTwo: bounds ? 1000 / bounds[1] : null,
+});
+const lap = (lap_index, pace, distance_m = 1000, intensity_type = 'ACTIVE') => ({
+  lap_index, intensity_type, distance_m, avg_speed_mps: 1000 / pace,
+});
+const garmin = (steps) => [{ workoutSteps: steps }];
+
+test('2026-10-01 consumes untargeted blocks and grades both 4 km reps', () => {
+  const plan = garmin([
+    step(3000), step(4000, [255, 275]), step(3000), step(4000, [255, 275]), step(3000),
+  ]);
+  const paces = [349, 327, 315, 264, 261, 263, 268, 315, 317, 314, 265, 267, 266, 265, 323, 345, 328];
+  const matches = matchIntervals(paces.map((value, i) => lap(i + 1, value)), plan);
+  assert.deepEqual(matches.map((row) => row.status), ['hit', 'hit']);
+  assert.deepEqual(matches.map((row) => row.laps.map((item) => item.lap_index)), [[4, 5, 6, 7], [11, 12, 13, 14]]);
 });
 
-test('expands Garmin repeats and ignores recovery targets', () => {
-  const steps = [{ workoutSteps: [{
+test('2026-09-29 keeps each 2 km tempo rep together across auto-laps', () => {
+  const repeat = {
     type: 'RepeatGroupDTO', numberOfIterations: 2,
-    workoutSteps: [target(240, 250), target(360, 380, 'recovery')],
-  }] }];
-  assert.equal(plannedWorkSteps(steps).length, 2);
-});
-
-test('matches active laps in order and grades target distance', () => {
-  const steps = [{ workoutSteps: [target(240, 250), target(240, 250), target(240, 250)] }];
+    workoutSteps: [step(2000, [240, 260]), {
+      type: 'ExecutableStepDTO', stepType: { stepTypeKey: 'rest' },
+      endCondition: { conditionTypeKey: 'time' }, endConditionValue: 120,
+    }],
+  };
+  const plan = garmin([step(2500, null, 'warmup'), repeat, step(1500, null, 'cooldown')]);
   const laps = [
-    { intensity_type: 'active', avg_speed_mps: 1000 / 245 },
-    { intensity_type: 'recovery', avg_speed_mps: 1000 / 370 },
-    { intensity_type: 'active', avg_speed_mps: 1000 / 257 },
-    { intensity_type: 'active', avg_speed_mps: 1000 / 275 },
+    lap(1, 309, 1000, 'WARMUP'), lap(2, 307, 1000, 'WARMUP'), lap(3, 311, 500, 'WARMUP'),
+    lap(4, 252), lap(5, 244), lap(6, 1069, 110, 'REST'),
+    lap(7, 253), lap(8, 249), lap(9, 2083, 60, 'REST'),
   ];
-  assert.deepEqual(matchIntervals(laps, steps).map((row) => row.status), ['hit', 'close', 'missed']);
+  const matches = matchIntervals(laps, plan);
+  assert.equal(plannedDistance(plan), 8000);
+  assert.equal(matches.length, 2);
+  assert.deepEqual(matches.map((row) => row.laps.map((item) => item.lap_index)), [[4, 5], [7, 8]]);
+  assert.deepEqual(matches.map((row) => row.status), ['hit', 'hit']);
 });
 
-test('expands app blocks and leaves Runna text ungraded', () => {
-  const spec = { blocks: [{ kind: 'repeat', count: 2, blocks: [{ length_m: 400, segment_m: 400, target: '4:00', band_s: 2 }] }] };
-  assert.equal(plannedWorkSteps(spec).length, 2);
-  assert.equal(plannedWorkSteps({ distance_m: 5000, segment_m: 500, target: '4:00' }).length, 10);
+test('2026-09-27 grades one 10 km step from ten laps, not lap one', () => {
+  const plan = garmin([step(10000, [250, 260])]);
+  const matches = matchIntervals(Array.from({ length: 10 }, (_, i) => lap(i + 1, 254 + i % 3)), plan);
+  assert.equal(matches.length, 1);
+  assert.equal(matches[0].laps.length, 10);
+  assert.equal(matches[0].status, 'hit');
+});
+
+test('app negative split mirrors the builder profile and default two-second band', () => {
+  const steps = plannedWorkSteps({ blocks: [{ length_m: 20000, segment_m: 500, target: '5:00', strategy: 'negative' }] });
+  assert.equal(steps.length, 40);
+  assert.deepEqual({ fast: steps[0].fast, slow: steps[0].slow }, { fast: 302, slow: 306 });
+  assert.deepEqual({ fast: steps.at(-2).fast, slow: steps.at(-2).slow }, { fast: 270, slow: 295 });
+  assert.deepEqual({ fast: steps.at(-1).fast, slow: steps.at(-1).slow }, { fast: 240, slow: 290 });
+  assert.deepEqual(
+    plannedWorkSteps({ blocks: [{ length_m: 400, segment_m: 400, target: 300 }] }).map(({ fast, slow }) => ({ fast, slow })),
+    [{ fast: 298, slow: 302 }],
+  );
+});
+
+test('simple sub-44 target is converted from 10 km finish time to pace', () => {
+  const steps = plannedWorkSteps({ distance_m: 10000, segment_m: 500, target: 'sub 44' });
+  assert.equal(steps.length, 20);
+  assert.deepEqual({ fast: steps[0].fast, slow: steps[0].slow }, { fast: 262, slow: 266 });
+  const fiveK = plannedWorkSteps({ distance_m: 5000, segment_m: 500, target: '19:54' });
+  assert.equal(fiveK[0].fast, 236.8);
+  assert.equal(fiveK[0].slow, 240.8);
+});
+
+test('Runna text stays ungraded', () => {
   assert.deepEqual(plannedWorkSteps(['8 x 400m hard', '90 sec recovery']), []);
+});
+
+test('only the closest plausible same-day run matches a planned distance', () => {
+  const workout = { steps: garmin([step(10000, [250, 260])]) };
+  const warmup = { activity_id: 'warmup', activity_group: 'run', distance_m: 1278 };
+  const race = { activity_id: 'race', activity_group: 'run', distance_m: 10069 };
+  assert.equal(planMatchesActivity(warmup, workout, [warmup, race]), false);
+  assert.equal(planMatchesActivity(race, workout, [warmup, race]), true);
 });

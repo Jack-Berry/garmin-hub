@@ -4,14 +4,17 @@ import {
 } from 'recharts';
 import { api } from './api';
 import { useFetch } from './useFetch';
-import { Badge, Icon, StateWrap, btnPrimary } from './ui';
+import { AXIS, GRID, INK, Badge, Icon, StateWrap, btnPrimary } from './ui';
 import { duration, km, pace, paceFromMps, shortDate } from './format';
-import { matchIntervals } from './activityMatch';
+import { matchIntervals, planMatchesActivity } from './activityMatch';
 
 const has = (value) => value != null && value !== '';
 const number = (value, digits = 0) => has(value) ? Number(value).toFixed(digits) : '-';
 const tone = { hit: 'blue', close: 'amber', missed: 'slate' };
 const isRecovery = (value) => /rest|recover|warm|cool/i.test(value || '');
+const humanise = (value) => value
+  ? value.replace(/_/g, ' ').toLowerCase().replace(/^\w/, (letter) => letter.toUpperCase())
+  : null;
 const paceLabel = (seconds, unit = true) => {
   if (!(seconds > 0)) return '-';
   const rounded = Math.round(seconds);
@@ -41,7 +44,7 @@ function PaceTooltip({ active, payload, label, football }) {
 }
 
 function PaceChart({ laps, football }) {
-  const rows = laps.map((lap) => {
+  const rows = laps.filter((lap) => lap.distance_m >= 100).map((lap) => {
     const lapPace = lap.avg_speed_mps > 0 ? 1000 / lap.avg_speed_mps : null;
     const recovery = isRecovery(lap.intensity_type);
     return {
@@ -59,19 +62,19 @@ function PaceChart({ laps, football }) {
       <div className="mt-3 h-60 w-full min-w-0">
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={rows} margin={{ top: 8, right: 8, bottom: 0, left: -14 }}>
-            <CartesianGrid stroke="rgba(148,163,184,0.16)" vertical={false} />
-            <XAxis dataKey="lap" tick={{ fill: '#83838c', fontSize: 10 }} tickLine={false} axisLine={false} />
+            <CartesianGrid stroke={GRID} vertical={false} />
+            <XAxis dataKey="lap" tick={{ fill: AXIS, fontSize: 10 }} tickLine={false} axisLine={false} />
             {showPace && (
-              <YAxis yAxisId="pace" reversed domain={['auto', 'auto']} tickFormatter={(v) => paceLabel(v, false)} tick={{ fill: '#83838c', fontSize: 10 }} tickLine={false} axisLine={false} width={48} />
+              <YAxis yAxisId="pace" reversed domain={['auto', 'auto']} tickFormatter={(v) => paceLabel(v, false)} tick={{ fill: AXIS, fontSize: 10 }} tickLine={false} axisLine={false} width={48} />
             )}
             {showHr && (
-              <YAxis yAxisId="hr" orientation="right" domain={['dataMin - 8', 'dataMax + 8']} tick={{ fill: '#83838c', fontSize: 10 }} tickLine={false} axisLine={false} width={34} />
+              <YAxis yAxisId="hr" orientation="right" domain={['dataMin - 8', 'dataMax + 8']} tick={{ fill: AXIS, fontSize: 10 }} tickLine={false} axisLine={false} width={34} />
             )}
             <Tooltip content={<PaceTooltip football={football} />} />
             <Legend iconType="plainline" wrapperStyle={{ fontSize: 11 }} />
-            {showPace && <Line yAxisId="pace" dataKey="workPace" name="Pace" stroke="#60a5fa" strokeWidth={2} dot={{ r: 3 }} connectNulls isAnimationActive={false} />}
-            {showPace && <Line yAxisId="pace" dataKey="recoveryPace" name="Recovery" stroke="#f59e0b" strokeWidth={2} dot={{ r: 4 }} connectNulls={false} isAnimationActive={false} />}
-            {showHr && <Line yAxisId="hr" dataKey="hr" name="Heart rate" stroke="#83838c" strokeWidth={1.5} dot={false} connectNulls isAnimationActive={false} />}
+            {showPace && <Line yAxisId="pace" dataKey="workPace" name="Pace" stroke="var(--sem-blue)" strokeWidth={2} dot={{ r: 3 }} connectNulls isAnimationActive={false} />}
+            {showPace && <Line yAxisId="pace" dataKey="recoveryPace" name="Recovery" stroke="var(--sem-amber)" strokeWidth={2} dot={{ r: 4 }} connectNulls={false} isAnimationActive={false} />}
+            {showHr && <Line yAxisId="hr" dataKey="hr" name="Heart rate" stroke={INK} strokeWidth={1.5} dot={false} connectNulls isAnimationActive={false} />}
           </LineChart>
         </ResponsiveContainer>
       </div>
@@ -123,7 +126,7 @@ function FormMetrics({ activity, laps }) {
               {trend.length > 1 && (
                 <div className="mt-2 h-8">
                   <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={trend}><Line dataKey="value" stroke="#83838c" strokeWidth={1.5} dot={false} isAnimationActive={false} /></LineChart>
+                    <LineChart data={trend}><Line dataKey="value" stroke={INK} strokeWidth={1.5} dot={false} isAnimationActive={false} /></LineChart>
                   </ResponsiveContainer>
                 </div>
               )}
@@ -168,7 +171,7 @@ function LapTable({ laps, football }) {
   );
 }
 
-function PlannedActual({ planned, laps }) {
+function PlannedActual({ planned, laps, activity, dayActivities }) {
   if (!planned?.length) return null;
   return (
     <section>
@@ -176,12 +179,15 @@ function PlannedActual({ planned, laps }) {
       <div className="mt-3 space-y-3">
         {planned.map((workout) => {
           const textOnly = Array.isArray(workout.steps) && workout.steps.every((step) => typeof step === 'string');
-          const matches = matchIntervals(laps, workout.steps);
+          const isMatch = planMatchesActivity(activity, workout, dayActivities);
+          const matches = isMatch ? matchIntervals(laps, workout.steps) : [];
           return (
             <div key={String(workout.schedule_id)} className="rounded-lg border border-line p-3">
               <div className="font-body text-sm font-semibold text-ink">{workout.title || 'Planned workout'}</div>
               {textOnly ? (
                 <ul className="mt-2 space-y-1 text-xs text-ink-secondary">{workout.steps.map((line, i) => <li key={i}>{line}</li>)}</ul>
+              ) : !isMatch ? (
+                <p className="mt-2 text-xs text-ink-muted">No matching plan for this activity.</p>
               ) : matches.length ? (
                 <div className="mt-2 grid gap-1.5 sm:grid-cols-2">
                   {matches.map((match, i) => (
@@ -202,11 +208,11 @@ function PlannedActual({ planned, laps }) {
   );
 }
 
-function DetailBody({ data, plannedState, onAskCoach }) {
+function DetailBody({ data, plannedState, dayActivities, onAskCoach }) {
   const activity = data;
   const laps = data.laps || [];
   const football = activity.activity_group === 'football';
-  const effect = [activity.training_effect_label, has(activity.aerobic_training_effect) ? `Aerobic ${number(activity.aerobic_training_effect, 1)}` : null, has(activity.anaerobic_training_effect) ? `Anaerobic ${number(activity.anaerobic_training_effect, 1)}` : null].filter(Boolean).join(' · ');
+  const effect = [humanise(activity.training_effect_label), has(activity.aerobic_training_effect) ? `Aerobic ${number(activity.aerobic_training_effect, 1)}` : null, has(activity.anaerobic_training_effect) ? `Anaerobic ${number(activity.anaerobic_training_effect, 1)}` : null].filter(Boolean).join(', ');
   return (
     <>
       <div className="grid grid-cols-2 gap-x-4 gap-y-3 border-b border-line px-4 py-4 sm:grid-cols-4 sm:px-6">
@@ -223,17 +229,19 @@ function DetailBody({ data, plannedState, onAskCoach }) {
         <FormMetrics activity={activity} laps={laps} />
         <LapTable laps={laps} football={football} />
         <StateWrap loading={plannedState.loading} error={plannedState.error} empty={false}>
-          <PlannedActual planned={plannedState.data} laps={laps} />
+          <PlannedActual planned={plannedState.data} laps={laps} activity={activity} dayActivities={dayActivities} />
         </StateWrap>
-        <button className={`${btnPrimary} inline-flex items-center gap-2`} onClick={() => onAskCoach(activity)}>
-          <Icon name="message-circle" /> Ask coach about this run
-        </button>
+        {activity.activity_group !== 'walk' && (
+          <button className={`${btnPrimary} inline-flex items-center gap-2`} onClick={() => onAskCoach(activity)}>
+            <Icon name="message-circle" /> Ask coach about this run
+          </button>
+        )}
       </div>
     </>
   );
 }
 
-export default function ActivityDetail({ activity, onClose, onAskCoach }) {
+export default function ActivityDetail({ activity, dayActivities, onClose, onAskCoach }) {
   const date = activity.start_time_local?.slice(0, 10);
   const detail = useFetch(() => api.activity(activity.activity_id), [activity.activity_id]);
   const planned = useFetch(() => api.planned({ from: date, to: date }), [date]);
@@ -255,7 +263,7 @@ export default function ActivityDetail({ activity, onClose, onAskCoach }) {
           <button onClick={onClose} aria-label="Close activity detail" className="shrink-0 rounded-lg border border-line px-2.5 py-1 text-sm text-ink-secondary transition hover:bg-surface-2">✕</button>
         </header>
         <div className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
-          <div className="p-4 sm:p-6"><StateWrap loading={detail.loading} error={detail.error} empty={!detail.data}>{detail.data && <DetailBody data={detail.data} plannedState={planned} onAskCoach={onAskCoach} />}</StateWrap></div>
+          <div className="p-4 sm:p-6"><StateWrap loading={detail.loading} error={detail.error} empty={!detail.data}>{detail.data && <DetailBody data={detail.data} plannedState={planned} dayActivities={dayActivities} onAskCoach={onAskCoach} />}</StateWrap></div>
         </div>
       </div>
     </div>

@@ -351,7 +351,7 @@ export default function App() {
           {(!appMode || tab === 'activities') && (
             <div className="grid grid-cols-1 gap-4 md:gap-5 lg:grid-cols-[1.5fr_1fr] lg:items-start [&>*]:min-w-0">
               <div className="space-y-4 md:space-y-5">
-                <RecentActivities onSelect={setDetailActivity} />
+                <RecentActivities onSelect={(activity, dayActivities) => setDetailActivity({ activity, dayActivities })} />
                 {!appMode && <PersonalRecords />}
               </div>
               <PlannedWorkouts />
@@ -362,7 +362,7 @@ export default function App() {
 
         {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
         {pacerOpen && <PacerModal onClose={() => setPacerOpen(false)} />}
-        {detailActivity && <ActivityDetail activity={detailActivity} onClose={() => setDetailActivity(null)} onAskCoach={askCoachAboutActivity} />}
+        {detailActivity && <ActivityDetail activity={detailActivity.activity} dayActivities={detailActivity.dayActivities} onClose={() => setDetailActivity(null)} onAskCoach={askCoachAboutActivity} />}
         <ChatWidget appMode={appMode} active={!appMode || tab === 'coach'} seed={coachSeed} />
         {appMode && (
           <nav className="app-tabs fixed inset-x-0 bottom-0 z-30 grid grid-cols-4 border-t border-line bg-surface-1/95 backdrop-blur" aria-label="App sections">
