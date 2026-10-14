@@ -18,6 +18,8 @@ const { generateBrief, generateDetailedReport, generateDayInsight, chatReply, pl
 const { pacerChat } = require('./pacer');
 const { DEFAULT_ORIGINS, resolveHost, cors, keyGate, mountDashboard } = require('./hosting');
 const { createHealthHandler, createStatusHandler } = require('./system-status');
+const { pacerInput, createWriteGate } = require('./garmin-write');
+const { scheduleId: exactScheduleId } = require('./schedule-id');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -120,7 +122,7 @@ app.get('/api/planned', handler(async (req, res) => {
   const todayParam = params.length;
   where.push(appGhostFilterSql(todayParam));
   const rows = await db.all(
-    `SELECT p.schedule_id, p.workout_id, p.calendar_date,
+    `SELECT p.schedule_id::text AS schedule_id, p.workout_id, p.calendar_date,
             COALESCE(gh.title, p.title) AS title, p.sport_type, p.source,
             p.is_race_auto, p.is_race_override,
             COALESCE(p.is_race_override, p.is_race_auto) AS is_race,
@@ -267,13 +269,16 @@ app.get('/api/race-predictions', handler(async (req, res) => {
 // where override is 1 (force race), 0 (force not-race), or null (revert to
 // auto detection). Writes ONLY is_race_override — never any other column.
 app.post('/api/planned/:schedule_id/race-override', handler(async (req, res) => {
-  const scheduleId = Number(req.params.schedule_id);
+  const scheduleId = exactScheduleId(req.params.schedule_id);
+  if (!scheduleId) {
+    return res.status(400).json({ error: 'bad schedule_id' });
+  }
   const { override } = req.body || {};
   if (![0, 1, null].includes(override)) {
     return res.status(400).json({ error: 'override must be 0, 1, or null' });
   }
   const result = await writeDb.run(
-    'UPDATE planned_workouts SET is_race_override = $1 WHERE schedule_id = $2',
+    'UPDATE planned_workouts SET is_race_override = $1 WHERE schedule_id = $2::bigint',
     [override, scheduleId]);
   if (result.rowCount === 0) {
     return res.status(404).json({ error: 'planned workout not found' });
@@ -567,7 +572,9 @@ app.post('/api/ingest/refresh', async (req, res) => {
 // The AI (pacer.js) ONLY gathers params; the build + Garmin upload happen in
 // pacer_cli.py, and ONLY /api/pacer/push writes to Garmin (after explicit
 // preview approval in the UI). Reuses the ingest Python-spawn pattern.
-const PACER_SCRIPT = path.resolve(__dirname, '..', 'ingest', 'pacer_cli.py');
+const PACER_SCRIPT = process.env.PACER_SCRIPT
+  || path.resolve(__dirname, '..', 'ingest', 'pacer_cli.py');
+
 
 // Run pacer_cli.py in the given mode, feeding params as JSON on stdin and
 // resolving its parsed JSON stdout. Rejects with stderr on non-zero exit.
@@ -578,12 +585,14 @@ const runPacer = (mode, params, timeoutMs) =>
     });
     let out = '';
     let err = '';
-    child.stdin.write(JSON.stringify(params));
+    child.stdin.write(JSON.stringify(pacerInput(mode, params)));
     child.stdin.end();
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
-      reject(new Error('Pacer timed out — the Garmin token may have expired; re-authenticate in a terminal (MFA).'));
-    }, timeoutMs);
+      const error = new Error('Pacer timed out; Garmin may already have applied the request. Retry to check and adopt the existing workout.');
+      error.outcomeUnknown = true;
+      reject(error);
+    }, Number(process.env.PACER_TIMEOUT_MS) || timeoutMs);
     child.stdout.on('data', (d) => { out += d; });
     child.stderr.on('data', (d) => { err += d; });
     child.on('error', (e) => { clearTimeout(timer); reject(new Error(`Failed to start pacer: ${e.message}`)); });
@@ -596,6 +605,18 @@ const runPacer = (mode, params, timeoutMs) =>
       catch { reject(new Error(`pacer returned unparseable output: ${out.slice(0, 200)}`)); }
     });
   });
+
+const garminWriteGate = createWriteGate();
+const withGarminLock = (fn) => handler(async (req, res) => {
+  if (!garminWriteGate.enter()) {
+    return res.status(409).json({ error: 'another Garmin write is already in flight' });
+  }
+  try {
+    await fn(req, res);
+  } finally {
+    garminWriteGate.leave();
+  }
+});
 
 // Conversational Q&A to gather pacer params (Sonnet). Body: { messages }.
 // Returns { reply, params } — params is non-null once the Q&A is complete and
@@ -620,8 +641,7 @@ app.post('/api/pacer/preview', handler(async (req, res) => {
 // _ical_schedule_id — sha1, first 15 hex digits = 60 bits, negated) so it can
 // never collide with Garmin's positive calendar-item ids. Computed as BigInt
 // and bound as a string: the value exceeds 2^53, so a JS Number would round
-// BEFORE it ever reached Postgres (the db.js int8 read-back TODO still rounds
-// it on the way out, same as ical rows).
+// BEFORE it ever reached Postgres. Read paths cast schedule_id back to text.
 const appScheduleId = (uid) =>
   (-BigInt('0x' + crypto.createHash('sha1').update(uid).digest('hex').slice(0, 15))).toString();
 
@@ -648,9 +668,16 @@ const persistAppRow = (result, spec, planId, rationale) => writeDb.run(
 // Garmin push is the point of no return — a failed insert afterwards must not
 // look like a failed push (a retry would double-book Garmin), so it degrades
 // to persisted:false in the response instead of a 500.
-app.post('/api/pacer/push', handler(async (req, res) => {
+app.post('/api/pacer/push', withGarminLock(async (req, res) => {
   const spec = req.body || {};
-  const result = await runPacer('push', spec, 120000);
+  let result;
+  try {
+    result = await runPacer('push', spec, 120000);
+  } catch (err) {
+    if (!err.outcomeUnknown) throw err;
+    return res.json({ name: spec.name || 'workout', date: spec.date || null,
+      persisted: false, recorded: false, outcome_unknown: true, error: err.message });
+  }
   recentPushes.push({
     name: result.name,
     date: result.date,
@@ -771,12 +798,15 @@ app.post('/api/plan/save', handler(async (req, res) => {
 // free-text goal_race ("Telford 10K on 2026-09-13"), else the last session
 // date. SQL fragment used by the auto-complete check and activation retirement.
 const PLAN_FINISHED_SQL =
-  `COALESCE(substring(goal_race from '\\d{4}-\\d{2}-\\d{2}')::date, date_to) < $1::date`;
+  `COALESCE(CASE
+     WHEN to_char(to_date(substring(goal_race from '\\d{4}-\\d{2}-\\d{2}'), 'YYYY-MM-DD'), 'YYYY-MM-DD')
+          = substring(goal_race from '\\d{4}-\\d{2}-\\d{2}')
+     THEN to_date(substring(goal_race from '\\d{4}-\\d{2}-\\d{2}'), 'YYYY-MM-DD')
+   END, date_to) < $1::date`;
 
 // Current plan + its push state — drives the dashboard activation card.
-// Sessions carry schedule_id as TEXT (the negative 60-bit hashes round past
-// 2^53 as JS Numbers — the documented db.js int8 TODO; string ids stay exact
-// so push-next can key on them). Push state per session is workout_id:
+// Sessions carry schedule_id as TEXT so negative 60-bit hashes stay exact and
+// push-next can key on them. Push state per session is workout_id:
 // NULL = not yet pushed. Counts split pending (future, pushable) from expired
 // (date passed unpushed — never pushed, not blocking completion).
 // runna_remaining (9d-3, span-scoped): future garmin/runna_ical rows INSIDE
@@ -880,7 +910,8 @@ app.get('/api/plan/current', handler(async (req, res) => {
 // ingest's own calendar-driven cleanup — they may be real workouts.
 app.post('/api/plan/:plan_id/runna-cleared', handler(async (req, res) => {
   const plan = await db.get(
-    'SELECT plan_id, status FROM plans WHERE plan_id = $1', [req.params.plan_id]);
+    'SELECT plan_id, status, date_from, date_to FROM plans WHERE plan_id = $1',
+    [req.params.plan_id]);
   if (!plan) return res.status(404).json({ error: 'plan not found' });
   if (!['draft', 'active'].includes(plan.status)) {
     return res.status(409).json({ error: `plan is ${plan.status} — nothing to clear` });
@@ -889,8 +920,10 @@ app.post('/api/plan/:plan_id/runna-cleared', handler(async (req, res) => {
     'UPDATE plans SET runna_cleared_at = $2 WHERE plan_id = $1',
     [plan.plan_id, new Date().toISOString()]);
   const dropped = await writeDb.run(
-    `DELETE FROM planned_workouts WHERE source = 'runna_ical' AND calendar_date >= $1`,
-    [localDate()]);
+    `DELETE FROM planned_workouts
+     WHERE source = 'runna_ical'
+       AND calendar_date BETWEEN GREATEST($1::date, $2::date) AND $3::date`,
+    [localDate(), plan.date_from, plan.date_to]);
   res.json({ cleared: plan.plan_id, runna_ical_dropped: dropped.rowCount });
 }));
 
@@ -905,25 +938,11 @@ app.post('/api/plan/:plan_id/runna-cleared', handler(async (req, res) => {
 // plan flips to 'active', or 'queued' behind a non-overlapping running plan.
 // Mirror of the 9a push hazard: if Garmin succeeded but the row update failed,
 // respond recorded:false rather than 500 — a blind retry WOULD double-book.
-// In-process lock (ingestRunning pattern): a Garmin plan write takes ~30s of
+// In-process lock (ingestRunning pattern): a Garmin write takes about 30s of
 // I/O, so overlapping calls could select the same pending session (push-next)
 // or reconcile the same row twice (Stage 9d edits) and double-book. One
-// Garmin-writing plan operation at a time, enforced server-side — shared by
-// push-next and the move/remove/replace edits below.
-let planPushRunning = false;
-
-const withGarminLock = (fn) => handler(async (req, res) => {
-  if (planPushRunning) {
-    return res.status(409).json({ error: 'another Garmin plan write is already in flight' });
-  }
-  planPushRunning = true;
-  try {
-    await fn(req, res);
-  } finally {
-    planPushRunning = false;
-  }
-});
-
+// Garmin-writing operation at a time, enforced server-side and shared by the
+// one-off push, push-next, discard, and the move/remove/replace edits below.
 app.post('/api/plan/:plan_id/push-next', withGarminLock(pushNextSession));
 
 async function pushNextSession(req, res) {
@@ -966,7 +985,18 @@ async function pushNextSession(req, res) {
     return res.json({ done: true, status: 'active' });
   }
 
-  const result = await runPacer('push', next.steps_json, 120000);
+  let result;
+  try {
+    result = await runPacer('push', next.steps_json, 120000);
+  } catch (err) {
+    if (!err.outcomeUnknown) throw err;
+    return res.json({
+      pushed: { schedule_id: next.schedule_id,
+        name: next.steps_json?.name || 'workout', date: next.calendar_date,
+        workout_id: null },
+      recorded: false, outcome_unknown: true, remaining: null, error: err.message,
+    });
+  }
   recentPushes.push({
     name: result.name,
     date: result.date,
@@ -1071,8 +1101,8 @@ const RUNNA_FEED_EDIT_ERROR =
 // Load + gate an editable session by schedule_id (text — exact past 2^53).
 // Responds with the right error itself and returns null when not editable.
 async function editableSession(req, res) {
-  const id = req.params.schedule_id;
-  if (!/^-?\d+$/.test(id)) {
+  const id = exactScheduleId(req.params.schedule_id);
+  if (!id) {
     res.status(400).json({ error: 'bad schedule_id' });
     return null;
   }
@@ -1172,7 +1202,16 @@ app.post('/api/plan/session/:schedule_id/move', withGarminLock(async (req, res) 
       from_date: row.calendar_date, to_date,
     };
     if (row.source === 'garmin') params.schedule_id = row.schedule_id;
-    reconcileResult = await runPacer('reconcile', params, 120000);
+    try {
+      reconcileResult = await runPacer('reconcile', params, 120000);
+    } catch (err) {
+      if (!err.outcomeUnknown) throw err;
+      return res.json({
+        moved: { schedule_id: row.schedule_id, title: row.title,
+          from: row.calendar_date, to: to_date },
+        recorded: false, outcome_unknown: true, warning: err.message,
+      });
+    }
     warning = reconcileResult.warning || null;
     recentPushes.push({ name: row.title, date: to_date, workout_id: row.workout_id,
                         pushed_at: new Date().toISOString() });
@@ -1224,9 +1263,17 @@ app.post('/api/plan/session/:schedule_id/remove', withGarminLock(async (req, res
   const row = await editableSession(req, res);
   if (!row) return;
   if (row.source !== 'runna_ical' && row.workout_id != null) {
-    const params = { op: 'remove', workout_id: row.workout_id };
+    const params = { op: 'remove', workout_id: row.workout_id, date: row.calendar_date };
     if (row.source === 'garmin') params.schedule_id = row.schedule_id;
-    await runPacer('reconcile', params, 120000);
+    try {
+      await runPacer('reconcile', params, 120000);
+    } catch (err) {
+      if (!err.outcomeUnknown) throw err;
+      return res.json({
+        removed: { schedule_id: row.schedule_id, title: row.title, date: row.calendar_date },
+        recorded: false, outcome_unknown: true, warning: err.message,
+      });
+    }
   }
   let recorded = true;
   try {
@@ -1281,9 +1328,27 @@ app.post('/api/plan/session/:schedule_id/replace', withGarminLock(async (req, re
   if (row.workout_id != null) {
     const params = { op: 'replace', replace_workout_id: row.workout_id, ...spec };
     if (row.source === 'garmin') params.replace_schedule_id = row.schedule_id;
-    result = await runPacer('reconcile', params, 120000);
+    try {
+      result = await runPacer('reconcile', params, 120000);
+    } catch (err) {
+      if (!err.outcomeUnknown) throw err;
+      return res.json({
+        updated: { schedule_id: row.schedule_id, name: spec.name,
+          date: spec.date, workout_id: null },
+        recorded: false, outcome_unknown: true, warning: err.message,
+      });
+    }
   } else {
-    result = await runPacer('push', spec, 120000);
+    try {
+      result = await runPacer('push', spec, 120000);
+    } catch (err) {
+      if (!err.outcomeUnknown) throw err;
+      return res.json({
+        updated: { schedule_id: row.schedule_id, name: spec.name,
+          date: spec.date, workout_id: null },
+        recorded: false, outcome_unknown: true, warning: err.message,
+      });
+    }
   }
   recentPushes.push({ name: result.name, date: result.date,
                       workout_id: result.workout_id, pushed_at: new Date().toISOString() });

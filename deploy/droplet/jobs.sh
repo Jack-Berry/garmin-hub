@@ -74,12 +74,15 @@ run_backup() {
     rm -f "$temporary"
     return "$code"
   fi
-  hash=$(sha256sum "$temporary" | awk '{print $1}') || { code=$?; rm -f "$temporary"; return "$code"; }
+  hash_line=$(sha256sum "$temporary") || {
+    code=$?; rm -f "$temporary" "$sidecar_temporary"; return "$code"
+  }
+  hash=${hash_line%% *}
   printf '%s  %s\n' "$hash" "$(basename "$target")" > "$sidecar_temporary" || {
     code=$?; rm -f "$temporary" "$sidecar_temporary"; return "$code"
   }
-  mv "$temporary" "$target" || { code=$?; rm -f "$temporary" "$sidecar_temporary"; return "$code"; }
-  mv "$sidecar_temporary" "$sidecar" || { code=$?; rm -f "$target" "$sidecar_temporary"; return "$code"; }
+  mv "$sidecar_temporary" "$sidecar" || { code=$?; rm -f "$temporary" "$sidecar_temporary"; return "$code"; }
+  mv "$temporary" "$target" || { code=$?; rm -f "$temporary" "$sidecar"; return "$code"; }
   find "$backup_dir" -type f -name 'garminhub-*.dump' -mtime +14 \
     -exec sh -c 'for dump do rm -f "$dump" "$dump.sha256"; done' sh {} +
 }

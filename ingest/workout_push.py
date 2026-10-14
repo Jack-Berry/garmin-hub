@@ -79,6 +79,42 @@ def find_schedule_id(g, workout_id, date_str):
     return None
 
 
+def has_schedule_id(g, schedule_id, date_str):
+    """Whether a particular calendar entry still exists on its known date."""
+    cal = g.get_scheduled_workouts(int(date_str[:4]), int(date_str[5:7]))
+    return any(
+        str(item.get("id")) == str(schedule_id)
+        for item in (cal.get("calendarItems", []) if isinstance(cal, dict) else [])
+    )
+
+
+def find_idempotent_push(g, date_str, workout_name, request_key):
+    """Find a prior Garmin Hub push after an uncertain client outcome.
+
+    Calendar title/date narrow the candidates; the uploaded workout description
+    carries the stable request key so an unrelated same-name workout is never
+    adopted.
+    """
+    if not request_key:
+        return None
+    cal = g.get_scheduled_workouts(int(date_str[:4]), int(date_str[5:7]))
+    for item in (cal.get("calendarItems", []) if isinstance(cal, dict) else []):
+        if (str(item.get("itemType", "")).lower() != "workout"
+                or item.get("date") != date_str
+                or (item.get("title") or item.get("workoutName")) != workout_name):
+            continue
+        wid = item.get("workoutId")
+        if wid is None:
+            continue
+        try:
+            workout = g.get_workout_by_id(wid)
+        except Exception:
+            continue
+        if workout.get("description") == f"Garmin Hub request {request_key}":
+            return wid, item.get("id")
+    return None
+
+
 # --- Test workouts ------------------------------------------------------------
 def build_format_check():
     """(a) Sub-20 5k, km-paired negative, 500m — re-confirm template parity."""

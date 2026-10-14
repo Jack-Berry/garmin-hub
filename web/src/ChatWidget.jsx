@@ -296,6 +296,10 @@ export default function ChatWidget({ appMode = false, active = true }) {
     try {
       const res = await api.pacerPush(msg.spec);
       const advanced = messages.map((m, j) => (j === i ? { ...m, pushed: res } : m));
+      if (res.outcome_unknown) {
+        setError(res.error || 'Garmin may have accepted this workout. Retry to check and adopt it.');
+        return;
+      }
       // Garmin took it but the hub failed to record it (persisted:false). Same
       // hazard the plan-push loop halts on: the workout IS on the watch, so a
       // retry would double-book it — but the app has no row for it. Stamp the
@@ -305,7 +309,7 @@ export default function ChatWidget({ appMode = false, active = true }) {
       if (res.persisted === false) {
         setMessages(advanced);
         setError(`“${res.name}” reached Garmin but the hub failed to record it. ` +
-          'Don’t push it again — it is already on your watch. It will reappear in ' +
+          'Don’t push it again - it is already on your watch. It will reappear in ' +
           'the hub after the next data refresh, as a plain calendar workout.');
         return;
       }
@@ -353,6 +357,11 @@ export default function ChatWidget({ appMode = false, active = true }) {
         res = await api.discardPlan(e.plan_id);
       } else {
         res = await api.replaceSession(e.schedule_id, e.spec);
+      }
+      if (res.outcome_unknown) {
+        setError(res.warning || res.error ||
+          'Garmin may have applied this change. Retry to check and adopt it before continuing.');
+        return;
       }
       const extra =
         (res.warning ? ` Note: ${res.warning}` : '') +

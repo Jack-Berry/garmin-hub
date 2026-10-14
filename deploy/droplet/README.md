@@ -180,8 +180,11 @@ docker run --rm -v garmin-hub-garth-cache:/dest \
 docker exec garmin-hub-postgres rm /tmp/restore.dump
 rm restore.dump .env.restore
 rm -rf .garth-restore
+# The restored GARMINHUB_RO_PASSWORD and GARMINHUB_RW_PASSWORD must match the
+# passwords already assigned to the live Postgres roles. If they do not, use
+# the postgres administrator to ALTER ROLE for both roles before starting app.
 docker compose --project-name garmin-hub --env-file deploy/droplet/.env \
-  -f deploy/droplet/compose.yml start app
+  -f deploy/droplet/compose.yml up -d app
 set -a; . deploy/droplet/.env; set +a
 curl --fail --silent --show-error -H "X-Api-Key: $API_SECRET" \
   https://hub.berrydev.co.uk/api/health

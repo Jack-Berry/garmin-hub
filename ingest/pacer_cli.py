@@ -386,12 +386,20 @@ def cmd_push(params):
     if not date_str:
         raise ValueError("push requires a 'date' (YYYY-MM-DD) to schedule on")
     w = build(params)
+    request_key = params.get("_idempotency_key")
+    if request_key:
+        w["description"] = f"Garmin Hub request {request_key}"
     # Redirect Garmin's login/upload prints to stderr so stdout stays JSON-only.
     real_stdout, sys.stdout = sys.stdout, sys.stderr
     try:
         import workout_push as wp
         g = wp.connect()
-        wid, sid = _upload_and_schedule(g, w, date_str)
+        prior = wp.find_idempotent_push(
+            g, date_str, w["workoutName"], request_key)
+        if prior:
+            wid, sid = prior
+        else:
+            wid, sid = _upload_and_schedule(g, w, date_str)
     finally:
         sys.stdout = real_stdout
     return _push_result(w, wid, sid, date_str)
@@ -421,6 +429,9 @@ def cmd_reconcile(params):
         raise ValueError(f"reconcile op must be move/remove/replace, got {op!r}")
     if op == "replace":
         w = build(params)  # guard runs here, BEFORE any network
+        request_key = params.get("_idempotency_key")
+        if request_key:
+            w["description"] = f"Garmin Hub request {request_key}"
     real_stdout, sys.stdout = sys.stdout, sys.stderr
     try:
         import workout_push as wp
@@ -433,7 +444,9 @@ def cmd_reconcile(params):
                 old_sid = wp.find_schedule_id(g, wid, from_date)
             else:
                 old_sid = int(old_sid)
-            sid, _ = wp.schedule(g, wid, to_date)
+            sid = wp.find_schedule_id(g, wid, to_date)
+            if sid is None:
+                sid, _ = wp.schedule(g, wid, to_date)
             warning = None
             if old_sid is None:
                 warning = (f"no calendar entry found for workout {wid} on "
@@ -451,7 +464,17 @@ def cmd_reconcile(params):
         elif op == "remove":
             wid = int(params["workout_id"])
             old_sid = params.get("schedule_id")
-            if old_sid is None:
+            date_str = params.get("date")
+            if date_str and old_sid is None:
+                old_sid = wp.find_schedule_id(g, wid, date_str)
+                if old_sid is None:
+                    out = {"workout_id": wid, "removed": True, "adopted": True}
+                else:
+                    wp.delete(g, wid)
+                    out = {"workout_id": wid, "removed": True}
+            elif date_str and not wp.has_schedule_id(g, old_sid, date_str):
+                out = {"workout_id": wid, "unscheduled": True, "adopted": True}
+            elif old_sid is None:
                 wp.delete(g, wid)
                 out = {"workout_id": wid, "removed": True}
             else:
@@ -460,7 +483,12 @@ def cmd_reconcile(params):
         elif op == "replace":
             old_wid = int(params["replace_workout_id"])
             old_sid = params.get("replace_schedule_id")
-            wid, sid = _upload_and_schedule(g, w, params["date"])
+            prior = wp.find_idempotent_push(
+                g, params["date"], w["workoutName"], request_key)
+            if prior:
+                wid, sid = prior
+            else:
+                wid, sid = _upload_and_schedule(g, w, params["date"])
             warning = None
             try:
                 if old_sid is None:

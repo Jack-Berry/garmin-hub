@@ -32,11 +32,23 @@ else
   /bin/date "$@"
 fi
 STUB
-chmod +x "$tmp/bin/docker" "$tmp/bin/date"
+cat > "$tmp/bin/sha256sum" <<'STUB'
+#!/bin/sh
+[ "${SHA256_FAIL:-0}" = 1 ] && exit 11
+/sbin/sha256sum "$@"
+STUB
+cat > "$tmp/bin/mv" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$MV_LOG"
+/bin/mv "$@"
+STUB
+chmod +x "$tmp/bin/docker" "$tmp/bin/date" "$tmp/bin/sha256sum" "$tmp/bin/mv"
 : > "$tmp/docker.log"
+: > "$tmp/mv.log"
 
 run_job() {
   PATH="$tmp/bin:$PATH" DOCKER_LOG="$tmp/docker.log" GARMIN_HUB_ROOT="$repo" \
+    MV_LOG="$tmp/mv.log" \
     GARMIN_HUB_STATUS_DIR="$tmp/status" GARMIN_HUB_BACKUP_DIR="$tmp/backups" \
     "$repo/deploy/droplet/jobs.sh" "$@"
 }
@@ -61,6 +73,17 @@ dump="$tmp/backups/garminhub-20261014T031500Z.dump"
 grep -q 'pg_restore --list' "$tmp/docker.log"
 expected=$(sha256sum "$dump" | awk '{print $1}')
 [ "$(awk 'NR == 1 {print $1}' "$dump.sha256")" = "$expected" ]
+sidecar_line=$(grep -n 'garminhub-20261014T031500Z.dump.sha256' "$tmp/mv.log" | tail -1 | cut -d: -f1)
+dump_line=$(grep -n 'garminhub-20261014T031500Z.dump$' "$tmp/mv.log" | tail -1 | cut -d: -f1)
+[ "$sidecar_line" -lt "$dump_line" ]
+
+set +e
+SHA256_FAIL=1 FAKE_STAMP=20261014T032000Z run_job backup >"$tmp/hash-failure.log" 2>&1
+code=$?
+set -e
+[ "$code" -eq 11 ]
+[ ! -e "$tmp/backups/garminhub-20261014T032000Z.dump" ]
+[ ! -e "$tmp/backups/garminhub-20261014T032000Z.dump.sha256" ]
 
 set +e
 DOCKER_LIST_FAIL=1 FAKE_STAMP=20261014T033000Z run_job backup >"$tmp/list-failure.log" 2>&1

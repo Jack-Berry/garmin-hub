@@ -1,6 +1,8 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { deriveSignals, sectionWeeklyMileage } = require('./context');
+const {
+  buildDayFocus, deriveSignals, sectionProfile, sectionWeeklyMileage,
+} = require('./context');
 
 const baseRecovery = (latest) => ({
   latest: {
@@ -62,4 +64,35 @@ test('weekly mileage labels Mondays, inserts current zero, and flags only comple
   mileage[1].km = 30;
   assert.equal(deriveSignals(baseRecovery({}), mileage).flags.includes(
     'weekly mileage spike vs prior weeks'), false);
+});
+
+test('a past planned session with no run is framed as missed', async () => {
+  const db = {
+    all: async () => [],
+    get: async (sql) => {
+      if (sql.includes('FROM planned_workouts')) {
+        return { title: 'Tempo', estimated_distance_m: 5000,
+          is_race: 0, steps_json: null };
+      }
+      if (sql.includes('SELECT routines_json')) return { routines_json: [] };
+      return undefined;
+    },
+  };
+  const focus = await buildDayFocus(db, '2000-01-01');
+  assert.equal(focus.kind, 'missed');
+  assert.equal(focus.planned.title, 'Tempo');
+});
+
+test('profile context skips a malformed race date with a warning', async () => {
+  const db = {
+    get: async () => ({
+      races_json: [
+        { name: 'Bad race', date: '2026-99-99', goal_time: '20:00' },
+        { name: 'Good race', date: '2026-11-01', goal_time: '20:00' },
+      ],
+    }),
+  };
+  const profile = await sectionProfile(db);
+  assert.deepEqual(profile.races, ['Good race — on 2026-11-01 — goal 20:00']);
+  assert.match(profile.warnings[0], /Bad race \(2026-99-99\)/);
 });

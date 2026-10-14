@@ -38,7 +38,7 @@ find ingest -maxdepth 1 -name '*.py' -print | sort | \
   xargs /usr/local/bin/python3.13 -m py_compile
 
 echo "== Garmin non-TTY login check =="
-(cd ingest && /usr/local/bin/python3.13 -m unittest test_login.py)
+(cd ingest && /usr/local/bin/python3.13 -m unittest test_login.py test_pacer_guard.py test_pacer_idempotency.py)
 
 echo "== Compose config =="
 if command -v docker >/dev/null 2>&1; then

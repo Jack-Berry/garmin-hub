@@ -3,10 +3,9 @@
 // SELECT-only role, `writeDb` as the DML-only role (no DDL on either).
 const { Pool, types } = require('pg');
 
-// int8 (bigint) arrives as text by default; parse to Number so the API keeps
-// its numeric id shapes. This matches better-sqlite3, which also returned JS
-// numbers — including its loss of precision on ids beyond 2^53 (the negative
-// ical schedule-id hashes), which is unchanged, not introduced, here.
+// Most legacy int8 fields are safe numeric values and retain their old Number
+// shape. Oversized planned_workouts.schedule_id values are selected as ::text
+// at every wire/context boundary and bound back as text with ::bigint.
 types.setTypeParser(20, (v) => Number(v));
 
 // Date/time columns are real Postgres types (stage 5a), but the API contract

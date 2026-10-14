@@ -784,6 +784,13 @@ async function generateDayInsight(db, date) {
       model: null,
     };
   }
+  if (focus.kind === "missed") {
+    return {
+      text: `This planned session is in the past and no matching run was logged. It looks missed, so pre-session execution tips are no longer relevant.`,
+      kind: "missed",
+      model: null,
+    };
+  }
   // A missed recurring session needs no model call — a static line is enough.
   if (focus.kind === "routine" && focus.routine.state === "missed") {
     return {

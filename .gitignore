@@ -20,6 +20,9 @@ attic/*.db
 !/deploy/droplet/backups/.gitkeep
 /deploy/droplet/job-status/*
 !/deploy/droplet/job-status/.gitkeep
+/restore.dump
+/.env.restore
+/.garth-restore/
 
 # --- Python ---
 __pycache__/

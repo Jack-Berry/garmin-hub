@@ -118,6 +118,10 @@ export function ActivationFlow({ variant = 'card', expectPlanId = null }) {
         setPushingId(nextRow?.schedule_id ?? null);
         const r = await api.planPushNext(plan.plan_id);
         if (r.done) break;
+        if (r.outcome_unknown) {
+          setError(r.error || 'Garmin may have accepted this workout. Retry only to check and adopt it.');
+          return;
+        }
         done.add(r.pushed.schedule_id);
         setPlan((p) => ({
           ...p,

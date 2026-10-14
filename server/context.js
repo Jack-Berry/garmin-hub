@@ -17,6 +17,20 @@ const GUARD_BOUNDS = require('../ingest/guard_bounds.json');
 // Profile lists are jsonb — pg hands back parsed arrays; normalise SQL NULL /
 // non-array junk to [].
 const parseList = (v) => (Array.isArray(v) ? v : []);
+const validCalendarDate = (value) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value || '')) return false;
+  const d = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === value;
+};
+const safeRaces = (value) => {
+  const races = parseList(value);
+  return {
+    races: races.filter((r) => r && (!r.date || validCalendarDate(r.date))),
+    warnings: races
+      .filter((r) => r?.date && !validCalendarDate(r.date))
+      .map((r) => `Skipped race with invalid date: ${r.name || 'race'} (${r.date})`),
+  };
+};
 
 // YYYY-MM-DD strings computed in JS and passed as query params. ALL of them are
 // LOCAL wall-clock: `today`, the stored timestamps (start_time_local,
@@ -178,11 +192,12 @@ async function sectionProfile(db) {
   const profileRow = await db.get(
     'SELECT shoes_json, races_json, injuries_json, routines_json, general_notes FROM profile WHERE id = 1'
   ) || {};
+  const raceData = safeRaces(profileRow.races_json);
   return {
     shoes: parseList(profileRow.shoes_json)
       .filter((s) => s && s.name)
       .map((s) => (s.purpose ? `${s.name} (${s.purpose})` : s.name)),
-    races: parseList(profileRow.races_json)
+    races: raceData.races
       .filter((r) => r && (r.name || r.date))
       .map((r) => {
         const parts = [r.name || 'race'];
@@ -202,6 +217,7 @@ async function sectionProfile(db) {
         return s;
       }),
     notes: profileRow.general_notes || null,
+    warnings: raceData.warnings,
     // The user no longer specifies paces; the coach derives them from runs.
     pace_guidance: 'Paces are not user-provided — infer easy/threshold/5k/long-run paces from recent_runs.',
   };
@@ -625,7 +641,11 @@ async function buildDayFocus(db, date) {
     return { kind: 'completed', date, runs, planned, routine, recovery };
   }
 
-  if (planned) return { kind: 'planned', date, planned, routine };
+  if (planned) {
+    return date < today
+      ? { kind: 'missed', date, planned, routine }
+      : { kind: 'planned', date, planned, routine };
+  }
   if (routine) return { kind: 'routine', date, routine };
   return { kind: 'rest', date };
 }
@@ -742,7 +762,7 @@ async function buildPlanningContext(db, recentPushes = []) {
 
   const row = await db.get('SELECT lt_speed_mps, races_json FROM profile WHERE id = 1') || {};
   const records = await db.all('SELECT label, value, value_kind FROM personal_records');
-  const races = parseList(row.races_json);
+  const races = safeRaces(row.races_json).races;
   const lt = row.lt_speed_mps;
   const lt_ready = !!lt;
 
