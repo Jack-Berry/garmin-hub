@@ -231,6 +231,9 @@ export default function App() {
       pullStart.current = null;
       pullAmount.current = 0;
       setPullDistance(0);
+      // Only the scrolling content may start a pull. The Coach panel and any
+      // other overlay sit outside it, so a drag there never reloads the page.
+      if (!appScroll.current?.contains(target)) return;
       let nestedScroller = false;
       let node = target;
       while (node && node !== event.currentTarget) {
