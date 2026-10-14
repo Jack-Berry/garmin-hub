@@ -66,110 +66,6 @@ function Group({ title, hint, children }) {
   );
 }
 
-// One read-only stat card: label on top, value below, optional sub line. The
-// value is a mono data-readout; `accent` lifts it to the accent colour (used for
-// race predictions — current-fitness/live data, per the accent rule).
-function RecordCard({ label, value, sub, accent }) {
-  return (
-    <div className="rounded-lg border border-line bg-surface-2 px-3 py-2">
-      <div className="font-body text-nano font-semibold uppercase tracking-[0.12em] text-ink-muted">
-        {label}
-      </div>
-      <div className={`mt-1 font-mono text-[1.375rem] font-semibold tabular-nums ${accent ? 'text-acc' : 'text-ink'}`}>
-        {value}
-      </div>
-      {sub && <div className="font-mono text-nano text-ink-muted">{sub}</div>}
-    </div>
-  );
-}
-
-// Read-only Garmin-sourced records: personal bests + current race predictions.
-// These are ingest-owned (not user-edited), so they're displayed, never editable.
-function GarminRecords() {
-  const prs = useFetch(() => api.personalRecords());
-  const preds = useFetch(() => api.racePredictions());
-  return (
-    <div className="space-y-6 border-t border-line pt-6">
-      <Group title="Personal records" hint="Your Garmin bests — read-only, updated by ingest">
-        <StateWrap loading={prs.loading} error={prs.error} empty={prs.data && !prs.data.length}>
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-            {(prs.data || []).map((r) => (
-              <RecordCard key={r.type_id} label={r.label} value={r.value_display} sub={r.record_date} />
-            ))}
-          </div>
-        </StateWrap>
-      </Group>
-
-      <Group title="Current race predictions" hint="Garmin's predicted times at current fitness — read-only">
-        <StateWrap loading={preds.loading} error={preds.error} empty={preds.data === null}>
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-            {(preds.data?.predictions || []).map((p) => (
-              <RecordCard key={p.label} label={p.label} value={p.display} accent />
-            ))}
-          </div>
-          {preds.data?.calendar_date && (
-            <p className="mt-2 font-mono text-nano text-ink-muted">
-              As of {preds.data.calendar_date}
-            </p>
-          )}
-        </StateWrap>
-      </Group>
-    </div>
-  );
-}
-
-// Facts the coach has silently remembered from chats (race debriefs, illnesses,
-// context for training gaps). Server-side, not part of the profile save —
-// deleting a fact applies immediately.
-function CoachMemory() {
-  const { data, loading, error } = useFetch(() => api.coachMemory());
-  const [facts, setFacts] = useState(null);
-  const [delError, setDelError] = useState(null);
-  useEffect(() => { if (data) setFacts(data); }, [data]);
-  const list = facts || [];
-
-  const forget = async (id) => {
-    setDelError(null);
-    try {
-      await api.forgetMemory(id);
-      setFacts((f) => (f || []).filter((m) => m.id !== id));
-    } catch (e) {
-      setDelError(e);
-    }
-  };
-
-  return (
-    <div className="border-t border-line pt-6">
-      <Group
-        title="Coach memory"
-        hint="Facts the coach quietly remembers from your chats — race debriefs, illnesses, context. Delete anything wrong or stale (applies immediately)."
-      >
-        <StateWrap loading={loading} error={error}>
-          {list.length === 0 && (
-            <p className="font-body text-sm text-ink-muted">Nothing remembered yet.</p>
-          )}
-          {list.map((m) => (
-            <div key={m.id} className="flex items-center gap-2">
-              <div className="flex-1 rounded-lg border border-line bg-surface-2 px-3 py-2">
-                <span className="font-mono text-nano text-ink-muted">
-                  {(m.created_at || '').slice(0, 10)}
-                </span>
-                <span className="ml-2 font-body text-sm text-ink">{m.content}</span>
-              </div>
-              <DelBtn onClick={() => forget(m.id)} label="Forget fact" />
-            </div>
-          ))}
-          {delError && (
-            <p className="font-body text-micro text-sem-red">
-              Couldn’t delete: {delError.message}
-            </p>
-          )}
-        </StateWrap>
-      </Group>
-    </div>
-  );
-}
-
 // Coaching profile editor in a modal overlay. Loads the profile, edits the
 // shoe / race / injury lists + notes inline, and saves everything at once.
 export default function SettingsModal({ onClose }) {
@@ -426,9 +322,6 @@ export default function SettingsModal({ onClose }) {
             </div>
           </StateWrap>
 
-          <CoachMemory />
-
-          <GarminRecords />
         </div>
       </div>
     </div>

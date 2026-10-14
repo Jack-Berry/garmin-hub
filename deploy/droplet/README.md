@@ -151,8 +151,10 @@ VITE_API_BASE=https://hub.berrydev.co.uk
 VITE_API_SECRET=<same production API secret>
 ```
 
-Run `bash deploy/local-macos/install.sh`, then unload and park the local jobs
-since the installer reloads all agents. Moving their plists out of
+Run `bash deploy/local-macos/install.sh`. With a non-local `VITE_API_BASE`, the
+installer detects hosted mode and rebuilds/restarts only the web agent. It never
+copies or loads the local API, ingest, or daily agents. Move any existing local
+plists out of
 `~/Library/LaunchAgents` keeps them disabled after login. Leave the web plist
 in place:
 

@@ -24,8 +24,18 @@ so they survive closing the terminal / logging out and back in.
 bash /Users/jackberry/Code/Projects/garmin-hub/deploy/local-macos/install.sh
 ```
 
-This stops any manual `node server.js` / `vite` you have running, rebuilds the
-frontend, copies the plists, and loads all four services.
+In local mode this stops any manual `node server.js` / `vite` you have running,
+rebuilds the frontend, copies the plists, and loads all four services. Local
+mode means `VITE_API_BASE` is empty or points at localhost.
+
+When `VITE_API_BASE` points at a hosted URL, the installer detects hosted mode,
+builds the frontend, and installs and restarts only `com.garminhub.web`. It
+does not copy or load the API, ingest, or daily agents. Use `--dry-run` to
+print the actions without running them.
+
+```bash
+bash deploy/local-macos/install.sh --dry-run
+```
 
 - **API:** http://localhost:3001  (health: http://localhost:3001/api/health)
 - **Dashboard:** http://localhost:4173

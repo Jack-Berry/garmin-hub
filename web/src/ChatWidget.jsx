@@ -5,6 +5,7 @@ import { shortDate } from './format';
 import { PacerPreview } from './PacerPreview';
 import { PlanReview } from './PlanReview';
 import { ActivationFlow } from './PlanActivation';
+import CoachMemory from './CoachMemory';
 
 // Floating chat coach — a discreet bottom-right widget that answers training
 // questions using the same context engine as the daily insight. Conversation
@@ -55,6 +56,7 @@ export default function ChatWidget({ appMode = false, active = true }) {
   // a selectable area for manual copy.
   const [copyState, setCopyState] = useState('idle');
   const [fallbackText, setFallbackText] = useState(null);
+  const [memoryOpen, setMemoryOpen] = useState(false);
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -434,6 +436,13 @@ export default function ChatWidget({ appMode = false, active = true }) {
           ) : (
             <>
               <button
+                onClick={() => setMemoryOpen(true)}
+                title="View what the coach remembers"
+                className="rounded-lg border border-line px-2 py-1 text-xs text-ink-secondary transition hover:bg-surface-2"
+              >
+                Memory
+              </button>
+              <button
                 onClick={() => enterMode('planning')}
                 disabled={pending}
                 title="Plan sessions or blocks, and edit the Garmin calendar"
@@ -674,6 +683,7 @@ export default function ChatWidget({ appMode = false, active = true }) {
           </div>
         </div>
       )}
+      {memoryOpen && <CoachMemory onClose={() => setMemoryOpen(false)} />}
     </div>
   );
 }
