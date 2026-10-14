@@ -94,7 +94,42 @@ body,
   background: #0b0b0d;
 }
 
-.app-shell > header {
+.app-mode body,
+.app-mode #root {
+  height: 100%;
+  overflow: hidden;
+}
+
+.app-shell {
+  height: var(--app-height, 100dvh);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.app-scroll {
+  height: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+.app-pull-indicator {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  overflow: hidden;
+  padding-bottom: 0.4rem;
+  color: var(--text-muted);
+  font-family: var(--font-body);
+  font-size: 0.625rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  transition: height 80ms linear;
+}
+
+.app-scroll > header {
   padding-top: env(safe-area-inset-top);
 }
 

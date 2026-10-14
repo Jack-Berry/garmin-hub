@@ -30,13 +30,9 @@ struct DashboardWebView: UIViewRepresentable {
         webView.isOpaque = false
         webView.backgroundColor = UIColor(red: 11 / 255, green: 11 / 255, blue: 13 / 255, alpha: 1)
         webView.scrollView.backgroundColor = webView.backgroundColor
-        webView.scrollView.bounces = true
-        webView.scrollView.alwaysBounceVertical = true
+        webView.scrollView.bounces = false
         webView.scrollView.contentInsetAdjustmentBehavior = .never
         webView.allowsLinkPreview = false
-        let refresh = UIRefreshControl()
-        refresh.addTarget(context.coordinator, action: #selector(Coordinator.refresh(_:)), for: .valueChanged)
-        webView.scrollView.refreshControl = refresh
         context.coordinator.webView = webView
         webView.load(URLRequest(url: URL(string: "hub://dashboard/")!))
         return webView
@@ -64,16 +60,15 @@ struct DashboardWebView: UIViewRepresentable {
             self.onThemeChange = onThemeChange
         }
 
-        @objc func refresh(_ sender: UIRefreshControl) {
-            webView?.load(URLRequest(url: URL(string: "hub://dashboard/")!))
-            sender.endRefreshing()
-        }
-
         func userContentController(
             _ userContentController: WKUserContentController,
             didReceive message: WKScriptMessage
         ) {
-            guard let body = message.body as? [String: Any],
+            let origin = message.frameInfo.securityOrigin
+            guard message.frameInfo.isMainFrame,
+                  origin.protocol == "hub",
+                  origin.host == "dashboard",
+                  let body = message.body as? [String: Any],
                   let action = body["action"] as? String else { return }
             if action == "openSettings" {
                 onOpenSettings()

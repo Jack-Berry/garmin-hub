@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from './api';
 import Hero from './sections/Hero';
 import RecentActivities from './sections/RecentActivities';
@@ -140,6 +140,9 @@ export default function App() {
   const [pacerOpen, setPacerOpen] = useState(false);
   // Bumping this remounts <main>, so all sections refetch from the API.
   const [refreshKey, setRefreshKey] = useState(0);
+  const pullStart = useRef(null);
+  const pullAmount = useRef(0);
+  const [pullDistance, setPullDistance] = useState(0);
 
   const topBtn =
     'inline-flex h-9 items-center justify-center gap-1.5 rounded-lg border border-line px-2.5 font-body text-micro font-semibold uppercase tracking-[0.1em] text-ink-secondary transition hover:bg-surface-2 hover:text-ink md:h-auto md:px-3 md:py-1.5';
@@ -156,23 +159,35 @@ export default function App() {
     root.classList.add('app-mode');
     const viewport = window.visualViewport;
     let layoutHeight = window.innerHeight;
-    const size = () => {
+    let layoutWidth = window.innerWidth;
+    const size = (reset = false) => {
       const height = viewport?.height || window.innerHeight;
-      const keyboardOpen = layoutHeight - height > 120;
-      if (!keyboardOpen) layoutHeight = Math.max(layoutHeight, height);
+      if (reset || Math.abs(window.innerWidth - layoutWidth) > 1) {
+        layoutHeight = window.innerHeight;
+        layoutWidth = window.innerWidth;
+      }
+      const focused = document.activeElement;
+      const keyboardTarget = focused?.matches?.('input, textarea, [contenteditable="true"]');
+      const keyboardOpen = keyboardTarget && layoutHeight - height > 120;
+      if (!keyboardOpen) layoutHeight = window.innerHeight;
       root.style.setProperty('--app-height', `${height}px`);
       root.style.setProperty('--app-top', `${viewport?.offsetTop || 0}px`);
       root.classList.toggle('keyboard-open', keyboardOpen);
     };
+    const onViewportChange = () => size(false);
+    const onWindowResize = () => size(false);
+    const onOrientationChange = () => requestAnimationFrame(() => size(true));
     size();
-    viewport?.addEventListener('resize', size);
-    viewport?.addEventListener('scroll', size);
-    window.addEventListener('resize', size);
+    viewport?.addEventListener('resize', onViewportChange);
+    viewport?.addEventListener('scroll', onViewportChange);
+    window.addEventListener('resize', onWindowResize);
+    window.addEventListener('orientationchange', onOrientationChange);
     return () => {
       root.classList.remove('app-mode', 'keyboard-open');
-      viewport?.removeEventListener('resize', size);
-      viewport?.removeEventListener('scroll', size);
-      window.removeEventListener('resize', size);
+      viewport?.removeEventListener('resize', onViewportChange);
+      viewport?.removeEventListener('scroll', onViewportChange);
+      window.removeEventListener('resize', onWindowResize);
+      window.removeEventListener('orientationchange', onOrientationChange);
       if (originalViewport) viewportMeta?.setAttribute('content', originalViewport);
     };
   }, [appMode]);
@@ -188,10 +203,58 @@ export default function App() {
     ['coach', 'message-circle', 'Coach'],
   ];
 
+  // Root overscroll stays disabled in the shell, so WKWebView cannot move the
+  // fixed tab bar. Pulling the dedicated content scroller from its top reloads
+  // the document, matching the former native UIRefreshControl path without
+  // depending on WKScrollView bounce state.
+  const pullHandlers = appMode ? {
+    onTouchStart: (event) => {
+      const touch = event.touches[0];
+      if (event.currentTarget.scrollTop <= 0 && event.touches.length === 1) {
+        pullStart.current = { x: touch.clientX, y: touch.clientY };
+      }
+    },
+    onTouchMove: (event) => {
+      if (!pullStart.current) return;
+      const touch = event.touches[0];
+      const dx = Math.abs(touch.clientX - pullStart.current.x);
+      const dy = touch.clientY - pullStart.current.y;
+      if (dy <= 0 || dx > dy) {
+        pullAmount.current = 0;
+        setPullDistance(0);
+        return;
+      }
+      pullAmount.current = Math.min(64, dy * 0.45);
+      setPullDistance(pullAmount.current);
+    },
+    onTouchEnd: () => {
+      const reload = pullAmount.current >= 48;
+      pullStart.current = null;
+      pullAmount.current = 0;
+      setPullDistance(0);
+      if (reload) window.location.reload();
+    },
+    onTouchCancel: () => {
+      pullStart.current = null;
+      pullAmount.current = 0;
+      setPullDistance(0);
+    },
+  } : {};
+
   return (
     <AccentProvider dark={dark}>
     <div className={dark ? 'dark' : ''}>
       <div className={`min-h-screen bg-surface-0 text-ink transition-colors ${appMode ? 'app-shell' : ''}`}>
+        <div className={appMode ? 'app-scroll' : ''} {...pullHandlers}>
+        {appMode && (
+          <div
+            className="app-pull-indicator"
+            style={{ height: pullDistance, opacity: pullDistance / 48 }}
+            aria-hidden="true"
+          >
+            {pullDistance >= 48 ? 'Release to refresh' : 'Pull to refresh'}
+          </div>
+        )}
         <header className="sticky top-0 z-10 border-b border-line bg-surface-0/80 backdrop-blur">
           <div className="mx-auto flex max-w-5xl items-center justify-between gap-2 px-4 py-3 md:px-6 md:py-4">
             <div>
@@ -238,6 +301,7 @@ export default function App() {
             </div>
           )}
         </main>
+        </div>
 
         {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
         {pacerOpen && <PacerModal onClose={() => setPacerOpen(false)} />}
