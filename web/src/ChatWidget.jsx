@@ -36,7 +36,7 @@ const alreadyPushed = (msgs, spec) =>
 const toPayload = (msgs) =>
   msgs.map((m) => ({ role: m.role, content: m.apiContent ?? m.content }));
 
-export default function ChatWidget({ appMode = false, active = true }) {
+export default function ChatWidget({ appMode = false, active = true, seed = null }) {
   const [open, setOpen] = useState(appMode);
   const [mode, setMode] = useState('chat'); // 'chat' | 'planning'
   const [messages, setMessages] = useState([]); // [{role, content, spec?, preview?, previewError?, pushed?, plan?, savedPlan?}]
@@ -59,8 +59,29 @@ export default function ChatWidget({ appMode = false, active = true }) {
   const [memoryOpen, setMemoryOpen] = useState(false);
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
+  const seededRef = useRef(null);
 
   const planning = mode === 'planning';
+
+  // Activity detail can open the existing coach with a visible framing turn.
+  // Send it immediately so the coach can call get_activity_detail; the unique
+  // seed id prevents React effect replays from making a duplicate request.
+  useEffect(() => {
+    if (!seed?.message || seededRef.current === seed.id) return;
+    seededRef.current = seed.id;
+    const opening = [{ role: 'user', content: seed.message }];
+    setOpen(true);
+    setMode('chat');
+    setMessages(opening);
+    setError(null);
+    setPending(true);
+    let alive = true;
+    api.chat(opening)
+      .then(({ reply }) => alive && setMessages([...opening, { role: 'assistant', content: reply }]))
+      .catch((e) => alive && setError(e.message || 'Something went wrong'))
+      .finally(() => alive && setPending(false));
+    return () => { alive = false; };
+  }, [seed]);
 
   // Auto-grow the input with its content: reset to the natural (rows=3) height,
   // then fit scrollHeight. The max-h class caps it around 8 rows, after which
@@ -424,11 +445,11 @@ export default function ChatWidget({ appMode = false, active = true }) {
             Coach
           </h2>
           {planning ? (
-            <p className="mt-0.5 font-body text-nano uppercase tracking-[0.18em] text-acc">
+            <p className={`${appMode ? 'hidden' : 'mt-0.5'} font-body text-nano uppercase tracking-[0.18em] text-acc`}>
               Planning mode
             </p>
           ) : (
-            <p className="mt-0.5 font-body text-nano uppercase tracking-[0.18em] text-ink-muted">
+            <p className={`${appMode ? 'hidden' : 'mt-0.5'} font-body text-nano uppercase tracking-[0.18em] text-ink-muted`}>
               Asks the data, not the workout plan
             </p>
           )}

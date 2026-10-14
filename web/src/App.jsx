@@ -8,6 +8,7 @@ import { PersonalRecords } from './Records';
 import SettingsModal from './SettingsModal';
 import PacerModal from './PacerModal';
 import ChatWidget from './ChatWidget';
+import ActivityDetail from './ActivityDetail';
 import PlanActivation from './PlanActivation';
 import { Icon } from './ui';
 import { AccentProvider } from './accent';
@@ -141,6 +142,8 @@ export default function App() {
   const [tab, setTab] = useState('today');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [pacerOpen, setPacerOpen] = useState(false);
+  const [detailActivity, setDetailActivity] = useState(null);
+  const [coachSeed, setCoachSeed] = useState(null);
   // Bumping this remounts <main>, so all sections refetch from the API.
   const [refreshKey, setRefreshKey] = useState(0);
   const appShell = useRef(null);
@@ -221,6 +224,16 @@ export default function App() {
     ['activities', 'run', 'Activities'],
     ['coach', 'message-circle', 'Coach'],
   ];
+
+  const askCoachAboutActivity = (activity) => {
+    const date = activity.start_time_local?.slice(0, 10);
+    setDetailActivity(null);
+    setCoachSeed({
+      id: `${activity.activity_id}-${Date.now()}`,
+      message: `Analyse my completed activity ${activity.activity_id} from ${date}. Use get_activity_detail before answering, then tell me what stands out and what I should take from it.`,
+    });
+    if (appMode) setTab('coach');
+  };
 
   // Root overscroll stays disabled in the shell, so WKWebView cannot move the
   // fixed tab bar. Pulling the dedicated content scroller from its top reloads
@@ -338,7 +351,7 @@ export default function App() {
           {(!appMode || tab === 'activities') && (
             <div className="grid grid-cols-1 gap-4 md:gap-5 lg:grid-cols-[1.5fr_1fr] lg:items-start [&>*]:min-w-0">
               <div className="space-y-4 md:space-y-5">
-                <RecentActivities />
+                <RecentActivities onSelect={setDetailActivity} />
                 {!appMode && <PersonalRecords />}
               </div>
               <PlannedWorkouts />
@@ -349,7 +362,8 @@ export default function App() {
 
         {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
         {pacerOpen && <PacerModal onClose={() => setPacerOpen(false)} />}
-        <ChatWidget appMode={appMode} active={!appMode || tab === 'coach'} />
+        {detailActivity && <ActivityDetail activity={detailActivity} onClose={() => setDetailActivity(null)} onAskCoach={askCoachAboutActivity} />}
+        <ChatWidget appMode={appMode} active={!appMode || tab === 'coach'} seed={coachSeed} />
         {appMode && (
           <nav className="app-tabs fixed inset-x-0 bottom-0 z-30 grid grid-cols-4 border-t border-line bg-surface-1/95 backdrop-blur" aria-label="App sections">
             {tabs.map(([key, icon, label]) => (
