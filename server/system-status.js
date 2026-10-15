@@ -60,7 +60,7 @@ function londonParts(now) {
   return Object.fromEntries(values.map(({ type, value }) => [type, value]));
 }
 
-async function buildStatus({ db, statusDir, backupDir, now = Date.now() }) {
+async function buildStatus({ db, statusDir, backupDir, now = Date.now(), notificationStatus }) {
   const london = londonParts(now);
   const today = `${london.year}-${london.month}-${london.day}`;
   const [ingestRow, briefRow, ingestFile, debriefFile, weeklyFile, backupFile, offsiteFile, dump] = await Promise.all([
@@ -102,7 +102,8 @@ async function buildStatus({ db, statusDir, backupDir, now = Date.now() }) {
   const offsite = fileCheck('offsite', offsiteFile, now, THRESHOLDS.offsite, null);
   const debrief = fileCheck('debrief', debriefFile, now, THRESHOLDS.debrief, null);
   const weekly = fileCheck('weekly', weeklyFile, now, THRESHOLDS.weekly, null);
-  return { checks: [ingest, debrief, brief, weekly, backup, offsite] };
+  return { checks: [ingest, debrief, brief, weekly, backup, offsite],
+    notifications: notificationStatus ? notificationStatus() : { enabled: false, reason: 'APNs is not configured' } };
 }
 
 function createHealthHandler(database, timeoutMs = 2000) {

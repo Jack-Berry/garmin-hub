@@ -20,8 +20,11 @@ struct DashboardWebView: UIViewRepresentable {
         config.setURLSchemeHandler(HubSchemeHandler(apiKey: apiKey), forURLScheme: "hub")
         config.userContentController.add(context.coordinator, name: "garminHub")
         let literal = String(data: try! JSONSerialization.data(withJSONObject: apiKey, options: .fragmentsAllowed), encoding: .utf8)!
+        let token = PushNotifications.shared.deviceToken ?? ""
+        let tokenLiteral = String(data: try! JSONSerialization.data(withJSONObject: token, options: .fragmentsAllowed), encoding: .utf8)!
+        let permissionLiteral = String(data: try! JSONSerialization.data(withJSONObject: PushNotifications.shared.permission, options: .fragmentsAllowed), encoding: .utf8)!
         config.userContentController.addUserScript(WKUserScript(
-            source: "window.__GARMIN_HUB_APP__ = true; window.__HUB_API_KEY__ = \(literal);",
+            source: "window.__GARMIN_HUB_APP__ = true; window.__HUB_API_KEY__ = \(literal); window.__HUB_DEVICE_TOKEN__ = \(tokenLiteral); window.__HUB_NOTIFICATION_PERMISSION__ = \(permissionLiteral); window.__HUB_PENDING_OPEN__ = null;",
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
@@ -34,6 +37,12 @@ struct DashboardWebView: UIViewRepresentable {
         webView.scrollView.contentInsetAdjustmentBehavior = .never
         webView.allowsLinkPreview = false
         context.coordinator.webView = webView
+        PushNotifications.shared.onOpen = { [weak coordinator = context.coordinator] payload in
+            coordinator?.open(payload)
+        }
+        PushNotifications.shared.onState = { [weak coordinator = context.coordinator] token, permission in
+            coordinator?.updateNotificationState(token: token, permission: permission)
+        }
         webView.load(URLRequest(url: URL(string: "hub://dashboard/")!))
         return webView
     }
@@ -41,6 +50,8 @@ struct DashboardWebView: UIViewRepresentable {
     func updateUIView(_ webView: WKWebView, context: Context) {}
 
     static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
+        PushNotifications.shared.onOpen = nil
+        PushNotifications.shared.onState = nil
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "garminHub")
     }
 
@@ -85,6 +96,32 @@ struct DashboardWebView: UIViewRepresentable {
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             if (error as? URLError)?.code == .cancelled { return }
             onFailure("The dashboard could not be reached. Check your connection and try again.")
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            if let payload = PushNotifications.shared.pendingPayload {
+                PushNotifications.shared.pendingPayload = nil
+                open(payload.reduce(into: [String: Any]()) { result, item in
+                    if let key = item.key as? String { result[key] = item.value }
+                })
+            }
+        }
+
+        func open(_ payload: [String: Any]) {
+            guard JSONSerialization.isValidJSONObject(payload),
+                  let data = try? JSONSerialization.data(withJSONObject: payload),
+                  let json = String(data: data, encoding: .utf8) else { return }
+            webView?.evaluateJavaScript("window.__HUB_OPEN__ ? window.__HUB_OPEN__(\(json)) : (window.__HUB_PENDING_OPEN__ = \(json));")
+        }
+
+        func updateNotificationState(token: String, permission: String) {
+            guard let data = try? JSONSerialization.data(withJSONObject: [token, permission]),
+                  let values = try? JSONSerialization.jsonObject(with: data) as? [String],
+                  let tokenData = try? JSONSerialization.data(withJSONObject: values[0], options: .fragmentsAllowed),
+                  let permissionData = try? JSONSerialization.data(withJSONObject: values[1], options: .fragmentsAllowed),
+                  let tokenJSON = String(data: tokenData, encoding: .utf8),
+                  let permissionJSON = String(data: permissionData, encoding: .utf8) else { return }
+            webView?.evaluateJavaScript("window.__HUB_DEVICE_TOKEN__ = \(tokenJSON); window.__HUB_NOTIFICATION_PERMISSION__ = \(permissionJSON); window.dispatchEvent(new Event('hub-notifications-changed')); ")
         }
 
         func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,

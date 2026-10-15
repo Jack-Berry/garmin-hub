@@ -22,6 +22,13 @@ by `edge-caddy` on `connect-remote_default`.
    chmod 600 .env
    ```
 
+   Create an Apple Push Notification service key for team `ZZ2RVM493V`, copy
+   it to `deploy/droplet/secrets/AuthKey.p8`, and set `APNS_KEY_ID`,
+   `APNS_TEAM_ID`, `APNS_TOPIC`, and `APNS_HOST` in `.env`. Keep the key at
+   mode 600. The Compose app mounts it read-only at `/run/secrets/AuthKey.p8`.
+   If the key or configuration is absent, notification events remain in the
+   outbox and `/api/status` reports notifications disabled.
+
 3. Start the project from the repository root. The first Postgres start creates
    `garminhub_ro`, `garminhub_rw`, and the canonical schema.
 
@@ -139,6 +146,10 @@ The Mac offsite pull records its result through the narrow direct command:
 deploy/droplet/jobs.sh mark offsite ok "snapshot complete"
 deploy/droplet/jobs.sh mark offsite fail "pull failed"
 ```
+
+For offsite failure notifications, export `GARMIN_HUB_API_URL` and
+`API_SECRET` in the offsite job environment. Other hosted job failures call
+the same key-gated notification endpoint from inside the app container.
 
 Do not use `mark` for ingest, daily, or backup. Those commands own their own
 status. A skipped daily invocation outside the 10:00 London hour leaves the

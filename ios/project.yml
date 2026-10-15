@@ -18,6 +18,7 @@ targets:
       - path: GarminHub
     settings:
       base:
+        CODE_SIGN_ENTITLEMENTS: GarminHub/GarminHub.entitlements
         PRODUCT_BUNDLE_IDENTIFIER: com.beriscope.garminhub
         PRODUCT_NAME: Garmin Hub
         GENERATE_INFOPLIST_FILE: YES

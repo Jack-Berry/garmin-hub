@@ -61,6 +61,7 @@ test('status returns unknown checks when host files and dump are absent', async 
       ['ingest', 'unknown'], ['debrief', 'unknown'], ['brief', 'ok'], ['weekly', 'unknown'],
       ['backup', 'unknown'], ['offsite', 'unknown'],
     ]);
+    assert.deepEqual(body.notifications, { enabled: false, reason: 'APNs is not configured' });
   } finally { await app.close(); }
 });
 

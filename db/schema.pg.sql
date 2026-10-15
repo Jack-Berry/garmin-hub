@@ -397,6 +397,26 @@ CREATE TABLE IF NOT EXISTS ingest_state (
   summary      text
 );
 
+CREATE TABLE IF NOT EXISTS notification_devices (
+  token        text PRIMARY KEY,
+  platform     text NOT NULL DEFAULT 'ios',
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  last_seen_at timestamptz NOT NULL DEFAULT now(),
+  preferences  jsonb NOT NULL DEFAULT '{"debrief":true,"weekly":true,"risk":true,"job_failure":true}'::jsonb
+);
+
+CREATE TABLE IF NOT EXISTS notification_outbox (
+  id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  type       text NOT NULL,
+  dedupe_key text NOT NULL UNIQUE,
+  title      text NOT NULL,
+  body       text NOT NULL,
+  payload    jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  sent_at    timestamptz,
+  error      text
+);
+
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;  -- PG14 default is too permissive
 GRANT USAGE ON SCHEMA public TO garminhub_ro, garminhub_rw;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO garminhub_ro;

@@ -59,10 +59,16 @@ services:
       INGEST_PYTHON: /usr/local/bin/python3.13
       JOB_STATUS_DIR: /run/garmin-hub-status
       BACKUP_DIR: /var/lib/garmin-hub/backups
+      APNS_KEY_PATH: /run/secrets/AuthKey.p8
+      APNS_KEY_ID: ${APNS_KEY_ID:-}
+      APNS_TEAM_ID: ${APNS_TEAM_ID:-}
+      APNS_TOPIC: ${APNS_TOPIC:-com.beriscope.garminhub}
+      APNS_HOST: ${APNS_HOST:-api.push.apple.com}
     volumes:
       - garth-cache:/var/lib/garmin-hub/garth
       - ./job-status:/run/garmin-hub-status:ro
       - ./backups:/var/lib/garmin-hub/backups:ro
+      - ./secrets/AuthKey.p8:/run/secrets/AuthKey.p8:ro
     networks: [private, caddy]
     healthcheck:
       test: [CMD, node, -e, "fetch('http://127.0.0.1:3001/api/health',{headers:{'X-Api-Key':process.env.API_SECRET}}).then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]

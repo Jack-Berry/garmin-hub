@@ -78,6 +78,7 @@ code=$?
 set -e
 [ "$code" -eq 9 ]
 node -e 'const s=require(process.argv[1]); if(s.job!=="backup"||s.ok||!/stubbed job failure/.test(s.message))process.exit(1)' "$tmp/status/backup.json"
+grep -q '/api/notifications/job-failure' "$tmp/docker.log"
 
 FAKE_STAMP=20261014T031500Z run_job backup >/dev/null
 dump="$tmp/backups/garminhub-20261014T031500Z.dump"
@@ -142,4 +143,5 @@ node -e 'const s=require(process.argv[1]); if(s.job!=="offsite"||!s.ok||s.messag
 control=$'line\n\t\033[31m"bad"\\value'
 run_job mark offsite fail "$control" >/dev/null
 node -e 'const fs=require("fs"); const raw=fs.readFileSync(process.argv[1],"utf8"); const s=JSON.parse(raw); if(/[\x00-\x1f]/.test(s.message)||s.message!==`line[31m"bad"\\value`)process.exit(1)' "$tmp/status/offsite.json"
+grep -q '/api/notifications/job-failure' "$tmp/docker.log"
 echo "jobs.sh status tests passed"

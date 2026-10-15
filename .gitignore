@@ -20,6 +20,8 @@ attic/*.db
 !/deploy/droplet/backups/.gitkeep
 /deploy/droplet/job-status/*
 !/deploy/droplet/job-status/.gitkeep
+/deploy/droplet/secrets/*
+!/deploy/droplet/secrets/README.md
 /restore.dump
 /.env.restore
 /.garth-restore/
@@ -45,6 +47,7 @@ build/
 .safety-net-evidence/
 .cache/
 /qa/
+/.qa/
 
 # --- Env / tooling ---
 .DS_Store

@@ -76,7 +76,8 @@ async function weeklyInput(db, today, weekStart, weekEnd) {
 }
 
 function createProactiveService({ db, writeDb, client, today = localDate,
-  buildDebriefInput = debriefInput, buildWeeklyInput = weeklyInput } = {}) {
+  buildDebriefInput = debriefInput, buildWeeklyInput = weeklyInput,
+  buildSignals = async (database) => (await buildContext(database)).signals.warnings, notifier } = {}) {
   const modelClient = client || getClient();
   let debriefRunning = false;
   let weeklyRunning = false;
@@ -113,10 +114,20 @@ function createProactiveService({ db, writeDb, client, today = localDate,
             [new Date().toISOString(), content, CHAT_MODEL, activity.date]);
           created.push({ id: result.rows?.[0]?.id, activity_id: String(activity.activity_id),
             date: activity.date, content: text, model: CHAT_MODEL });
+          if (notifier) await notifier.enqueue({
+            type: 'debrief', dedupeKey: `debrief:${activity.activity_id}`,
+            title: 'Run debrief ready', body: activity.name || 'Your latest run has been reviewed.',
+            payload: { type: 'debrief', activity_id: String(activity.activity_id) },
+          }).catch(() => {});
         } catch (error) {
           errors.push({ activity_id: String(activity.activity_id), date: activity.date,
             error: error.message });
         }
+      }
+      if (notifier) {
+        await Promise.resolve().then(() => buildSignals(db))
+          .then((warnings) => notifier.risks(warnings)).catch(() => {});
+        await notifier.flush().catch(() => {});
       }
       if (candidates.length && errors.length === candidates.length) {
         const error = new Error('Every pending debrief attempt failed.');
@@ -148,6 +159,11 @@ function createProactiveService({ db, writeDb, client, today = localDate,
            (created_at, note_type, content, model, date_range_start, date_range_end)
          VALUES ($1, 'weekly', $2, $3, $4, $5) RETURNING id`,
         [createdAt, text, MODEL, start, end]);
+      if (notifier) await notifier.enqueue({
+        type: 'weekly', dedupeKey: `weekly:${start}:${end}`,
+        title: 'Weekly review ready', body: `Your review for ${start} to ${end} is ready.`,
+        payload: { type: 'weekly' },
+      }).catch(() => {});
       return { created: true, note: { id: result.rows?.[0]?.id, created_at: createdAt,
         note_type: 'weekly', content: text, model: MODEL,
         date_range_start: start, date_range_end: end } };
@@ -181,6 +197,7 @@ function createProactiveRouter(options) {
   router.post('/weekly', handle(async (req, res) => res.json(await service.weeklyReview())));
   router.get('/risks', handle(async (req, res) => {
     const context = await buildContext(options.db);
+    if (options.notifier) await options.notifier.risks(context.signals.warnings).catch(() => {});
     res.json(context.signals.warnings);
   }));
   return router;

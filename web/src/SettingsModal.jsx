@@ -67,6 +67,68 @@ function Group({ title, hint, children }) {
   );
 }
 
+const NOTIFICATION_LABELS = {
+  debrief: 'Run debriefs', weekly: 'Weekly review', risk: 'Risk warnings', job_failure: 'Job failures',
+};
+
+function NotificationSettings() {
+  const token = window.__HUB_DEVICE_TOKEN__ || '';
+  const [revision, setRevision] = useState(0);
+  const state = useFetch(() => token ? api.notificationDevice(token) : api.status(), [token, revision]);
+  const [prefs, setPrefs] = useState(null);
+  const [message, setMessage] = useState('');
+  useEffect(() => { if (state.data?.preferences) setPrefs(state.data.preferences); }, [state.data]);
+  useEffect(() => {
+    const changed = () => setRevision((value) => value + 1);
+    window.addEventListener('hub-notifications-changed', changed);
+    return () => window.removeEventListener('hub-notifications-changed', changed);
+  }, []);
+  const permission = window.__HUB_NOTIFICATION_PERMISSION__ || 'unknown';
+  const update = async (type, checked) => {
+    const next = { ...prefs, [type]: checked };
+    setPrefs(next);
+    setMessage('');
+    try { await api.notificationPreferences(window.__HUB_DEVICE_TOKEN__, next); }
+    catch (error) { setMessage(error.message); setPrefs(prefs); }
+  };
+  const sendTest = async () => {
+    setMessage('Sending...');
+    try { await api.notificationTest(window.__HUB_DEVICE_TOKEN__); setMessage('Test sent'); }
+    catch (error) { setMessage(error.message); }
+  };
+  return (
+    <div className="border-b border-line pb-5">
+      <h3 className="font-display text-label font-bold uppercase tracking-[0.1em] text-ink">Notifications</h3>
+      <StateWrap loading={state.loading} error={state.error}>
+        {!state.data?.notifications?.enabled && !state.data?.enabled ? (
+          <p className="mt-2 text-sm text-ink-muted">Notifications are disabled on the server.</p>
+        ) : permission !== 'granted' ? (
+          <p className="mt-2 text-sm text-ink-muted">Notifications are not permitted on this iPhone. Enable them in iOS Settings.</p>
+        ) : !token || state.data?.registered === false ? (
+          <p className="mt-2 text-sm text-ink-muted">Waiting for this iPhone to register for notifications.</p>
+        ) : (
+          <div className="mt-3 space-y-3">
+            {Object.entries(NOTIFICATION_LABELS).map(([type, label]) => (
+              <label key={type} className="flex items-center justify-between gap-4 text-sm text-ink-secondary">
+                <span>{label}</span>
+                <input type="checkbox" checked={prefs?.[type] !== false}
+                  onChange={(event) => update(type, event.target.checked)} className="h-5 w-5 accent-[var(--acc)]" />
+              </label>
+            ))}
+            <div className="flex flex-wrap items-center gap-3 pt-1">
+              <button type="button" onClick={sendTest}
+                className="rounded-lg border border-line px-3 py-2 text-sm font-medium text-ink-secondary transition hover:bg-surface-2">
+                Send test
+              </button>
+              {message && <span className="min-w-0 break-words text-xs text-ink-muted">{message}</span>}
+            </div>
+          </div>
+        )}
+      </StateWrap>
+    </div>
+  );
+}
+
 // Coaching profile editor in a modal overlay. Loads the profile, edits the
 // shoe / race / injury lists + notes inline, and saves everything at once.
 export default function SettingsModal({ onClose }) {
@@ -184,6 +246,7 @@ export default function SettingsModal({ onClose }) {
               </button>
             </div>
           )}
+          {window.__GARMIN_HUB_APP__ === true && <NotificationSettings />}
           <div className="border-b border-line pb-6">
             <AccentPicker />
           </div>

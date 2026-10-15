@@ -2,6 +2,7 @@ import SwiftUI
 
 @main
 struct GarminHubApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var settings = AppSettings()
 
     var body: some Scene {
@@ -15,6 +16,10 @@ struct GarminHubApp: App {
                     DashboardScreen()
                         .environmentObject(settings)
                 }
+            }
+            .onAppear { PushNotifications.shared.configure(apiKey: settings.apiKey) }
+            .onChange(of: settings.apiKey) { _, key in
+                PushNotifications.shared.configure(apiKey: key)
             }
         }
     }

@@ -36,3 +36,12 @@ In Xcode, choose a generic iOS device destination, then use Product > Archive.
 In Organizer select the archive, choose Distribute App > App Store Connect >
 Upload, and follow the signing prompts. After processing in App Store Connect,
 assign the build to the desired TestFlight group.
+
+## Push notifications
+
+The app requests notification permission only after an API key has been
+saved. Its production APNs entitlement is generated from
+`GarminHub/GarminHub.entitlements`. Enable the Push Notifications capability
+for `com.beriscope.garminhub` in the Apple Developer portal before creating a
+new TestFlight build. APNs delivery cannot be tested in the iOS simulator, so
+verify registration, delivery, and notification taps on a physical device.

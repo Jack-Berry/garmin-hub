@@ -239,6 +239,28 @@ export default function App() {
     if (appMode) setTab('coach');
   };
 
+  useEffect(() => {
+    if (!appMode) return undefined;
+    window.__HUB_OPEN__ = async (payload = {}) => {
+      setSettingsOpen(false);
+      if (payload.type === 'debrief' && payload.activity_id) {
+        try {
+          const activity = await api.activity(payload.activity_id);
+          setTab('activities');
+          setDetailActivity({ activity, dayActivities: [activity] });
+        } catch (_) { setTab('activities'); }
+      } else {
+        setTab('today');
+      }
+    };
+    if (window.__HUB_PENDING_OPEN__) {
+      const pending = window.__HUB_PENDING_OPEN__;
+      window.__HUB_PENDING_OPEN__ = null;
+      window.__HUB_OPEN__(pending);
+    }
+    return () => { delete window.__HUB_OPEN__; };
+  }, [appMode]);
+
   // Root overscroll stays disabled in the shell, so WKWebView cannot move the
   // fixed tab bar. Pulling the dedicated content scroller from its top reloads
   // the document, matching the former native UIRefreshControl path without

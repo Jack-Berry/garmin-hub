@@ -26,10 +26,12 @@ const { createProactiveRouter } = require('./proactive-coach');
 const { createChatThreadsRouter } = require('./chat-threads');
 const { createFitnessRouter } = require('./fitness-trends');
 const { addHeatAdjustment, createGearRouter } = require('./gear');
+const { createNotifyService, createNotifyRouter } = require('./notify');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 const HOST = resolveHost();
+const notifier = createNotifyService({ db, writeDb });
 
 // Shared-secret auth: every API and dashboard request must carry X-Api-Key.
 // Fail fast if unconfigured so the public service never starts open.
@@ -50,7 +52,8 @@ app.use(cors(ORIGINS));
 // trivially replaceable if hosting brings its own auth (e.g. Cloudflare Access).
 app.use('/api', keyGate(API_SECRET));
 app.use(express.json({ limit: '300kb' }));
-app.use('/api/coach', createProactiveRouter({ db, writeDb }));
+app.use('/api/coach', createProactiveRouter({ db, writeDb, notifier }));
+app.use('/api/notifications', createNotifyRouter(notifier));
 app.use('/api/chat-threads', createChatThreadsRouter({ db, writeDb }));
 app.use('/api', createFitnessRouter({ db }));
 app.use('/api/gear', createGearRouter({ db }));
@@ -83,6 +86,7 @@ app.get('/api/status', createStatusHandler({
   db,
   statusDir: process.env.JOB_STATUS_DIR || path.resolve(__dirname, '..', 'deploy', 'droplet', 'job-status'),
   backupDir: process.env.BACKUP_DIR || path.resolve(__dirname, '..', 'deploy', 'droplet', 'backups'),
+  notificationStatus: notifier.status,
 }));
 
 // List activities, most recent first. ?limit (default 30), ?from, ?to on date.

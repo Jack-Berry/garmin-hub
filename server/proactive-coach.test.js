@@ -93,3 +93,23 @@ test('debrief queue fails only when every capped attempt fails', async () => {
   });
   assert.equal(calls, 3);
 });
+
+test('new debrief, weekly review, and risk triggers notify with stable dedupe keys', async () => {
+  const events = []; const risks = [];
+  const notifier = { enqueue: async (event) => { events.push(event); },
+    risks: async (warnings) => { risks.push(warnings); }, flush: async () => {} };
+  const run = { activity_id: '42', date: '2026-10-15', distance_m: 5000, name: 'Tempo' };
+  const debrief = createProactiveService({ db: { all: async () => [run] },
+    writeDb: { run: async () => ({ rows: [{ id: 1 }] }) }, client: client([]), notifier,
+    today: () => '2026-10-15', buildDebriefInput: async () => ({}),
+    buildSignals: async () => ['High load'] });
+  await debrief.pendingDebriefs();
+  assert.equal(events[0].dedupeKey, 'debrief:42');
+  assert.deepEqual(risks, [['High load']]);
+
+  const weekly = createProactiveService({ db: { get: async () => null },
+    writeDb: { run: async () => ({ rows: [{ id: 2 }] }) }, client: client([]), notifier,
+    today: () => '2026-10-18', buildWeeklyInput: async () => ({}) });
+  await weekly.weeklyReview();
+  assert.equal(events[1].dedupeKey, 'weekly:2026-10-12:2026-10-18');
+});

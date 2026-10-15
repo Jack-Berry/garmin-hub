@@ -24,6 +24,22 @@ mark() {
   mv "$temporary" "$status_dir/$job.json"
 }
 
+notify_failure() {
+  job=$1
+  message=$2
+  day=$(TZ=Europe/London date +%Y-%m-%d)
+  body=$(printf '{"job":"%s","day":"%s","message":"%s"}' \
+    "$(json_string "$job")" "$day" "$(json_string "$message")")
+  if [ -n "${GARMIN_HUB_API_URL:-}" ] && [ -n "${API_SECRET:-}" ]; then
+    curl -sS --max-time 20 -X POST "${GARMIN_HUB_API_URL%/}/api/notifications/job-failure" \
+      -H 'Content-Type: application/json' -H "X-Api-Key: $API_SECRET" -d "$body" >/dev/null || true
+  else
+    $compose exec -T app sh -c \
+      'curl -sS --max-time 20 -X POST http://127.0.0.1:3001/api/notifications/job-failure -H "Content-Type: application/json" -H "X-Api-Key: $API_SECRET" -d "$1"' sh "$body" \
+      >/dev/null || true
+  fi
+}
+
 run_recorded() {
   job=$1
   shift
@@ -38,6 +54,7 @@ run_recorded() {
     message=$(awk 'NF { line=$0 } END { print line }' "$output")
     [ -n "$message" ] || message="exit $code"
     mark "$job" fail "$message" || true
+    notify_failure "$job" "$message"
   fi
   rm -f "$output"
   trap - 0 HUP INT TERM
@@ -122,6 +139,7 @@ case "${1:-}" in
     [ "${2:-}" = offsite ] || { echo "only the offsite status may be marked directly" >&2; exit 2; }
     case "${3:-}" in ok|fail) ;; *) echo "usage: $0 mark offsite ok|fail [message]" >&2; exit 2 ;; esac
     mark offsite "$3" "${4:-manual mark}" || exit 1
+    [ "$3" = ok ] || notify_failure offsite "${4:-manual mark}"
     ;;
   *)
     echo "usage: $0 ingest|daily|weekly|backup|mark offsite ok|fail [message]" >&2

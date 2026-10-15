@@ -59,6 +59,10 @@ async function del(path) {
 export const api = {
   health: () => get('/api/health'),
   status: () => get('/api/status'),
+  notificationDevice: (token) => post('/api/notifications/device/status', { token }),
+  notificationPreferences: (token, preferences) =>
+    post('/api/notifications/device/preferences', { token, preferences }),
+  notificationTest: (token) => post('/api/notifications/test', { token }),
   activities: (params = {}) => get(`/api/activities${qs(params)}`),
   activity: (id) => get(`/api/activities/${id}`),
   planned: (params = {}) => get(`/api/planned${qs(params)}`),
