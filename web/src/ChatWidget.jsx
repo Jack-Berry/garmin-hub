@@ -797,8 +797,10 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
     }
   };
 
+  // On the phone, Return starts a new line and only the Send button sends.
+  // On desktop, Enter sends and Shift+Enter starts a new line.
   const onKeyDown = (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (!appMode && e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       send();
     }
@@ -1124,10 +1126,11 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onKeyDown}
+            enterKeyHint={appMode ? 'enter' : 'send'}
             disabled={threadLoading || threadFull || threadConflict}
             placeholder={
               planning ? 'Ask for a session, plan, or calendar edit…'
-              : 'Ask your coach… (Shift+Enter for a new line)'
+              : appMode ? 'Ask your coach…' : 'Ask your coach… (Shift+Enter for a new line)'
             }
             className="max-h-[178px] flex-1 resize-none overflow-y-auto rounded-lg border border-line bg-surface-2 px-3 py-2 text-sm text-ink shadow-sm outline-none transition placeholder:text-ink-muted focus:border-acc focus:ring-2 focus:ring-acc/20 disabled:opacity-50"
           />

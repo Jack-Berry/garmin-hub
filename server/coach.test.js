@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const {
   CHAT_MODEL,
+  COACH_UPDATES,
   chatReply,
   createResolvingTools,
   repairAssistantContent,
@@ -139,4 +140,12 @@ test('chat supports injected eval context and disables tools', async () => {
   assert.deepEqual(calls[0].output_config, { effort: 'medium' });
   assert.equal(calls[0].max_tokens, 4000);
   assert.equal(calls[0].messages.at(-1).content.at(-1).cache_control.type, 'ephemeral');
+});
+
+test('chat prompt tells the coach how and when it has been updated', async () => {
+  const calls = [];
+  const client = fakeClient([{ stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }] }], calls);
+  await chatReply({ all: async () => [] }, [{ role: 'user', content: 'Have you changed?' }], { context: {}, client });
+  assert.ok(calls[0].system[0].text.includes(COACH_UPDATES));
+  assert.match(COACH_UPDATES, /Never insist you are the same coach/);
 });
