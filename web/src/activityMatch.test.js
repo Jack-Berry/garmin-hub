@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  matchIntervals, planDayStatus, planMatchesActivity, plannedDistance, plannedWorkSteps,
+  matchIntervals, planCompliance, planDayStatus, planMatchesActivity, plannedDistance, plannedWorkSteps,
 } from './activityMatch.js';
 
 const step = (distance, bounds = null, kind = 'interval') => ({
@@ -90,13 +90,39 @@ test('only the closest plausible same-day run matches a planned distance', () =>
   assert.equal(planMatchesActivity(race, workout, [warmup, race]), true);
 });
 
-test('planned day status distinguishes done, partial and pending', () => {
+test('planned day status uses the 70% boundary and handles overruns', () => {
   const workout = { estimated_distance_m: 10000, steps: [] };
-  const done = { activity_id: 'done', activity_group: 'run', distance_m: 10000 };
-  const partial = { activity_id: 'partial', activity_group: 'run', distance_m: 6500 };
-  assert.equal(planDayStatus(workout, [done]), 'done');
-  assert.equal(planDayStatus(workout, [partial]), 'partial');
+  assert.equal(planDayStatus(workout, [{ activity_group: 'run', distance_m: 7000 }]), 'done');
+  assert.equal(planDayStatus(workout, [{ activity_group: 'run', distance_m: 8500 }]), 'done');
+  assert.equal(planDayStatus(workout, [{ activity_group: 'run', distance_m: 12000 }]), 'done');
+  assert.equal(planDayStatus(workout, [{ activity_group: 'run', distance_m: 6999 }]), 'partial');
   assert.equal(planDayStatus(workout, []), 'pending');
+});
+
+test('planned day status treats unknown Runna text and double days correctly', () => {
+  const textOnly = { steps: ['8 x 400m hard'] };
+  assert.equal(planDayStatus(textOnly, [{ activity_group: 'run', distance_m: 5000 }]), 'done');
+  const workout = { estimated_distance_m: 10000 };
+  assert.equal(planDayStatus(workout, [
+    { activity_group: 'run', distance_m: 2000 },
+    { activity_group: 'run', distance_m: 7000 },
+  ]), 'done');
+  assert.equal(planDayStatus(workout, [{ activity_group: 'football', distance_m: 12000 }]), 'pending');
+});
+
+test('plan compliance excludes today pending and does not count partial', () => {
+  const planned = {
+    '2026-10-12': { estimated_distance_m: 10000 },
+    '2026-10-13': { estimated_distance_m: 10000 },
+    '2026-10-14': { estimated_distance_m: 10000 },
+    '2026-10-15': { estimated_distance_m: 10000 },
+  };
+  const runs = {
+    '2026-10-12': [{ activity_group: 'run', distance_m: 10000 }],
+    '2026-10-13': [{ activity_group: 'run', distance_m: 6000 }],
+    '2026-10-15': [{ activity_group: 'run', distance_m: 7000 }],
+  };
+  assert.deepEqual(planCompliance(planned, runs, '2026-10-15'), { done: 2, total: 4 });
 });
 
 test('2026-07-12 grades 500 m pacer steps per 1 km lap without drifting', () => {

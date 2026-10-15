@@ -1,5 +1,5 @@
 import { kmNum, dateOnly, ymd, routineGroup } from '../format';
-import { planDayStatus } from '../activityMatch';
+import { planCompliance, planDayStatus } from '../activityMatch';
 
 // Mon→Sun dates for the week containing `today` (Monday start).
 function weekDates(today) {
@@ -189,14 +189,11 @@ export default function WeekStrip({ planned, activities, routines, onSelectDay }
 }
 
 function Compliance({ planned, runs, today }) {
-  const entries = Object.entries(planned).filter(([date, plan]) => (
-    date < today || planDayStatus(plan, runs[date] || []) === 'done'
-  ));
-  if (!entries.length) return null;
-  const done = entries.filter(([date, plan]) => planDayStatus(plan, runs[date] || []) === 'done').length;
+  const { done, total } = planCompliance(planned, runs, today);
+  if (!total) return null;
   return (
     <span className="font-mono text-[0.48rem] uppercase tracking-[0.06em] text-ink-muted sm:text-nano">
-      {done} of {entries.length} done
+      {done} of {total} done
     </span>
   );
 }

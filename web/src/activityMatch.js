@@ -306,7 +306,20 @@ export const planDayStatus = (workout, dayActivities) => {
   if (!runs.length) return 'pending';
   if (runs.some((activity) => planMatchesActivity(activity, workout, runs))) return 'done';
   const target = Number(workout?.estimated_distance_m) || plannedDistance(workout?.steps);
-  return target > 0 && runs.some((activity) => Number(activity.distance_m) < target * PARTIAL_DISTANCE_RATIO)
-    ? 'partial'
-    : 'pending';
+  // Text-only Runna rows have no measurable target; the presence of a run is
+  // the only available evidence, so treat it as done.
+  if (!(target > 0)) return 'done';
+  return runs.some((activity) => Number(activity.distance_m) >= target * PARTIAL_DISTANCE_RATIO)
+    ? 'done'
+    : 'partial';
+};
+
+// Past planned dates count toward compliance; today's plan counts only after
+// it is done. Partial runs are intentionally not in the numerator.
+export const planCompliance = (plannedByDate, runsByDate, today) => {
+  const entries = Object.entries(plannedByDate || {}).filter(([date, plan]) => (
+    date < today || planDayStatus(plan, runsByDate?.[date] || []) === 'done'
+  ));
+  const done = entries.filter(([date, plan]) => planDayStatus(plan, runsByDate?.[date] || []) === 'done').length;
+  return { done, total: entries.length };
 };
