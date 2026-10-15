@@ -15,9 +15,9 @@ const shiftDate = (date, days) => {
   value.setDate(value.getDate() + days);
   return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`;
 };
-const mondayOf = (date) => {
+const sundayOnOrBefore = (date) => {
   const value = new Date(`${date}T12:00:00`);
-  return shiftDate(date, -((value.getDay() + 6) % 7));
+  return shiftDate(date, -value.getDay());
 };
 
 const DEBRIEF_SYSTEM = `You write a short post-run debrief for one completed run.
@@ -93,25 +93,37 @@ function createProactiveService({ db, writeDb, client, today = localDate,
          WHERE a.activity_group = 'run' AND a.distance_m > 0
            AND a.start_time_local::date BETWEEN $1 AND $2
            AND NOT EXISTS (
-             SELECT 1 FROM coach_notes n WHERE n.note_type = 'debrief'
-               AND n.content::jsonb ->> 'activity_id' = a.activity_id::text)
+             SELECT 1 FROM coach_notes n
+             WHERE CASE WHEN n.note_type = 'debrief'
+               THEN n.content::jsonb ->> 'activity_id' END = a.activity_id::text)
          ORDER BY a.start_time_local
          LIMIT $3`, [shiftDate(end, -3), end, DEBRIEF_LIMIT])).slice(0, DEBRIEF_LIMIT);
       const created = [];
+      const errors = [];
       for (const activity of candidates) {
-        const input = await buildDebriefInput(db, activity);
-        const text = await ask(modelClient, CHAT_MODEL, 'low', 1800, DEBRIEF_SYSTEM,
-          `Write the debrief from this evidence:\n\n${JSON.stringify(input)}`);
-        const content = JSON.stringify({ activity_id: String(activity.activity_id), debrief: text });
-        const result = await writeDb.run(
-          `INSERT INTO coach_notes
-             (created_at, note_type, content, model, date_range_start, date_range_end)
-           VALUES ($1, 'debrief', $2, $3, $4, $4) RETURNING id`,
-          [new Date().toISOString(), content, CHAT_MODEL, activity.date]);
-        created.push({ id: result.rows?.[0]?.id, activity_id: String(activity.activity_id),
-          date: activity.date, content: text, model: CHAT_MODEL });
+        try {
+          const input = await buildDebriefInput(db, activity);
+          const text = await ask(modelClient, CHAT_MODEL, 'low', 1800, DEBRIEF_SYSTEM,
+            `Write the debrief from this evidence:\n\n${JSON.stringify(input)}`);
+          const content = JSON.stringify({ activity_id: String(activity.activity_id), debrief: text });
+          const result = await writeDb.run(
+            `INSERT INTO coach_notes
+               (created_at, note_type, content, model, date_range_start, date_range_end)
+             VALUES ($1, 'debrief', $2, $3, $4, $4) RETURNING id`,
+            [new Date().toISOString(), content, CHAT_MODEL, activity.date]);
+          created.push({ id: result.rows?.[0]?.id, activity_id: String(activity.activity_id),
+            date: activity.date, content: text, model: CHAT_MODEL });
+        } catch (error) {
+          errors.push({ activity_id: String(activity.activity_id), date: activity.date,
+            error: error.message });
+        }
       }
-      return { busy: false, created };
+      if (candidates.length && errors.length === candidates.length) {
+        const error = new Error('Every pending debrief attempt failed.');
+        error.result = { created, errors };
+        throw error;
+      }
+      return { busy: false, created, errors };
     } finally { debriefRunning = false; }
   };
 
@@ -119,8 +131,8 @@ function createProactiveService({ db, writeDb, client, today = localDate,
     if (weeklyRunning) return { busy: true, created: false };
     weeklyRunning = true;
     try {
-      const end = today();
-      const start = mondayOf(end);
+      const end = sundayOnOrBefore(today());
+      const start = shiftDate(end, -6);
       const existing = await db.get(
         `SELECT id, created_at, content, model, date_range_start, date_range_end
          FROM coach_notes WHERE note_type = 'weekly'
@@ -149,15 +161,17 @@ function createProactiveRouter(options) {
   const router = express.Router();
   const service = createProactiveService(options);
   const handle = (fn) => async (req, res) => {
-    try { await fn(req, res); } catch (error) { res.status(500).json({ error: error.message }); }
+    try { await fn(req, res); } catch (error) {
+      res.status(500).json({ error: error.message, ...(error.result || {}) });
+    }
   };
   router.post('/debriefs/pending', handle(async (req, res) => res.json(await service.pendingDebriefs())));
   router.get('/debriefs/:activityId', handle(async (req, res) => {
     if (!/^\d+$/.test(req.params.activityId)) return res.status(400).json({ error: 'bad activity id' });
     const row = await options.db.get(
       `SELECT id, created_at, content, model, date_range_start, date_range_end
-       FROM coach_notes WHERE note_type = 'debrief'
-         AND content::jsonb ->> 'activity_id' = $1
+       FROM coach_notes WHERE CASE WHEN note_type = 'debrief'
+         THEN content::jsonb ->> 'activity_id' END = $1
        ORDER BY id DESC LIMIT 1`, [req.params.activityId]);
     if (!row) return res.json(null);
     const parsed = JSON.parse(row.content);

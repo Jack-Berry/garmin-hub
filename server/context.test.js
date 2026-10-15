@@ -194,5 +194,6 @@ test('context is byte-stable across two builds on the same day', async () => {
   const second = JSON.stringify(await buildContext(db));
   assert.equal(second, first);
   assert.equal(JSON.parse(first).weekly_review.content, 'Stable carried-over review.');
+  assert.match(JSON.parse(first).weekly_review.source, /own weekly review written 2026-10-11.*re-check/);
   assert.match(JSON.parse(first).today_day, /^(Sun|Mon|Tue|Wed|Thu|Fri|Sat)$/);
 });

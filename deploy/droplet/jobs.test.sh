@@ -111,10 +111,24 @@ printf '{"job":"daily","ok":true,"finished_at":"2000-01-01T00:00:00Z","message":
 FAKE_HOUR=09 run_job daily >/dev/null
 grep -q '2000-01-01' "$tmp/status/daily.json"
 
+: > "$tmp/docker.log"
+: > "$tmp/curl.log"
 FAKE_WEEKDAY=7 FAKE_HOUR=19 run_job weekly >/dev/null
 node -e 'const s=require(process.argv[1]); if(s.job!=="weekly"||!s.ok)process.exit(1)' "$tmp/status/weekly.json"
 grep -q '/api/coach/weekly' "$tmp/docker.log"
 grep -q '/api/coach/weekly' "$tmp/curl.log"
+sed -n '1p' "$tmp/docker.log" | grep -q 'python3.13 ingest/ingest.py'
+sed -n '2p' "$tmp/docker.log" | grep -q '/api/coach/weekly'
+
+: > "$tmp/docker.log"
+: > "$tmp/curl.log"
+set +e
+DOCKER_FAIL=1 FAKE_WEEKDAY=7 FAKE_HOUR=19 run_job weekly >/dev/null 2>&1
+code=$?
+set -e
+[ "$code" -eq 9 ]
+[ ! -s "$tmp/curl.log" ]
+node -e 'const s=require(process.argv[1]); if(s.job!=="weekly"||s.ok)process.exit(1)' "$tmp/status/weekly.json"
 
 printf '{"job":"weekly","ok":true,"finished_at":"2000-01-01T00:00:00Z","message":"old"}\n' > "$tmp/status/weekly.json"
 FAKE_WEEKDAY=6 FAKE_HOUR=19 run_job weekly >/dev/null

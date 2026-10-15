@@ -245,6 +245,7 @@ async function sectionWeeklyReview(db) {
      FROM coach_notes WHERE note_type = 'weekly'
      ORDER BY date_range_end DESC, id DESC LIMIT 1`);
   return row ? {
+    source: `Your own weekly review written ${row.date_range_end}; re-check it against current data.`,
     week_start: row.date_range_start,
     week_end: row.date_range_end,
     content: row.content,
@@ -458,6 +459,7 @@ async function sectionUpcoming(db, today) {
     title: p.title,
     km: p.estimated_distance_m ? +(p.estimated_distance_m / 1000).toFixed(2) : null,
     is_race: !!p.is_race,
+    is_race_override: p.is_race_override,
     pacer_ready: !!p.pacer_available,
     steps: parseSteps(p.steps_json),
   }));

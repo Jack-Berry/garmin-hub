@@ -9,7 +9,7 @@ export default function ProactiveCards() {
     <div className="grid grid-cols-1 gap-4 md:grid-cols-2 md:gap-5">
       <StateWrap loading={risks.loading} error={risks.error} empty={false}>
         {!!risks.data?.length && (
-          <section className="rounded-xl border border-sem-amber/40 bg-sem-amber/10 p-4 sm:p-5">
+          <section className="rounded-xl border border-sem-amber bg-surface-1 p-4 sm:p-5">
             <header className="flex items-center gap-2 text-sem-amber">
               <Icon name="alert-triangle" />
               <h2 className="font-display text-[0.8125rem] font-bold uppercase tracking-[0.14em]">Training warnings</h2>

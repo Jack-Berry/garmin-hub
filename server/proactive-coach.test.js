@@ -47,3 +47,49 @@ test('weekly review is idempotent for its Monday to Sunday range', async () => {
   assert.equal(calls[0].model, 'claude-opus-5-5');
   assert.equal(calls[0].output_config.effort, 'medium');
 });
+
+test('an off-day weekly call reviews the most recent completed week', async () => {
+  let note;
+  const service = createProactiveService({ db: { get: async () => null },
+    writeDb: { run: async (_sql, params) => {
+      note = { start: params[3], end: params[4] }; return { rows: [{ id: 1 }] };
+    } }, client: client([]), today: () => '2026-10-14',
+    buildWeeklyInput: async () => ({ evidence: true }) });
+  await service.weeklyReview();
+  assert.deepEqual(note, { start: '2026-10-05', end: '2026-10-11' });
+});
+
+test('debrief queue records one failure and continues within the three-call cap', async () => {
+  const runs = Array.from({ length: 3 }, (_, i) => ({
+    activity_id: String(i + 1), date: '2026-10-15', distance_m: 5000,
+  }));
+  let calls = 0;
+  const fakeClient = { messages: { create: async () => {
+    calls++;
+    if (calls === 1) throw new Error('model unavailable');
+    return { content: [{ type: 'text', text: 'Debrief.' }] };
+  } } };
+  const service = createProactiveService({ db: { all: async () => runs },
+    writeDb: { run: async () => ({ rows: [{ id: 1 }] }) }, client: fakeClient,
+    today: () => '2026-10-15', buildDebriefInput: async () => ({ evidence: true }) });
+  const result = await service.pendingDebriefs();
+  assert.equal(calls, 3);
+  assert.equal(result.created.length, 2);
+  assert.deepEqual(result.errors.map((error) => error.activity_id), ['1']);
+});
+
+test('debrief queue fails only when every capped attempt fails', async () => {
+  const runs = Array.from({ length: 3 }, (_, i) => ({
+    activity_id: String(i + 1), date: '2026-10-15', distance_m: 5000,
+  }));
+  let calls = 0;
+  const service = createProactiveService({ db: { all: async () => runs },
+    writeDb: { run: async () => ({ rows: [] }) },
+    client: { messages: { create: async () => { calls++; throw new Error('no model'); } } },
+    today: () => '2026-10-15', buildDebriefInput: async () => ({ evidence: true }) });
+  await assert.rejects(service.pendingDebriefs(), (error) => {
+    assert.equal(error.result.errors.length, 3);
+    return true;
+  });
+  assert.equal(calls, 3);
+});

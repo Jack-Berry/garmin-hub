@@ -65,6 +65,7 @@ run_daily() {
 }
 
 run_weekly() {
+  run_ingest || return $?
   run_coach_endpoint weekly
 }
 
