@@ -5,7 +5,7 @@ import {
 } from 'recharts';
 import { api } from '../api';
 import { useFetch } from '../useFetch';
-import { Section, StateWrap, AXIS, GRID, INK, MUTED, SEM_AMBER } from '../ui';
+import { Section, StateWrap, AXIS, GRID, INK, SEM_AMBER } from '../ui';
 import { useAccentHex } from '../accent';
 
 const dateLabel = (value) => value?.slice(5) || '';
@@ -44,7 +44,7 @@ function FitnessChart() {
               <Tooltip labelFormatter={(v) => v} contentStyle={{ borderRadius: 8, border: 'none', fontSize: 12 }} />
               <Area type="monotone" dataKey="tsb" stroke={SEM_AMBER} fill="url(#tsbFill)" strokeWidth={1.5} dot={latestDot} isAnimationActive={false} />
               <Line type="monotone" dataKey="ctl" stroke={INK} dot={latestDot} strokeWidth={2} isAnimationActive={false} />
-              <Line type="monotone" dataKey="atl" stroke={MUTED} dot={latestDot} strokeWidth={2} isAnimationActive={false} />
+              <Line type="monotone" dataKey="atl" stroke={AXIS} dot={latestDot} strokeWidth={2} isAnimationActive={false} />
             </ComposedChart>
           </ResponsiveContainer>
         </div>
@@ -52,6 +52,10 @@ function FitnessChart() {
     </Section>
   );
 }
+
+// Fit the time axis to the data, padded to whole 15 s steps, so a 5K that
+// moves between 19:18 and 20:21 is not drawn flat against a 0:00 baseline.
+const PREDICTION_DOMAIN = [(min) => Math.floor((min - 10) / 15) * 15, (max) => Math.ceil((max + 10) / 15) * 15];
 
 const predictionLabels = { '5k': '5K', '10k': '10K', half: 'Half', marathon: 'Marathon' };
 function PredictionChart() {
@@ -77,7 +81,7 @@ function PredictionChart() {
             <LineChart data={rows} margin={{ top: 8, right: 4, bottom: 0, left: -10 }}>
               <CartesianGrid strokeDasharray="3 3" stroke={GRID} vertical={false} />
               <XAxis dataKey="date" tickFormatter={dateLabel} tick={{ fontSize: 10, fill: AXIS }} tickLine={false} axisLine={false} minTickGap={22} />
-              <YAxis reversed tickFormatter={(v) => duration(v)} tick={{ fontSize: 10, fill: AXIS }} tickLine={false} axisLine={false} />
+              <YAxis reversed domain={PREDICTION_DOMAIN} tickFormatter={(v) => duration(v)} tick={{ fontSize: 10, fill: AXIS }} tickLine={false} axisLine={false} />
               <Tooltip labelFormatter={(v) => v} formatter={(v) => [duration(v), predictionLabels[distance]]} contentStyle={{ borderRadius: 8, border: 'none', fontSize: 12 }} />
               <Line type="monotone" dataKey={distance} stroke={INK} dot={(props) => props.index === rows.length - 1 ? <circle cx={props.cx} cy={props.cy} r={3.5} fill={accent} stroke={accent} /> : null} connectNulls strokeWidth={2.5} isAnimationActive={false} />
             </LineChart>

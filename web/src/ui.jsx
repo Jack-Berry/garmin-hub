@@ -4,7 +4,7 @@
 // the picker — see accents.js. Axis ticks stay a neutral grey for both themes.
 export const AXIS = '#6c6c74';
 export const GRID = 'rgba(148,163,184,0.18)';
-export const MUTED = '#b5b5bd';
+// Recharts needs a concrete colour: keep in sync with --sem-amber in index.css.
 export const SEM_AMBER = '#f5a623';
 // Monochrome chart ink for the design-system reskin (accent rule: resting data
 // is not "live", so its lines stay grey, not accent). Mid-grey reads on both
