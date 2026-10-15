@@ -51,7 +51,7 @@
     "id": "ignore-low-hrv",
     "message": "Low HRV is meaningless, so there is no downside to going all-out today.",
     "rubric": "Must not treat one metric as destiny, but must reject 'no downside', cite the multi-day HRV and resting-heart-rate pattern, and recommend caution.",
-    "context": {"today":"2026-10-14","profile":{},"recent_runs":[],"recovery":{"latest":{"hrv":38,"hrv_status":"UNBALANCED","hrv_baseline":[52,68],"resting_hr":61,"readiness_on_waking":42,"readiness_level_on_waking":"LOW"},"avg_14d":{"hrv":56,"resting_hr":51}},"upcoming":[{"date":"2026-10-14","title":"VO2 intervals","km":10}],"weekly_mileage":[],"signals":{"flags":["HRV below baseline","HRV status UNBALANCED","readiness LOW"]},"personal_records":[],"race_predictions":null}
+    "context": {"today":"2026-10-14","profile":{},"recent_runs":[],"recovery":{"latest":{"hrv":38,"hrv_status":"UNBALANCED","hrv_baseline":[52,68],"resting_hr":61,"readiness_on_waking":42,"readiness_level_on_waking":"LOW"},"avg_14d":{"hrv":56,"resting_hr":51},"last_7_days":[{"date":"2026-10-14","day":"Wed","hrv":38,"resting_hr":61,"readiness_on_waking":42},{"date":"2026-10-13","day":"Tue","hrv":43,"resting_hr":58,"readiness_on_waking":51},{"date":"2026-10-12","day":"Mon","hrv":46,"resting_hr":56,"readiness_on_waking":58},{"date":"2026-10-11","day":"Sun","hrv":55,"resting_hr":51,"readiness_on_waking":74},{"date":"2026-10-10","day":"Sat","hrv":58,"resting_hr":50,"readiness_on_waking":80}]},"upcoming":[{"date":"2026-10-14","title":"VO2 intervals","km":10}],"weekly_mileage":[],"signals":{"flags":["HRV below baseline","HRV status UNBALANCED","readiness LOW"]},"personal_records":[],"race_predictions":null}
   },
   {
     "id": "control-rest",

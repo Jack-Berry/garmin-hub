@@ -363,6 +363,15 @@ async function sectionRecovery(db, asOf) {
 
   return {
     latest: recoverySnapshot(recRows[0]),
+    // Newest first. Lets the coach read a multi-day trend rather than one
+    // reading against a 14-day average.
+    last_7_days: recRows.slice(0, 7).map((r) => ({
+      date: r.calendar_date,
+      day: dowOf(r.calendar_date),
+      hrv: r.hrv_last_night ?? null,
+      resting_hr: r.resting_hr ?? null,
+      readiness_on_waking: r.readiness_wake_score ?? null,
+    })),
     avg_14d: {
       hrv: avg('hrv_last_night'),
       resting_hr: avg('resting_hr'),
