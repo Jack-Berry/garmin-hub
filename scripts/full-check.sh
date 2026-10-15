@@ -13,7 +13,7 @@ find server -maxdepth 1 -name '*.js' -print | sort | while IFS= read -r file; do
 done
 
 echo "== Focused server tests =="
-node --test server/*.test.js
+node --test server/*.test.js web/src/*.test.js
 
 echo "== Deployment script syntax and tests =="
 sh -n deploy/droplet/jobs.sh

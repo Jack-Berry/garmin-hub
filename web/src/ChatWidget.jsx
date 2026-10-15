@@ -244,8 +244,15 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
   const storeNow = (nextMessages, expectedId) =>
     persistMessages(nextMessages, { expectedId });
 
+  // Settle our own saves first, so a turn still inside the autosave debounce
+  // (or one whose autosave failed) is stored rather than mistaken for a change
+  // made on another device.
   const refreshBeforeAction = async (index, expectedId) => {
-    if (!createdRef.current) await persistMessages(messagesRef.current, { expectedId });
+    await saveInFlightRef.current?.catch(() => {});
+    if (threadIdRef.current !== expectedId) return false;
+    if (!createdRef.current || JSON.stringify(messagesRef.current) !== savedSnapshotRef.current) {
+      await persistMessages(messagesRef.current, { expectedId });
+    }
     if (threadIdRef.current !== expectedId) return false;
     const thread = await api.chatThread(expectedId);
     if (threadIdRef.current !== expectedId) return false;
@@ -647,6 +654,7 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
       // athlete must see the mismatch before planning carries on.
       if (res.persisted === false) {
         setMessages(advanced);
+        storeNow(advanced, expectedId).catch(() => {});
         setError(`“${res.name}” reached Garmin but the hub failed to record it. ` +
           'Don’t push it again - it is already on your watch. It will reappear in ' +
           'the hub after the next data refresh, as a plain calendar workout.');
@@ -662,6 +670,17 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
       };
       const next = [...advanced, note];
       setMessages(next);
+      // Store the pushed stamp before the follow-up turn, which can run for a
+      // minute. Otherwise a killed app restores only the pending guard.
+      try {
+        await storeNow(next, expectedId);
+      } catch (e) {
+        if (threadIdRef.current === expectedId && e.status !== 409) {
+          setError(`"${res.name}" is on Garmin, but this conversation could not be saved. Don't push it again.`);
+        }
+        return;
+      }
+      if (threadIdRef.current !== expectedId) return;
       await runPlanTurn(next, true, expectedId);
     } catch (e) {
       if (threadIdRef.current !== expectedId || e.status === 409) return;
