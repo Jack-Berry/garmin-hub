@@ -228,6 +228,10 @@ The iPhone project is generated from `ios/project.yml`. Its `hub://dashboard`
 scheme proxies the dashboard, assets, and API to the droplet with the Keychain
 API key on every request. External links leave the shell and receive no key.
 
+### Batch 7A charts
+
+Fitness and fatigue are derived from daily summed Garmin activity training load, with CTL and ATL EWMAs warmed from 365 days before the visible window. Race prediction history and the next profile race countdown are read-only dashboard data, and their chart surfaces belong on Trends while the countdown sits near Today.
+
 ### Local macOS
 
 Local always-on test deployment via launchd (`deploy/local-macos/`, see its `README.md`). **This trips people up:**

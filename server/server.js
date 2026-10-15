@@ -24,6 +24,13 @@ const { scheduleId: exactScheduleId } = require('./schedule-id');
 const { planFinished } = require('./plan-date');
 const { createProactiveRouter } = require('./proactive-coach');
 const { createChatThreadsRouter } = require('./chat-threads');
+const { buildFitnessSeries, buildPredictionHistory, nextRace } = require('./fitness-trends');
+
+const shiftDate = (value, days) => {
+  const date = new Date(`${value}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+};
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -180,6 +187,22 @@ app.get('/api/training-balance', handler(async (req, res) => {
   res.json(parsed ? { date: row.calendar_date, ...parsed } : null);
 }));
 
+// Daily fitness and fatigue series. The calculation warms its EWMAs from a
+// full year of Garmin load, while the response is limited to the requested
+// visible window.
+app.get('/api/fitness', handler(async (req, res) => {
+  const days = Math.min(366, Math.max(1, Number(req.query.days) || 120));
+  const today = localDate();
+  const from = shiftDate(today, -(days + 365 - 1));
+  const rows = await db.all(
+    `SELECT start_time_local::date AS date, SUM(activity_training_load) AS load
+     FROM activities
+     WHERE activity_training_load IS NOT NULL
+       AND start_time_local::date >= $1 AND start_time_local::date <= $2
+     GROUP BY start_time_local::date ORDER BY date`, [from, today]);
+  res.json({ days, method: 'derived from Garmin training load', series: buildFitnessSeries(rows, today, days) });
+}));
+
 // Weekly mileage aggregate: totals per ISO week (Monday start), last ~12 weeks.
 app.get('/api/summary/weekly', handler(async (req, res) => {
   // Runs only by default so mileage/pace aren't polluted by walks/football.
@@ -242,6 +265,24 @@ app.get('/api/race-predictions', handler(async (req, res) => {
       pred('Marathon', row.time_marathon_s),
     ],
   });
+}));
+
+app.get('/api/race-predictions/history', handler(async (req, res) => {
+  const days = Math.min(366, Math.max(1, Number(req.query.days) || 180));
+  const rows = await db.all(
+    `SELECT calendar_date, time_5k_s, time_10k_s, time_half_s, time_marathon_s
+     FROM race_predictions ORDER BY calendar_date`, []);
+  res.json({ days, series: buildPredictionHistory(rows, days) });
+}));
+
+app.get('/api/race-countdown', handler(async (req, res) => {
+  const today = localDate();
+  const profile = await db.get('SELECT races_json FROM profile WHERE id = 1');
+  const records = await db.all('SELECT label, value, value_kind FROM personal_records');
+  const predictions = await db.all(
+    `SELECT calendar_date, time_5k_s, time_10k_s, time_half_s, time_marathon_s
+     FROM race_predictions ORDER BY calendar_date DESC LIMIT 1`);
+  res.json(nextRace(Array.isArray(profile?.races_json) ? profile.races_json : [], records, predictions, today));
 }));
 
 // Set/clear the manual race override for a planned workout. Body: { override }

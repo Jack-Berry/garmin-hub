@@ -14,6 +14,7 @@ import { Icon } from './ui';
 import { AccentProvider } from './accent';
 import StatusChip from './StatusChip';
 import ProactiveCards from './ProactiveCards';
+import TrendsCharts from './trends/TrendsCharts';
 
 // How stale the data may be before opening the dashboard pulls it itself.
 // 30 minutes: long enough that a reload, a second tab or a quick tab-switch
@@ -344,6 +345,7 @@ export default function App() {
             <>
               {appMode && <PersonalRecords />}
               {appMode && <Hero view="trends" />}
+              <TrendsCharts />
               <Recovery />
             </>
           )}
