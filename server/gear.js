@@ -4,7 +4,7 @@
 // before summing because the published thresholds use Fahrenheit.
 const HEAT_BANDS = Object.freeze([
   [100, 0], [110, 0.005], [120, 0.01], [130, 0.02], [140, 0.03],
-  [150, 0.045], [160, 0.06], [Infinity, 0.08],
+  [150, 0.045], [160, 0.06], [170, 0.08], [180, 0.10],
 ]);
 
 const cToF = (value) => value * 9 / 5 + 32;
@@ -14,13 +14,16 @@ function heatAdjustment(paceSecondsPerKm, temperatureC, dewPointC) {
     return null;
   }
   const sumF = cToF(temperatureC) + cToF(dewPointC);
-  const slowdown = HEAT_BANDS.find(([ceiling]) => sumF <= ceiling)[1];
+  const band = HEAT_BANDS.find(([ceiling]) => sumF <= ceiling);
+  const slowdown = band?.[1] ?? null;
   return {
     rule: 'Temperature plus dew point',
     estimate: true,
     temperature_dew_point_sum_f: Math.round(sumF),
-    slowdown_pct: +(slowdown * 100).toFixed(1),
-    cool_equivalent_pace_s_per_km: Math.round(paceSecondsPerKm / (1 + slowdown)),
+    slowdown_pct: slowdown == null ? null : +(slowdown * 100).toFixed(1),
+    cool_equivalent_pace_s_per_km: slowdown == null
+      ? null : Math.round(paceSecondsPerKm / (1 + slowdown)),
+    hard_running_not_advised: sumF > 180,
   };
 }
 
@@ -37,10 +40,16 @@ function addHeatAdjustment(activity) {
 
 const normalName = (value) => String(value || '').toLowerCase()
   .replace(/[^a-z0-9]+/g, ' ').trim();
+const missingGearSchema = (error) => ['42P01', '42703'].includes(error?.code);
+const emptyGear = () => ({
+  match_method: 'Exact name match ignoring case, punctuation and repeated spaces. Garmin gear remains the mileage source of truth.',
+  items: [],
+});
 
 async function listGear(db) {
-  const [rows, profile] = await Promise.all([
-    db.all(
+  let rows;
+  try {
+    rows = await db.all(
       `SELECT g.gear_uuid, g.display_name, g.make_name, g.model_name, g.status,
               g.date_begin, g.retired, g.garmin_total_distance_m,
               COUNT(a.activity_id)::int AS runs,
@@ -49,12 +58,15 @@ async function listGear(db) {
               MAX(a.start_time_local::date) AS last_used
        FROM gear g LEFT JOIN activities a
          ON a.gear_uuid = g.gear_uuid AND a.activity_group = 'run'
-       GROUP BY g.gear_uuid ORDER BY g.retired, g.display_name, g.gear_uuid`),
-    db.get('SELECT shoes_json FROM profile WHERE id = 1'),
-  ]);
+       GROUP BY g.gear_uuid ORDER BY g.retired, g.display_name, g.gear_uuid`);
+  } catch (error) {
+    if (missingGearSchema(error)) return emptyGear();
+    throw error;
+  }
+  const profile = await db.get('SELECT shoes_json FROM profile WHERE id = 1');
   const shoes = Array.isArray(profile?.shoes_json) ? profile.shoes_json : [];
   return {
-    match_method: 'Exact name match ignoring case, punctuation and repeated spaces. Garmin gear remains the mileage source of truth.',
+    match_method: emptyGear().match_method,
     items: rows.map((row) => {
       const shoe = shoes.find((item) => normalName(item?.name) === normalName(row.display_name));
       const threshold = Number(shoe?.mileage_alert_km);

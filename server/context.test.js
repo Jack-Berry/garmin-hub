@@ -3,7 +3,7 @@ const test = require('node:test');
 const {
   buildContext, buildDayFocus, deriveSignals, sectionProfile,
   sectionRecentRuns, sectionRecovery, sectionTrainingLoad, sectionUpcoming,
-  sectionWeeklyMileage,
+  sectionWeeklyMileage, activityDetail,
 } = require('./context');
 
 const baseRecovery = (latest) => ({
@@ -87,6 +87,7 @@ test('a past planned session with no run is framed as missed', async () => {
 
 test('profile context skips a malformed race date with a warning', async () => {
   const db = {
+    all: async () => [],
     get: async () => ({
       races_json: [
         { name: 'Bad race', date: '2026-99-99', goal_time: '20:00' },
@@ -98,6 +99,47 @@ test('profile context skips a malformed race date with a warning', async () => {
   assert.equal(profile.races.length, 1);
   assert.match(profile.races[0], /^Good race.*2026-11-01 \(Sun\).*20:00$/);
   assert.match(profile.warnings[0], /Bad race \(2026-99-99\)/);
+});
+
+test('profile and recent runs tolerate missing gear and weather schema', async () => {
+  const missingTable = Object.assign(new Error('missing gear'), { code: '42P01' });
+  const profile = await sectionProfile({
+    get: async () => ({}),
+    all: async () => { throw missingTable; },
+  });
+  assert.deepEqual(profile.current_shoe_mileage, []);
+
+  let activityQueries = 0;
+  const missingColumn = Object.assign(new Error('missing weather'), { code: '42703' });
+  const recent = await sectionRecentRuns({
+    all: async (sql) => {
+      if (sql.includes('FROM laps')) return [];
+      activityQueries += 1;
+      if (activityQueries === 1) throw missingColumn;
+      return [{ activity_id: '1', date: '2026-10-12', distance_m: 5000, duration_s: 1500 }];
+    },
+  }, '2026-10-14');
+  assert.equal(activityQueries, 2);
+  assert.equal(recent[0].temperature_c, null);
+  assert.equal(recent[0].dew_point_c, null);
+});
+
+test('activity detail tolerates missing weather columns', async () => {
+  let activityQueries = 0;
+  const missingColumn = Object.assign(new Error('missing weather'), { code: '42703' });
+  const detail = await activityDetail({
+    all: async (sql) => {
+      if (sql.includes('FROM activities')) {
+        activityQueries += 1;
+        if (activityQueries === 1) throw missingColumn;
+        return [{ activity_id: '1', date: '2026-10-12', start_time_local: '2026-10-12 08:00:00',
+          activity_group: 'run', distance_m: 5000, duration_s: 1500 }];
+      }
+      return [];
+    },
+  }, { activityId: '1' });
+  assert.equal(activityQueries, 2);
+  assert.match(detail, /5km in 25:00/);
 });
 
 test('recent runs and planned entries carry explicit weekday labels', async () => {

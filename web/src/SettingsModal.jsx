@@ -190,9 +190,9 @@ export default function SettingsModal({ onClose }) {
           <StateWrap loading={loading} error={error}>
             <Group title="Shoes" hint="Your shoes and what each is for (daily, tempo, race…)">
               {shoes.map((s, i) => (
-                <div key={i} className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_1fr_8rem_auto]">
+                <div key={i} className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] gap-2 sm:grid-cols-[1fr_1fr_8rem_auto]">
                   <input
-                    className={inputCls}
+                    className={`${inputCls} col-span-2 sm:col-auto`}
                     placeholder="Shoe name"
                     value={s.name || ''}
                     onChange={(e) => setShoe(i, { name: e.target.value })}
@@ -212,7 +212,9 @@ export default function SettingsModal({ onClose }) {
                     value={s.mileage_alert_km ?? ''}
                     onChange={(e) => setShoe(i, { mileage_alert_km: e.target.value })}
                   />
-                  <DelBtn onClick={() => remove(setShoes)(i)} label="Remove shoe" />
+                  <div className="col-start-3 row-start-1 sm:col-auto sm:row-auto">
+                    <DelBtn onClick={() => remove(setShoes)(i)} label="Remove shoe" />
+                  </div>
                 </div>
               ))}
               <button type="button" className={addBtnCls} onClick={() => { setShoes((a) => [...a, { name: '', purpose: '' }]); dirty(); }}>

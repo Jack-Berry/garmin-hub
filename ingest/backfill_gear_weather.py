@@ -4,11 +4,15 @@
 import argparse
 import os
 import time
+from datetime import date, timedelta
 
 from dotenv import load_dotenv
 import psycopg
 
-from ingest import DEFAULT_DSN, ENV_PATH, call_with_rate_limit_retry, login, weather_row
+from ingest import (
+    DEFAULT_DSN, ENV_PATH, WEATHER_RETRY_DAYS, call_with_rate_limit_retry,
+    dumps, login, weather_row,
+)
 
 CALL_DELAY_S = 2.0
 
@@ -16,10 +20,13 @@ CALL_DELAY_S = 2.0
 def pending_work(conn):
     gear = [row[0] for row in conn.execute(
         "SELECT gear_uuid FROM gear ORDER BY retired, display_name, gear_uuid").fetchall()]
-    weather = [row[0] for row in conn.execute(
-        "SELECT activity_id FROM activities "
+    weather = list(conn.execute(
+        "SELECT activity_id, start_time_local::date FROM activities "
         "WHERE activity_group='run' AND weather_raw_json IS NULL "
-        "ORDER BY start_time_local DESC").fetchall()]
+        "AND start_lat IS NOT NULL "
+        "AND activity_type NOT ILIKE '%treadmill%' "
+        "AND activity_type NOT ILIKE '%indoor%' "
+        "ORDER BY start_time_local DESC").fetchall())
     return gear, weather
 
 
@@ -47,19 +54,35 @@ def run_backfill(g, conn, limit, sleep=time.sleep):
         conn.commit()
         sleep(CALL_DELAY_S)
 
-    for aid in weather:
+    for aid, activity_date in weather:
         if calls >= limit:
             break
-        payload = call_with_rate_limit_retry(
-            lambda aid=aid: g.get_activity_weather(aid), f"weather {aid}", sleep)
-        calls += 1
-        values = weather_row(payload)
-        assignments = ", ".join(f"{key}=%s" for key in values)
-        conn.execute(
-            f"UPDATE activities SET {assignments} WHERE activity_id=%s "
-            "AND weather_raw_json IS NULL",
-            [*values.values(), aid])
-        conn.commit()
+        try:
+            payload = call_with_rate_limit_retry(
+                lambda aid=aid: g.get_activity_weather(aid), f"weather {aid}", sleep)
+            calls += 1
+            values = weather_row(payload)
+            if values["temperature_c"] is None:
+                if activity_date >= date.today() - timedelta(days=WEATHER_RETRY_DAYS):
+                    sleep(CALL_DELAY_S)
+                    continue
+                values["weather_raw_json"] = dumps({
+                    "weather_unavailable": True, "garmin": payload})
+            assignments = ", ".join(f"{key}=%s" for key in values)
+            conn.execute(
+                f"UPDATE activities SET {assignments} WHERE activity_id=%s "
+                "AND weather_raw_json IS NULL",
+                [*values.values(), aid])
+            conn.commit()
+        except Exception as error:
+            calls += 1
+            conn.rollback()
+            conn.execute(
+                "UPDATE activities SET weather_raw_json=%s WHERE activity_id=%s "
+                "AND weather_raw_json IS NULL",
+                (dumps({"backfill_error": str(error)[:200]}), aid))
+            conn.commit()
+            print(f"  weather {aid}: marked unavailable after error: {error}")
         sleep(CALL_DELAY_S)
     return calls
 

@@ -43,6 +43,8 @@ RECOVERY_REFETCH = 3         # always re-fetch the most recent N days (fill in l
 RECOVERY_DELAY_S = 0.5       # pause between per-date fetches (rate-limit courtesy)
 GEAR_DELAY_S = 0.5           # pause between gear and weather API calls
 RATE_LIMIT_BACKOFF_S = 5
+WEATHER_RETRY_DAYS = 2       # fresh uploads may gain Garmin weather later
+MPH_TO_MPS = 0.44704
 
 # Garmin personal-record typeIds we surface — running only. Garmin sends no
 # human label (prTypeLabelKey is null), so the typeId -> (label, value_kind) map
@@ -235,6 +237,10 @@ def ingest_activities(g, conn, summary):
         aid = a.get("activityId")
         if aid is None:
             continue
+        if summary.get("_owner_id") is None:
+            owner_id = pick(a, "ownerId", "userProfileId", "userProfilePk")
+            if isinstance(owner_id, (int, float)) or str(owner_id or "").isdigit():
+                summary["_owner_id"] = int(owner_id)
         row = {
             "activity_id": aid,
             "name": pick(a, "activityName"),
@@ -626,61 +632,112 @@ def gear_row(item, stats=None):
 
 def weather_row(payload):
     payload = payload if isinstance(payload, dict) else {}
+    units = payload.get("units") if isinstance(payload.get("units"), dict) else {}
+    temp_unit = str(first(
+        pick(payload, "temperatureUnit", "tempUnit"),
+        pick(units, "temperature", "temp"), "fahrenheit")).lower()
+    wind_unit = str(first(
+        pick(payload, "windSpeedUnit", "windUnit"),
+        pick(units, "windSpeed", "wind"), "mph")).lower()
+
+    def temperature(value):
+        if value is None:
+            return None
+        value = float(value)
+        return value if temp_unit.startswith("c") else (value - 32) * 5 / 9
+
+    def wind_speed(value):
+        if value is None:
+            return None
+        value = float(value)
+        if wind_unit in ("m/s", "mps", "meters_per_second", "metres_per_second"):
+            return value
+        if wind_unit in ("km/h", "kph", "kilometers_per_hour", "kilometres_per_hour"):
+            return value / 3.6
+        return value * MPH_TO_MPS
+
     return {
-        "temperature_c": pick(payload, "temp", "temperature"),
-        "apparent_temperature_c": pick(payload, "apparentTemp", "apparentTemperature"),
+        "temperature_c": temperature(pick(payload, "temp", "temperature")),
+        "apparent_temperature_c": temperature(pick(payload, "apparentTemp", "apparentTemperature")),
         "humidity_pct": pick(payload, "relativeHumidity", "humidity"),
-        "dew_point_c": pick(payload, "dewPoint"),
-        "wind_speed_mps": pick(payload, "windSpeed"),
+        "dew_point_c": temperature(pick(payload, "dewPoint")),
+        "wind_speed_mps": wind_speed(pick(payload, "windSpeed")),
         "weather_raw_json": dumps(payload),
     }
 
 
 def ingest_gear(g, conn, summary, sleep=time.sleep):
-    profile_key = getattr(g, "display_name", None)
-    if not profile_key:
-        raise RuntimeError("Garmin display name unavailable for gear lookup")
-    items = as_list(g.get_gear(profile_key), "gear", "gearStats")
+    changed_ids = summary["_changed_run_ids"]
+    if not changed_ids:
+        return
+    owner_id = summary.get("_owner_id")
+    if not isinstance(owner_id, int):
+        profile = call_with_rate_limit_retry(g.get_user_profile, "user profile", sleep)
+        user_data = profile.get("userData", {}) if isinstance(profile, dict) else {}
+        owner_id = first(pick(user_data, "id", "userProfileId", "userProfilePk"),
+                         pick(profile or {}, "id", "userProfileId", "userProfilePk"))
+        if not (isinstance(owner_id, (int, float)) or str(owner_id or "").isdigit()):
+            raise RuntimeError("numeric Garmin user profile id unavailable")
+        owner_id = int(owner_id)
+        sleep(GEAR_DELAY_S)
+    items = as_list(call_with_rate_limit_retry(
+        lambda: g.get_gear(owner_id), "gear list", sleep), "gear", "gearStats")
+    sleep(GEAR_DELAY_S)
     for item in items:
         uuid = pick(item, "uuid", "gearUuid", "gearUUID")
         if not uuid:
             continue
-        stats = call_with_rate_limit_retry(
-            lambda uuid=uuid: g.get_gear_stats(uuid), f"gear stats {uuid}", sleep)
+        status = str(pick(item, "gearStatusName", "status") or "").lower()
+        stats = {}
+        if status in ("", "active"):
+            stats = call_with_rate_limit_retry(
+                lambda uuid=uuid: g.get_gear_stats(uuid), f"gear stats {uuid}", sleep)
+            sleep(GEAR_DELAY_S)
         row = gear_row(item, stats)
         result = upsert(conn, "gear", ["gear_uuid"], row)
         summary["gear"][result] += 1
-        activities = call_with_rate_limit_retry(
-            lambda uuid=uuid: g.get_gear_activities(uuid),
-            f"gear activities {uuid}", sleep)
-        for activity in as_list(activities, "activities", "activityList"):
-            aid = pick(activity, "activityId", "activity_id")
-            if aid is not None:
-                conn.execute(
-                    "UPDATE activities SET gear_uuid=%s WHERE activity_id=%s",
-                    (str(uuid), aid))
+
+    for aid in changed_ids:
+        linked = as_list(call_with_rate_limit_retry(
+            lambda aid=aid: g.get_activity_gear(aid), f"activity gear {aid}", sleep),
+            "gear", "gearStats")
+        uuid = pick(linked[0], "uuid", "gearUuid", "gearUUID") if linked else None
+        conn.execute("UPDATE activities SET gear_uuid=%s WHERE activity_id=%s",
+                     (str(uuid) if uuid else None, aid))
         sleep(GEAR_DELAY_S)
 
 
 def ingest_activity_weather(g, conn, summary, sleep=time.sleep):
-    for aid in summary["_changed_run_ids"]:
-        existing = conn.execute(
-            "SELECT weather_raw_json FROM activities WHERE activity_id=%s", (aid,)
-        ).fetchone()
-        if not existing or existing[0] is not None:
-            continue
+    changed_ids = summary["_changed_run_ids"]
+    rows = conn.execute(
+        "SELECT activity_id, start_time_local::date FROM activities "
+        "WHERE activity_group='run' AND weather_raw_json IS NULL "
+        "AND start_lat IS NOT NULL "
+        "AND activity_type NOT ILIKE '%treadmill%' "
+        "AND activity_type NOT ILIKE '%indoor%' "
+        "AND (activity_id = ANY(%s::bigint[]) OR start_time_local::date >= %s) "
+        "ORDER BY start_time_local DESC",
+        (changed_ids or [0], date.today() - timedelta(days=WEATHER_RETRY_DAYS)),
+    ).fetchall()
+    for aid, activity_date in rows:
         try:
             payload = call_with_rate_limit_retry(
                 lambda aid=aid: g.get_activity_weather(aid),
                 f"weather {aid}", sleep)
             values = weather_row(payload)
+            if values["temperature_c"] is None:
+                if activity_date >= date.today() - timedelta(days=WEATHER_RETRY_DAYS):
+                    sleep(GEAR_DELAY_S)
+                    continue
+                values["weather_raw_json"] = dumps({
+                    "weather_unavailable": True, "garmin": payload})
             assignments = ", ".join(f"{key}=%s" for key in values)
             conn.execute(
                 f"UPDATE activities SET {assignments} WHERE activity_id=%s",
                 [*values.values(), aid])
             summary["weather"]["updated"] += 1
         except Exception as error:
-            summary["errors"].append(f"weather {aid}: {error}")
+            summary["warnings"].append(f"weather {aid}: {error}")
         sleep(GEAR_DELAY_S)
 
 
@@ -930,6 +987,8 @@ def new_summary():
         "gear": {"inserted": 0, "updated": 0},
         "weather": {"inserted": 0, "updated": 0},
         "_changed_run_ids": [],
+        "_owner_id": None,
+        "warnings": [],
         "errors": [],
     }
 
@@ -1015,6 +1074,10 @@ def main():
         # Non-zero exit so cron/daily.sh and /api/ingest/refresh see the
         # failure instead of a clean 0 from a (partially) failed pull.
         sys.exit(1)
+    if summary["warnings"]:
+        print(f"\n{len(summary['warnings'])} warning(s):")
+        for warning in summary["warnings"]:
+            print(f"  - {warning}")
     print("\nNo errors.")
 
 

@@ -243,8 +243,10 @@ function DetailBody({ data, plannedState, debriefState, dayActivities, onAskCoac
               <Metric label="Heat adjusted estimate" value={activity.heat_adjustment ? paceLabel(activity.heat_adjustment.cool_equivalent_pace_s_per_km) : null} />
             </div>
             {activity.heat_adjustment && (
-              <p className="mt-3 text-xs text-ink-muted">
-                Estimated cool weather equivalent using the temperature plus dew point rule, {activity.heat_adjustment.slowdown_pct}% adjustment.
+              <p className={`mt-3 text-xs ${activity.heat_adjustment.hard_running_not_advised ? 'font-semibold text-sem-amber' : 'text-ink-muted'}`}>
+                {activity.heat_adjustment.hard_running_not_advised
+                  ? 'Temperature plus dew point is above 180°F. Hard running is not advised.'
+                  : `Estimated cool weather equivalent using the temperature plus dew point rule, ${activity.heat_adjustment.slowdown_pct}% adjustment.`}
               </p>
             )}
           </section>

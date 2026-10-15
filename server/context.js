@@ -189,15 +189,26 @@ const parseSteps = (segments) => {
 // The look-back / look-ahead window shared by the runs, recovery and upcoming
 // sections (and reported to the coach as `window_days`).
 const WINDOW_DAYS = 14;
+const missingGearSchema = (error) => ['42P01', '42703'].includes(error?.code);
+
+async function contextGearRows(db) {
+  try {
+    return await db.all(
+      `SELECT display_name, garmin_total_distance_m
+       FROM gear WHERE retired = false
+       ORDER BY display_name, gear_uuid LIMIT 12`);
+  } catch (error) {
+    if (missingGearSchema(error)) return [];
+    throw error;
+  }
+}
 
 // Goals, constraints, routines, notes.
 async function sectionProfile(db) {
   const profileRow = await db.get(
     'SELECT shoes_json, races_json, injuries_json, routines_json, general_notes FROM profile WHERE id = 1'
   ) || {};
-  const gearRows = db.all ? await db.all(
-    `SELECT display_name, garmin_total_distance_m, retired
-     FROM gear ORDER BY retired, display_name, gear_uuid`) : [];
+  const gearRows = await contextGearRows(db);
   const raceData = safeRaces(profileRow.races_json);
   return {
     shoes: parseList(profileRow.shoes_json)
@@ -206,7 +217,6 @@ async function sectionProfile(db) {
     current_shoe_mileage: gearRows.map((g) => ({
       name: g.display_name,
       km: g.garmin_total_distance_m == null ? null : Math.round(g.garmin_total_distance_m / 1000),
-      retired: Boolean(g.retired),
     })),
     races: raceData.races
       .filter((r) => r && (r.name || r.date))
@@ -264,16 +274,26 @@ async function sectionWeeklyReview(db) {
 // Recent runs over the window (runs only), each with a work-rep summary when
 // the session was structured.
 async function sectionRecentRuns(db, today) {
-  const runRows = await db.all(
-    `SELECT activity_id, start_time_local::date AS date, distance_m, duration_s, avg_hr,
+  const runColumns = `activity_id, start_time_local::date AS date, distance_m, duration_s, avg_hr,
             hr_zone1_s, hr_zone2_s, hr_zone3_s, hr_zone4_s, hr_zone5_s,
             activity_training_load, training_effect_label, aerobic_training_effect,
-            elevation_gain_m, avg_grade_adjusted_speed_mps,
-            temperature_c, dew_point_c
-     FROM activities
+            elevation_gain_m, avg_grade_adjusted_speed_mps`;
+  const runFrom = `FROM activities
      WHERE activity_group = 'run' AND distance_m > 0
        AND start_time_local >= $1
-     ORDER BY start_time_local DESC`, [shiftDate(today, -WINDOW_DAYS)]);
+     ORDER BY start_time_local DESC`;
+  let runRows;
+  try {
+    runRows = await db.all(
+      `SELECT ${runColumns}, temperature_c, dew_point_c ${runFrom}`,
+      [shiftDate(today, -WINDOW_DAYS)]);
+  } catch (error) {
+    if (!missingGearSchema(error)) throw error;
+    runRows = (await db.all(`SELECT ${runColumns} ${runFrom}`,
+      [shiftDate(today, -WINDOW_DAYS)])).map((row) => ({
+      ...row, temperature_c: null, dew_point_c: null,
+    }));
+  }
 
   // All laps for the whole run set in ONE query (the old per-run lookup was a
   // fine prepared-statement loop under SQLite but an N+1 of awaits under pg).
@@ -1086,14 +1106,14 @@ async function scheduledSummary(db, from, to) {
 // only when a question needs it — per-lap HR, cadence, power and running
 // dynamics, the data that answers HR drift across reps, pacing execution and
 // running economy.
-const ACTIVITY_COLS = `activity_id, start_time_local, start_time_local::date AS date, name, activity_type,
+const ACTIVITY_BASE_COLS = `activity_id, start_time_local, start_time_local::date AS date, name, activity_type,
        activity_group, distance_m, duration_s, avg_hr, max_hr,
        hr_zone1_s, hr_zone2_s, hr_zone3_s, hr_zone4_s, hr_zone5_s,
        avg_cadence_spm, avg_power, norm_power, avg_ground_contact_ms,
        avg_stride_length_cm, avg_vertical_oscillation_cm, avg_vertical_ratio,
        aerobic_training_effect, anaerobic_training_effect, training_effect_label,
-       activity_training_load, elevation_gain_m, vo2max,
-       temperature_c, humidity_pct, dew_point_c`;
+       activity_training_load, elevation_gain_m, vo2max`;
+const ACTIVITY_COLS = `${ACTIVITY_BASE_COLS}, temperature_c, humidity_pct, dew_point_c`;
 
 // A long auto-lapped run is one lap per km, but a badly-lapped session can run
 // to hundreds — cap the table rather than flood the model, and say so.
@@ -1234,19 +1254,28 @@ const readinessAround = (readings, startedAt) => {
 // Detail for one activity (`activityId`), every activity on a date (`date`), or
 // — given neither — the most recent run. Returns plain text for the tool.
 async function activityDetail(db, { date, activityId } = {}) {
-  const rows = activityId
-    ? await db.all(
-        `SELECT ${ACTIVITY_COLS} FROM activities WHERE activity_id = $1::bigint`,
+  const fetchRows = (columns) => activityId
+    ? db.all(
+        `SELECT ${columns} FROM activities WHERE activity_id = $1::bigint`,
         [String(activityId)])
     : date
-      ? await db.all(
-          `SELECT ${ACTIVITY_COLS} FROM activities
+      ? db.all(
+          `SELECT ${columns} FROM activities
            WHERE start_time_local::date = $1 AND distance_m > 0
            ORDER BY start_time_local`, [date])
-      : await db.all(
-          `SELECT ${ACTIVITY_COLS} FROM activities
+      : db.all(
+          `SELECT ${columns} FROM activities
            WHERE activity_group = 'run' AND distance_m > 0
            ORDER BY start_time_local DESC LIMIT 1`);
+  let rows;
+  try {
+    rows = await fetchRows(ACTIVITY_COLS);
+  } catch (error) {
+    if (!missingGearSchema(error)) throw error;
+    rows = (await fetchRows(ACTIVITY_BASE_COLS)).map((row) => ({
+      ...row, temperature_c: null, humidity_pct: null, dew_point_c: null,
+    }));
+  }
 
   if (!rows.length) {
     return activityId ? `No activity with id ${activityId}.`

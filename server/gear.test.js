@@ -4,11 +4,15 @@ const express = require('express');
 const { heatAdjustment, createGearRouter } = require('./gear');
 
 test('heat adjustment follows the published temperature plus dew point bands', () => {
-  assert.equal(heatAdjustment(300, 10, 5).slowdown_pct, 0);
-  const hot = heatAdjustment(300, 25, 20);
-  assert.equal(hot.temperature_dew_point_sum_f, 145);
-  assert.equal(hot.slowdown_pct, 4.5);
-  assert.equal(hot.cool_equivalent_pace_s_per_km, 287);
+  const c = (f) => (f - 32) * 5 / 9;
+  assert.equal(heatAdjustment(300, c(50), c(50)).slowdown_pct, 0);
+  assert.equal(heatAdjustment(300, c(50.1), c(50)).slowdown_pct, 0.5);
+  assert.equal(heatAdjustment(300, c(80), c(80)).slowdown_pct, 6);
+  assert.equal(heatAdjustment(300, c(90), c(90)).slowdown_pct, 10);
+  const unsafe = heatAdjustment(300, c(90.1), c(90));
+  assert.equal(unsafe.slowdown_pct, null);
+  assert.equal(unsafe.cool_equivalent_pace_s_per_km, null);
+  assert.equal(unsafe.hard_running_not_advised, true);
   assert.equal(heatAdjustment(300, null, 20), null);
 });
 
@@ -34,4 +38,10 @@ test('gear endpoint uses Garmin mileage and exact normalised profile name matchi
   assert.equal(result.items[0].mileage_alert, true);
   assert.equal(result.items[0].profile_shoe_name, 'asics superblast 3');
   assert.match(result.match_method, /Garmin gear remains/);
+});
+
+test('gear endpoint returns an empty list before the gear schema exists', async () => {
+  const missing = Object.assign(new Error('missing table'), { code: '42P01' });
+  const result = await require('./gear').listGear({ all: async () => { throw missing; } });
+  assert.deepEqual(result.items, []);
 });
