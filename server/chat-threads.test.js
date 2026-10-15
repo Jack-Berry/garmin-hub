@@ -10,7 +10,7 @@ function fakePools() {
   const stamp = () => new Date(Date.UTC(2026, 0, 1, 0, 0, ++tick)).toISOString();
   const summary = (row) => ({
     id: row.id, mode: row.mode, title: row.title, updated_at: row.updated_at,
-    message_count: row.messages.length,
+    revision: row.revision, message_count: row.messages.length,
   });
   return {
     calls,
@@ -35,10 +35,16 @@ function fakePools() {
           const deleted = rows.delete(params[0]);
           return { rowCount: deleted ? 1 : 0, rows: deleted ? [{ thread_id: params[0] }] : [] };
         }
-        const [id, mode, title, messagesJson] = params;
+        const [id, mode, title, messagesJson, base] = params;
         const previous = rows.get(id);
+        if (/^INSERT/.test(sql.trim()) && previous) return { rowCount: 0, rows: [] };
+        if (/^UPDATE/.test(sql.trim()) &&
+            (!previous || previous.mode !== mode || previous.revision !== base)) {
+          return { rowCount: 0, rows: [] };
+        }
         const row = {
           id, mode, title, messages: JSON.parse(messagesJson),
+          revision: previous ? previous.revision + 1 : 1,
           created_at: previous?.created_at || stamp(), updated_at: stamp(),
         };
         rows.set(id, row);
@@ -85,7 +91,7 @@ test('CRUD uses read and write pools and lists newest first', async () => {
       id: 'older', mode: 'chat', messages: [
         { role: 'user', content: 'Updated question with a long enough title' },
         { role: 'assistant', content: 'Answer' },
-      ],
+      ], base: 1,
     })).json();
     assert.equal(updated.message_count, 2);
     assert.equal(updated.title, 'Updated question with a long enough title');
@@ -98,7 +104,7 @@ test('CRUD uses read and write pools and lists newest first', async () => {
     assert.equal(f.calls.reads.length, 3);
     assert.equal(f.calls.writes.length, 4);
     assert.ok(f.calls.reads.every(({ sql }) => /SELECT/.test(sql)));
-    assert.ok(f.calls.writes.every(({ sql }) => /INSERT|DELETE/.test(sql)));
+    assert.ok(f.calls.writes.every(({ sql }) => /INSERT|UPDATE|DELETE/.test(sql)));
   } finally { await f.close(); }
 });
 
@@ -135,5 +141,20 @@ test('enforces the encoded thread size cap', async () => {
     assert.equal(response.status, 413);
     assert.match((await response.json()).error, /limited/);
     assert.equal(f.calls.writes.length, 0);
+  } finally { await f.close(); }
+});
+
+test('stale, deleted and mode-changing updates return 409 without writing', async () => {
+  const f = await fixture();
+  try {
+    const initial = { id: 'shared', mode: 'planning', messages: [{ role: 'user', content: 'Plan' }] };
+    assert.equal((await request(f.url, 'POST', initial)).status, 200);
+    assert.equal((await request(f.url, 'POST', initial)).status, 409, 'create collision');
+    assert.equal((await request(f.url, 'POST', { ...initial, base: 9 })).status, 409, 'stale base');
+    assert.equal((await request(f.url, 'POST', { ...initial, mode: 'chat', base: 1 })).status, 409,
+      'mode change');
+    assert.equal((await request(`${f.url}/shared`, 'DELETE')).status, 200);
+    assert.equal((await request(f.url, 'POST', { ...initial, base: 1 })).status, 409,
+      'deleted row resurrection');
   } finally { await f.close(); }
 });

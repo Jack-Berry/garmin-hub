@@ -53,7 +53,7 @@ function createChatThreadsRouter({ db, writeDb }) {
       params.push(req.query.mode);
     }
     const rows = await db.all(
-      `SELECT thread_id AS id, mode, title, updated_at,
+      `SELECT thread_id AS id, mode, title, revision, updated_at,
               jsonb_array_length(messages_json) AS message_count
        FROM chat_threads ${where}
        ORDER BY updated_at DESC`, params);
@@ -62,7 +62,7 @@ function createChatThreadsRouter({ db, writeDb }) {
 
   router.get('/:id', handler(async (req, res) => {
     const row = await db.get(
-      `SELECT thread_id AS id, mode, title, messages_json AS messages,
+      `SELECT thread_id AS id, mode, title, messages_json AS messages, revision,
               created_at, updated_at
        FROM chat_threads WHERE thread_id = $1`, [req.params.id]);
     if (!row) throw fail(404, 'thread not found');
@@ -78,18 +78,28 @@ function createChatThreadsRouter({ db, writeDb }) {
     }
     const messagesJson = validateMessages(req.body?.messages);
     const title = titleFrom(req.body.messages);
-    const result = await writeDb.run(
-      `INSERT INTO chat_threads
-         (thread_id, mode, title, messages_json, created_at, updated_at)
-       VALUES ($1, $2, $3, $4::jsonb, now(), now())
-       ON CONFLICT (thread_id) DO UPDATE SET
-         mode = EXCLUDED.mode,
-         title = EXCLUDED.title,
-         messages_json = EXCLUDED.messages_json,
-         updated_at = now()
-       RETURNING thread_id AS id, mode, title, updated_at,
-                 jsonb_array_length(messages_json) AS message_count`,
-      [id, mode, title, messagesJson]);
+    const base = req.body?.base;
+    if (base != null && (!Number.isSafeInteger(base) || base < 1)) {
+      throw fail(400, 'base must be a positive integer');
+    }
+    const result = base == null
+      ? await writeDb.run(
+        `INSERT INTO chat_threads
+           (thread_id, mode, title, messages_json, created_at, updated_at)
+         VALUES ($1, $2, $3, $4::jsonb, now(), now())
+         ON CONFLICT (thread_id) DO NOTHING
+         RETURNING thread_id AS id, mode, title, revision, updated_at,
+                   jsonb_array_length(messages_json) AS message_count`,
+        [id, mode, title, messagesJson])
+      : await writeDb.run(
+        `UPDATE chat_threads
+         SET title = $3, messages_json = $4::jsonb,
+             revision = revision + 1, updated_at = now()
+         WHERE thread_id = $1 AND mode = $2 AND revision = $5
+         RETURNING thread_id AS id, mode, title, revision, updated_at,
+                   jsonb_array_length(messages_json) AS message_count`,
+        [id, mode, title, messagesJson, base]);
+    if (!result.rowCount) throw fail(409, 'thread changed or was deleted');
     res.json(result.rows[0]);
   }));
 

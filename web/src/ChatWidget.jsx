@@ -7,6 +7,9 @@ import { PlanReview } from './PlanReview';
 import { ActivationFlow } from './PlanActivation';
 import CoachMemory from './CoachMemory';
 import ChatHistory from './ChatHistory';
+import {
+  actionRefreshReason, compactMessages, restoredMode, restoreMessages,
+} from './chatPersistence';
 
 // Floating chat coach — a discreet bottom-right widget that answers training
 // questions using the same context engine as the daily insight. Completed
@@ -39,25 +42,15 @@ const toPayload = (msgs) =>
 const freshId = () => globalThis.crypto?.randomUUID?.() ||
   `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
 
-// A browser may vanish while a Garmin write is in flight. Those cards restore
-// as blocked instead of becoming retry buttons that could double-book Garmin.
-const restoreMessages = (messages) => {
-  let interrupted = false;
-  const safe = messages.map((message) => {
-    if (!message.pushPending && !message.actionPending) return message;
-    interrupted = true;
-    const { pushPending, actionPending, ...rest } = message;
-    return { ...rest, restoreBlocked: true };
-  });
-  return { messages: safe, interrupted };
-};
-
 export default function ChatWidget({ appMode = false, active = true, seed = null }) {
   const [open, setOpen] = useState(appMode);
   const [mode, setMode] = useState('chat'); // 'chat' | 'planning'
   const [messages, setMessages] = useState([]); // [{role, content, spec?, preview?, previewError?, pushed?, plan?, savedPlan?}]
   const [threadId, setThreadId] = useState(null);
   const [threadMode, setThreadMode] = useState('chat');
+  const [threadLoading, setThreadLoading] = useState(false);
+  const [threadFull, setThreadFull] = useState(false);
+  const [threadConflict, setThreadConflict] = useState(false);
   const [input, setInput] = useState('');
   const [pending, setPending] = useState(false);
   const [pushingIdx, setPushingIdx] = useState(null);
@@ -85,12 +78,31 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
   const initializedRef = useRef(false);
   const saveTimerRef = useRef(null);
   const savedSnapshotRef = useRef(null);
+  const revisionRef = useRef(null);
+  const createdRef = useRef(false);
+  const threadIdRef = useRef(null);
+  const threadModeRef = useRef('chat');
+  const messagesRef = useRef([]);
+  const loadTokenRef = useRef(0);
+  const saveInFlightRef = useRef(null);
 
   const planning = mode === 'planning';
+  const actionBusy = pushingIdx != null || savingIdx != null || applyingIdx != null;
+  const navigationBusy = pending || threadLoading || actionBusy;
 
-  const newThread = (nextMode = mode) => {
-    if (pending) return;
-    setThreadId(freshId());
+  threadIdRef.current = threadId;
+  threadModeRef.current = threadMode;
+  messagesRef.current = messages;
+
+  const resetThread = (nextMode) => {
+    loadTokenRef.current++;
+    const id = freshId();
+    threadIdRef.current = id;
+    threadModeRef.current = nextMode;
+    messagesRef.current = [];
+    revisionRef.current = null;
+    createdRef.current = false;
+    setThreadId(id);
     setThreadMode(nextMode);
     setMode(nextMode);
     setMessages([]);
@@ -98,76 +110,196 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
     setError(null);
     setRestoreNote(null);
     setHistoryOpen(false);
+    setThreadLoading(false);
+    setThreadFull(false);
+    setThreadConflict(false);
     savedSnapshotRef.current = null;
   };
 
+  const newThread = (nextMode = mode) => {
+    if (navigationBusy) return;
+    resetThread(nextMode);
+  };
+
+  const applyLoadedThread = (thread, token, conflictMessage = null) => {
+    if (token !== loadTokenRef.current) return false;
+    const restored = restoreMessages(thread.messages);
+    threadIdRef.current = thread.id;
+    threadModeRef.current = thread.mode;
+    messagesRef.current = restored.messages;
+    revisionRef.current = thread.revision;
+    createdRef.current = true;
+    setThreadId(thread.id);
+    setThreadMode(thread.mode);
+    setMode(restoredMode(thread.mode, restored.messages));
+    setMessages(restored.messages);
+    setInput('');
+    setThreadFull(false);
+    setThreadConflict(false);
+    setRestoreNote(restored.interrupted
+      ? 'A Garmin action was interrupted. Its confirmation is locked: refresh the calendar before deciding what to do next.'
+      : conflictMessage);
+    setHistoryOpen(false);
+    savedSnapshotRef.current = JSON.stringify(thread.messages);
+    return true;
+  };
+
   const openThread = async (id) => {
-    if (pending) return;
+    if (navigationBusy) return;
+    const token = ++loadTokenRef.current;
+    setThreadLoading(true);
     setError(null);
     try {
       const thread = await api.chatThread(id);
-      const restored = restoreMessages(thread.messages);
-      setThreadId(thread.id);
-      setThreadMode(thread.mode);
-      setMode(thread.mode);
-      setMessages(restored.messages);
-      setInput('');
-      setRestoreNote(restored.interrupted
-        ? 'A Garmin action was interrupted. Its confirmation is locked: refresh the calendar before deciding what to do next.'
-        : null);
-      setHistoryOpen(false);
-      // If an in-flight marker was converted to a permanent blocked card, let
-      // the normal debounce persist that safer replacement.
-      savedSnapshotRef.current = JSON.stringify(thread.messages);
+      applyLoadedThread(thread, token);
     } catch (e) {
-      setError(e.message || 'Could not restore conversation');
+      if (token === loadTokenRef.current) setError(e.message || 'Could not restore conversation');
+    } finally {
+      if (token === loadTokenRef.current) setThreadLoading(false);
     }
   };
 
   const restoreLatest = async (nextMode) => {
+    const token = ++loadTokenRef.current;
+    setThreadLoading(true);
     setMode(nextMode);
     setMessages([]);
     setRestoreNote(null);
     try {
       const threads = await api.chatThreads(nextMode);
-      if (threads[0]) await openThread(threads[0].id);
-      else newThread(nextMode);
+      if (token !== loadTokenRef.current) return;
+      if (threads[0]) {
+        const thread = await api.chatThread(threads[0].id);
+        applyLoadedThread(thread, token);
+      } else {
+        resetThread(nextMode);
+      }
     } catch (e) {
-      newThread(nextMode);
-      setError(e.message || 'Could not load saved conversations');
+      if (token === loadTokenRef.current) {
+        resetThread(nextMode);
+        setError(e.message || 'Could not load saved conversations');
+      }
+    } finally {
+      if (token === loadTokenRef.current) setThreadLoading(false);
     }
   };
 
-  const storeNow = async (nextMessages) => {
-    if (!threadId) throw new Error('Conversation is not ready to save');
-    await api.saveChatThread({ id: threadId, mode: threadMode, messages: nextMessages });
-    savedSnapshotRef.current = JSON.stringify(nextMessages);
+  const loadConflict = async (id) => {
+    const token = ++loadTokenRef.current;
+    setThreadLoading(true);
+    try {
+      const thread = await api.chatThread(id);
+      applyLoadedThread(thread, token, 'This conversation changed on another device. The newer version is shown.');
+      setError('This conversation changed on another device. Your stale copy was not saved.');
+    } catch (e) {
+      if (token === loadTokenRef.current) {
+        setThreadConflict(true);
+        setError(e.status === 404
+          ? 'This conversation was deleted on another device. Start a new chat to continue.'
+          : e.message || 'Could not refresh the changed conversation');
+      }
+    } finally {
+      if (token === loadTokenRef.current) setThreadLoading(false);
+    }
+  };
+
+  const persistMessages = async (nextMessages, { expectedId = threadIdRef.current, keepalive = false } = {}) => {
+    if (!expectedId) throw new Error('Conversation is not ready to save');
+    const run = async () => {
+      if (threadIdRef.current !== expectedId) return { dropped: true };
+      const payload = {
+        id: expectedId,
+        mode: threadModeRef.current,
+        messages: compactMessages(nextMessages),
+        ...(createdRef.current ? { base: revisionRef.current } : {}),
+      };
+      try {
+        const saved = await api.saveChatThread(payload, { keepalive });
+        if (threadIdRef.current !== expectedId) return { dropped: true };
+        revisionRef.current = saved.revision;
+        createdRef.current = true;
+        setThreadFull(false);
+        savedSnapshotRef.current = JSON.stringify(nextMessages);
+        return saved;
+      } catch (e) {
+        if (threadIdRef.current !== expectedId) return { dropped: true };
+        if (e.status === 409) await loadConflict(expectedId);
+        if (e.status === 413) {
+          setThreadFull(true);
+          setError('This conversation is full. Start a new one.');
+        }
+        throw e;
+      }
+    };
+    const prior = saveInFlightRef.current?.catch(() => {});
+    const task = prior ? prior.then(run) : run();
+    saveInFlightRef.current = task;
+    try {
+      return await task;
+    } finally {
+      if (saveInFlightRef.current === task) saveInFlightRef.current = null;
+    }
+  };
+
+  const storeNow = (nextMessages, expectedId) =>
+    persistMessages(nextMessages, { expectedId });
+
+  const refreshBeforeAction = async (index, expectedId) => {
+    if (!createdRef.current) await persistMessages(messagesRef.current, { expectedId });
+    if (threadIdRef.current !== expectedId) return false;
+    const thread = await api.chatThread(expectedId);
+    if (threadIdRef.current !== expectedId) return false;
+    const reason = actionRefreshReason(thread, index, revisionRef.current);
+    if (!reason) {
+      revisionRef.current = thread.revision;
+      return true;
+    }
+    const token = ++loadTokenRef.current;
+    applyLoadedThread(thread, token,
+      reason === 'already handled'
+        ? 'This action was already handled on another device.'
+        : 'This conversation changed on another device. The newer version is shown.');
+    setError(reason === 'already handled'
+      ? 'This action is already handled and was not repeated.'
+      : 'This conversation changed on another device. Review it before acting.');
+    return false;
   };
 
   const startSeed = async (nextSeed) => {
-    if (pending) return;
+    if (navigationBusy) return;
     initializedRef.current = true;
     const opening = [{ role: 'user', content: nextSeed.message }];
+    const seedThreadId = freshId();
     seedRequestRef.current = nextSeed.id;
     setSeedPrompt(null);
-    setThreadId(freshId());
+    loadTokenRef.current++;
+    threadIdRef.current = seedThreadId;
+    threadModeRef.current = 'chat';
+    messagesRef.current = opening;
+    revisionRef.current = null;
+    createdRef.current = false;
+    setThreadId(seedThreadId);
     setThreadMode('chat');
     setMode('chat');
     setMessages(opening);
     setInput('');
     setError(null);
     setRestoreNote(null);
+    setThreadFull(false);
+    setThreadConflict(false);
     savedSnapshotRef.current = null;
     setPending(true);
     try {
       const { reply } = await api.chat(opening);
-      if (seedRequestRef.current === nextSeed.id) {
+      if (seedRequestRef.current === nextSeed.id && threadIdRef.current === seedThreadId) {
         setMessages([...opening, { role: 'assistant', content: reply }]);
       }
     } catch (e) {
-      if (seedRequestRef.current === nextSeed.id) setError(e.message || 'Something went wrong');
+      if (seedRequestRef.current === nextSeed.id && threadIdRef.current === seedThreadId) {
+        setError(e.message || 'Something went wrong');
+      }
     } finally {
-      if (seedRequestRef.current === nextSeed.id) setPending(false);
+      if (seedRequestRef.current === nextSeed.id && threadIdRef.current === seedThreadId) setPending(false);
     }
   };
 
@@ -178,7 +310,7 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
     if (!seed?.message || seededRef.current === seed.id) return;
     seededRef.current = seed.id;
     setOpen(true);
-    if (pending || planning || messages.length) {
+    if (navigationBusy || planning || messages.length) {
       setSeedPrompt(seed);
       return;
     }
@@ -250,19 +382,35 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
     const snapshot = JSON.stringify(messages);
     if (snapshot === savedSnapshotRef.current) return undefined;
     saveTimerRef.current = setTimeout(() => {
-      api.saveChatThread({ id: threadId, mode: threadMode, messages })
-        .then(() => { savedSnapshotRef.current = snapshot; })
-        .catch((e) => setError(e.message || 'Conversation could not be saved'));
+      persistMessages(messages, { expectedId: threadId })
+        .catch((e) => {
+          if (e.status !== 409 && e.status !== 413) setError(e.message || 'Conversation could not be saved');
+        });
     }, 500);
     return () => clearTimeout(saveTimerRef.current);
   }, [threadId, threadMode, messages, pending, pushingIdx, savingIdx, applyingIdx]);
 
-  // Chat and planning threads cannot share model history. Switching restores
-  // the newest thread for that mode; History exposes older ones and New chat.
+  useEffect(() => {
+    const flush = () => {
+      clearTimeout(saveTimerRef.current);
+      const current = messagesRef.current;
+      if (!threadIdRef.current || !current.length || pending || actionBusy) return;
+      if (JSON.stringify(current) === savedSnapshotRef.current) return;
+      persistMessages(current, { expectedId: threadIdRef.current, keepalive: true }).catch(() => {});
+    };
+    const onHidden = () => { if (document.hidden) flush(); };
+    window.addEventListener('pagehide', flush);
+    document.addEventListener('visibilitychange', onHidden);
+    return () => {
+      window.removeEventListener('pagehide', flush);
+      document.removeEventListener('visibilitychange', onHidden);
+    };
+  }, [pending, actionBusy]);
+
+  // Mode entry always starts a fresh thread. Older threads remain in History.
   const enterMode = (m) => {
-    if (pending) return;
-    setError(null);
-    restoreLatest(m);
+    if (navigationBusy) return;
+    resetThread(m);
   };
 
   // Run one planning turn: send `nextMessages` to the coach, attach any inline
@@ -271,12 +419,15 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
   // itself is the single guard-failure relay below (`canRelayFailure` blocks
   // re-entry, so a coach that keeps emitting rejected specs can't loop) —
   // push auto-advance still lives only in push()'s success path.
-  const runPlanTurn = async (nextMessages, canRelayFailure = true) => {
+  const runPlanTurn = async (
+    nextMessages, canRelayFailure = true, expectedId = threadIdRef.current,
+  ) => {
     setError(null);
     setPending(true);
     try {
       const { reply, spec, edit, plan, done, specError } =
         await api.plan(toPayload(nextMessages));
+      if (threadIdRef.current !== expectedId) return;
       let assistant = { role: 'assistant', content: reply };
       let failNote = null;
       if (edit) {
@@ -290,6 +441,7 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
         if (edit.edit === 'replace') {
           try {
             const preview = await api.pacerPreview(edit.spec);
+            if (threadIdRef.current !== expectedId) return;
             assistant = { ...assistant, preview };
           } catch (e) {
             const msg = e.message || 'Preview failed';
@@ -328,6 +480,7 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
         } else {
           try {
             const preview = await api.pacerPreview(spec);
+            if (threadIdRef.current !== expectedId) return;
             assistant = { ...assistant, spec, preview };
           } catch (e) {
             const msg = e.message || 'Preview failed';
@@ -349,9 +502,16 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
       const withReply = failNote
         ? [...nextMessages, assistant, failNote]
         : [...nextMessages, assistant];
-      setMessages(withReply);
+      const completed = done && withReply.some((m) => m.pushed);
+      const finalMessages = completed
+        ? withReply.map((message, index) => index === withReply.length - 1
+          ? { ...message, planningEnded: true }
+          : message)
+        : withReply;
+      if (threadIdRef.current !== expectedId) return;
+      setMessages(finalMessages);
       if (failNote && canRelayFailure) {
-        await runPlanTurn(withReply, false);
+        await runPlanTurn(finalMessages, false, expectedId);
         return;
       }
       // Coach signalled the plan is complete — drop back to the analyst but
@@ -363,11 +523,11 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
       // never by coach prose — so this reads structural push state, not text.
       // The final push's stamped turn is in nextMessages, so the last session
       // acknowledges + [[PLAN_COMPLETE]] and this exits cleanly.
-      if (done && withReply.some((m) => m.pushed)) setMode('chat');
+      if (completed) setMode('chat');
     } catch (e) {
-      setError(e.message || 'Something went wrong');
+      if (threadIdRef.current === expectedId) setError(e.message || 'Something went wrong');
     } finally {
-      setPending(false);
+      if (threadIdRef.current === expectedId) setPending(false);
     }
   };
 
@@ -377,6 +537,7 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
   const savePlan = async (i) => {
     const msg = messages[i];
     if (!planning || !msg?.plan || savingIdx != null || pending) return;
+    const expectedId = threadIdRef.current;
     setSavingIdx(i);
     setError(null);
     try {
@@ -388,17 +549,19 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
         name: msg.plan.name, goal_race: msg.plan.goal_race,
         summary: msg.plan.summary, weeks: msg.plan.weeks, sessions,
       });
+      if (threadIdRef.current !== expectedId) return;
       setMessages([
         ...messages.map((m, j) => (j === i ? { ...m, savedPlan: res } : m)),
         {
           role: 'user',
           system: true,
+          planningEnded: true,
           content: `[Plan saved as a DRAFT: ${res.sessions} sessions, ${res.from} to ${res.to}. It is dormant — nothing is on Garmin and the existing calendar stays live — until the athlete activates it: offered right here via "Activate now", or later from the dashboard's "Activate plan" card.]`,
         },
       ]);
       setMode('chat');
     } catch (e) {
-      setError(e.message || 'Save failed');
+      if (threadIdRef.current === expectedId) setError(e.message || 'Save failed');
     } finally {
       setSavingIdx(null);
     }
@@ -406,23 +569,25 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
 
   const send = async () => {
     const text = input.trim();
-    if (!text || pending) return;
+    if (!text || pending || threadLoading || threadFull || threadConflict) return;
+    const expectedId = threadIdRef.current;
     const next = [...messages, { role: 'user', content: text }];
     setMessages(next);
     setInput('');
     if (planning) {
-      await runPlanTurn(next);
+      await runPlanTurn(next, true, expectedId);
       return;
     }
     setError(null);
     setPending(true);
     try {
       const { reply } = await api.chat(toPayload(next));
+      if (threadIdRef.current !== expectedId) return;
       setMessages([...next, { role: 'assistant', content: reply }]);
     } catch (e) {
-      setError(e.message || 'Something went wrong');
+      if (threadIdRef.current === expectedId) setError(e.message || 'Something went wrong');
     } finally {
-      setPending(false);
+      if (threadIdRef.current === expectedId) setPending(false);
     }
   };
 
@@ -438,20 +603,30 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
     // Planning-only: a leftover Push button after the mode exits must not
     // fire a planning turn into a chat thread. Duplicate/pushed specs never
     // push twice (name+date identity).
-    if (!planning || !msg?.spec || msg.duplicate || msg.restoreBlocked || pushingIdx != null || pending) return;
+    if (!planning || !msg?.spec || msg.duplicate || msg.restoreBlocked || msg.guardUnavailable ||
+        pushingIdx != null || pending) return;
     if (alreadyPushed(messages, msg.spec)) {
       setError(`Already pushed "${msg.spec.name}" for ${msg.spec.date}.`);
       return;
     }
+    const expectedId = threadIdRef.current;
     setPushingIdx(i);
     setError(null);
-    const guarded = messages.map((m, j) => (j === i ? { ...m, pushPending: true } : m));
+    let guarded = null;
     let guardStored = false;
     try {
-      await storeNow(guarded);
+      if (!await refreshBeforeAction(i, expectedId)) return;
+      if (threadIdRef.current !== expectedId) return;
+      const current = messagesRef.current;
+      const currentMessage = current[i];
+      if (!currentMessage?.spec || alreadyPushed(current, currentMessage.spec)) return;
+      guarded = current.map((m, j) => (j === i ? { ...m, pushPending: true } : m));
+      await storeNow(guarded, expectedId);
+      if (threadIdRef.current !== expectedId) return;
       guardStored = true;
       setMessages(guarded);
-      const res = await api.pacerPush(msg.spec);
+      const res = await api.pacerPush(currentMessage.spec);
+      if (threadIdRef.current !== expectedId) return;
       const advanced = guarded.map((m, j) => {
         if (j !== i) return m;
         const { pushPending, ...rest } = m;
@@ -487,13 +662,19 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
       };
       const next = [...advanced, note];
       setMessages(next);
-      await runPlanTurn(next);
+      await runPlanTurn(next, true, expectedId);
     } catch (e) {
-      if (guardStored) {
+      if (threadIdRef.current !== expectedId || e.status === 409) return;
+      if (guardStored && guarded) {
         setMessages(guarded.map((m, j) => j === i
           ? { ...m, pushPending: false, restoreBlocked: true }
           : m));
         setError('The Garmin result is uncertain. Refresh the calendar before taking another action.');
+      } else if (e.status === 413) {
+        setMessages(messagesRef.current.map((m, j) => j === i
+          ? { ...m, guardUnavailable: true }
+          : m));
+        setError('This conversation is full. Start a new one before pushing.');
       } else {
         setError(`Conversation could not be secured, so nothing was pushed. ${e.message || ''}`.trim());
       }
@@ -510,16 +691,25 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
   // note so the coach reads the reconcile as done and never re-emits the edit.
   const applyEdit = async (i, force = false) => {
     const msg = messages[i];
-    if (!planning || !msg?.edit || msg.applied || msg.restoreBlocked || applyingIdx != null || pending) return;
+    if (!planning || !msg?.edit || msg.applied || msg.restoreBlocked || msg.guardUnavailable ||
+        applyingIdx != null || pending) return;
+    const expectedId = threadIdRef.current;
     setApplyingIdx(i);
     setError(null);
-    const guarded = messages.map((m, j) => (j === i ? { ...m, actionPending: true } : m));
+    let guarded = null;
     let guardStored = false;
     try {
-      await storeNow(guarded);
+      if (!await refreshBeforeAction(i, expectedId)) return;
+      if (threadIdRef.current !== expectedId) return;
+      const current = messagesRef.current;
+      const currentMessage = current[i];
+      if (!currentMessage?.edit) return;
+      guarded = current.map((m, j) => (j === i ? { ...m, actionPending: true } : m));
+      await storeNow(guarded, expectedId);
+      if (threadIdRef.current !== expectedId) return;
       guardStored = true;
       setMessages(guarded);
-      const e = msg.edit;
+      const e = currentMessage.edit;
       let res;
       if (e.edit === 'move') {
         res = await api.moveSession(e.schedule_id, e.to_date, force);
@@ -538,6 +728,7 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
       } else {
         res = await api.replaceSession(e.schedule_id, e.spec);
       }
+      if (threadIdRef.current !== expectedId) return;
       if (res.outcome_unknown) {
         setMessages(guarded.map((m, j) => j === i
           ? { ...m, actionPending: false, restoreBlocked: true }
@@ -568,11 +759,17 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
         { role: 'user', system: true, content: note },
       ]);
     } catch (err) {
-      if (guardStored) {
+      if (threadIdRef.current !== expectedId || err.status === 409) return;
+      if (guardStored && guarded) {
         setMessages(guarded.map((m, j) => j === i
           ? { ...m, actionPending: false, restoreBlocked: true }
           : m));
         setError('The calendar result is uncertain. Refresh before taking another action.');
+      } else if (err.status === 413) {
+        setMessages(messagesRef.current.map((m, j) => j === i
+          ? { ...m, guardUnavailable: true }
+          : m));
+        setError('This conversation is full. Start a new one before changing the calendar.');
       } else {
         setError(`Conversation could not be secured, so nothing was changed. ${err.message || ''}`.trim());
       }
@@ -612,20 +809,11 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
           : appMode ? '' : 'h-[500px] w-[360px]'
       } ${appMode ? '' : 'max-w-[calc(100vw-2.5rem)]'} ${planning ? 'border-acc' : 'border-line'}`}
     >
-      <header className="flex items-center justify-between gap-2 border-b border-line px-4 py-3">
-        <div className="min-w-0 shrink">
+      <header className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 gap-y-1 border-b border-line px-4 py-3">
+        <div className="min-w-0">
           <h2 className="font-display text-[0.9375rem] font-bold uppercase tracking-[0.1em] text-ink">
             Coach
           </h2>
-          {planning ? (
-            <p className="mt-0.5 truncate whitespace-nowrap font-body text-nano uppercase tracking-[0.18em] text-acc">
-              Planning mode
-            </p>
-          ) : (
-            <p className="mt-0.5 truncate whitespace-nowrap font-body text-nano uppercase tracking-[0.18em] text-ink-muted">
-              Asks the data, not the workout plan
-            </p>
-          )}
         </div>
         <div className="flex shrink-0 items-center gap-1">
           {planning ? (
@@ -640,14 +828,14 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
               </button>
               <button
                 onClick={() => setHistoryOpen(true)}
-                disabled={pending}
-                className="rounded-lg border border-line px-2 py-1 text-xs text-ink-secondary transition hover:bg-surface-2"
+                disabled={navigationBusy}
+                className="rounded-lg border border-line px-2 py-1 text-xs text-ink-secondary transition hover:bg-surface-2 disabled:opacity-50"
               >
                 History
               </button>
               <button
                 onClick={() => enterMode('chat')}
-                disabled={pending}
+                disabled={navigationBusy}
                 className="rounded-lg border border-line px-2 py-1 text-xs text-ink-secondary transition hover:bg-surface-2 disabled:opacity-50"
               >
                 Exit planning
@@ -665,14 +853,14 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
               </button>
               <button
                 onClick={() => setHistoryOpen(true)}
-                disabled={pending}
-                className="rounded-lg border border-line px-2 py-1 text-xs text-ink-secondary transition hover:bg-surface-2"
+                disabled={navigationBusy}
+                className="rounded-lg border border-line px-2 py-1 text-xs text-ink-secondary transition hover:bg-surface-2 disabled:opacity-50"
               >
                 History
               </button>
               <button
                 onClick={() => enterMode('planning')}
-                disabled={pending}
+                disabled={navigationBusy}
                 title="Plan sessions or blocks, and edit the Garmin calendar"
                 className="inline-flex items-center gap-1 rounded-lg border border-line px-2 py-1 text-xs text-ink-secondary transition hover:bg-surface-2 disabled:opacity-50"
               >
@@ -702,9 +890,23 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
             </button>
           )}
         </div>
+        {planning ? (
+          <p className="col-span-2 whitespace-nowrap font-body text-nano uppercase tracking-[0.18em] text-acc">
+            Planning mode
+          </p>
+        ) : (
+          <p className="col-span-2 whitespace-nowrap font-body text-nano uppercase tracking-[0.18em] text-ink-muted">
+            Asks the data, not the workout plan
+          </p>
+        )}
       </header>
 
       <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
+        {threadLoading && (
+          <p className="rounded-xl border border-line bg-surface-2 p-3 text-center text-xs text-ink-muted">
+            Loading conversation...
+          </p>
+        )}
         {restoreNote && (
           <p className="rounded-xl border border-line bg-surface-2 p-3 text-xs text-ink-secondary">
             {restoreNote}
@@ -772,9 +974,11 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
                           : m.edit.edit === 'discard_plan' ? 'Draft discarded ✓'
                           : 'Updated ✓'}
                       </p>
-                    ) : m.restoreBlocked ? (
+                    ) : m.restoreBlocked || m.guardUnavailable ? (
                       <p className="text-xs text-sem-red">
-                        Confirmation unavailable after an interrupted action. Refresh the calendar first.
+                        {m.guardUnavailable
+                          ? 'This conversation is full. Start a new one before changing the calendar.'
+                          : 'Confirmation unavailable after an interrupted action. Refresh the calendar first.'}
                       </p>
                     ) : !planning ? (
                       <p className="text-xs text-ink-muted">Not applied — planning ended.</p>
@@ -823,9 +1027,11 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
                           <span className="font-mono">{m.pushed.workout_id}</span>
                         </p>
                       )
-                    ) : m.restoreBlocked ? (
+                    ) : m.restoreBlocked || m.guardUnavailable ? (
                       <p className="text-xs text-sem-red">
-                        Push unavailable after an interrupted request. Refresh the calendar first.
+                        {m.guardUnavailable
+                          ? 'This conversation is full. Start a new one before pushing.'
+                          : 'Push unavailable after an interrupted request. Refresh the calendar first.'}
                       </p>
                     ) : planning ? (
                       <button
@@ -837,7 +1043,7 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
                       </button>
                     ) : (
                       <p className="text-xs text-ink-muted">
-                        Not pushed — planning ended. Re-enter planning to push this session.
+                        Not pushed. This finished planning thread is read-only.
                       </p>
                     )}
                   </div>
@@ -861,7 +1067,7 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
               <button onClick={() => setSeedPrompt(null)} className="rounded-lg border border-line px-3 py-1.5 text-xs font-medium text-ink-secondary transition hover:bg-surface-1">
                 Keep current thread
               </button>
-              <button onClick={() => startSeed(seedPrompt)} disabled={pending} className="rounded-lg bg-acc px-3 py-1.5 text-xs font-semibold text-acc-ink transition hover:opacity-90 disabled:opacity-50">
+              <button onClick={() => startSeed(seedPrompt)} disabled={navigationBusy} className="rounded-lg bg-acc px-3 py-1.5 text-xs font-semibold text-acc-ink transition hover:opacity-90 disabled:opacity-50">
                 Start activity chat
               </button>
             </div>
@@ -899,15 +1105,16 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onKeyDown}
+            disabled={threadLoading || threadFull || threadConflict}
             placeholder={
               planning ? 'Ask for a session, plan, or calendar edit…'
               : 'Ask your coach… (Shift+Enter for a new line)'
             }
-            className="max-h-[178px] flex-1 resize-none overflow-y-auto rounded-lg border border-line bg-surface-2 px-3 py-2 text-sm text-ink shadow-sm outline-none transition placeholder:text-ink-muted focus:border-acc focus:ring-2 focus:ring-acc/20"
+            className="max-h-[178px] flex-1 resize-none overflow-y-auto rounded-lg border border-line bg-surface-2 px-3 py-2 text-sm text-ink shadow-sm outline-none transition placeholder:text-ink-muted focus:border-acc focus:ring-2 focus:ring-acc/20 disabled:opacity-50"
           />
           <button
             onClick={send}
-            disabled={pending || !input.trim()}
+            disabled={pending || threadLoading || threadFull || threadConflict || !input.trim()}
             className="rounded-lg bg-acc px-3 py-2 text-sm font-medium text-acc-ink transition hover:opacity-90 disabled:opacity-50"
           >
             Send
@@ -938,10 +1145,11 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
       {historyOpen && (
         <ChatHistory
           currentId={threadId}
-          mode={threadMode}
+          mode={mode}
           onClose={() => setHistoryOpen(false)}
           onNew={newThread}
           onOpen={openThread}
+          disabled={navigationBusy}
         />
       )}
       {memoryOpen && <CoachMemory appMode={appMode} onClose={() => setMemoryOpen(false)} />}

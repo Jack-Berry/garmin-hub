@@ -16,22 +16,29 @@ const qs = (params) => {
 
 async function get(path) {
   const res = await fetch(`${BASE}${path}`, { headers: { 'X-Api-Key': SECRET } });
-  if (!res.ok) throw new Error(`GET ${path} → ${res.status} ${res.statusText}`);
+  if (!res.ok) {
+    const error = new Error(`GET ${path} → ${res.status} ${res.statusText}`);
+    error.status = res.status;
+    throw error;
+  }
   return res.json();
 }
 
-async function post(path, body) {
+async function post(path, body, options = {}) {
   const res = await fetch(`${BASE}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Api-Key': SECRET },
     body: JSON.stringify(body),
+    keepalive: options.keepalive,
   });
   if (!res.ok) {
     // Surface the server's error body (guard rejections, Garmin failures) —
     // status alone reads as "500 Internal Server Error", which tells the
     // athlete (and the coach's repair relay) nothing.
     const detail = await res.json().then((b) => b.error).catch(() => null);
-    throw new Error(`POST ${path} → ${res.status} ${detail || res.statusText}`);
+    const error = new Error(`POST ${path} → ${res.status} ${detail || res.statusText}`);
+    error.status = res.status;
+    throw error;
   }
   return res.json();
 }
@@ -41,7 +48,11 @@ async function del(path) {
     method: 'DELETE',
     headers: { 'X-Api-Key': SECRET },
   });
-  if (!res.ok) throw new Error(`DELETE ${path} → ${res.status} ${res.statusText}`);
+  if (!res.ok) {
+    const error = new Error(`DELETE ${path} → ${res.status} ${res.statusText}`);
+    error.status = res.status;
+    throw error;
+  }
   return res.json();
 }
 
@@ -64,7 +75,7 @@ export const api = {
   plan: (messages) => post('/api/coach/plan', { messages }),
   chatThreads: (mode) => get(`/api/chat-threads${qs({ mode })}`),
   chatThread: (id) => get(`/api/chat-threads/${id}`),
-  saveChatThread: (thread) => post('/api/chat-threads', thread),
+  saveChatThread: (thread, options) => post('/api/chat-threads', thread, options),
   deleteChatThread: (id) => del(`/api/chat-threads/${id}`),
   savePlan: (plan) => post('/api/plan/save', { plan }),
   planCurrent: () => get('/api/plan/current'),

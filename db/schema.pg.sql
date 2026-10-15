@@ -303,6 +303,7 @@ CREATE TABLE IF NOT EXISTS chat_threads (
   mode                         text NOT NULL CHECK (mode IN ('chat', 'planning')),
   title                        text NOT NULL,
   messages_json                jsonb NOT NULL,
+  revision                     bigint NOT NULL DEFAULT 1,
   created_at                   timestamptz NOT NULL DEFAULT now(),
   updated_at                   timestamptz NOT NULL DEFAULT now()
 );
