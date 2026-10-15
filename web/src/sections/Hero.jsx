@@ -10,6 +10,7 @@ import PaceSlide from '../hero/PaceSlide';
 import LoadSlide from '../hero/LoadSlide';
 import BalanceSlide from '../hero/BalanceSlide';
 import { PredictionsRow } from '../Records';
+import { RaceCountdown } from '../trends/TrendsCharts';
 
 // Auto-cycling carousel: advances every 12s, pauses on hover / focus / any
 // interaction, with manual arrows + clickable dots. Slides are kept mounted
@@ -183,6 +184,7 @@ export default function Hero({ view = 'all' }) {
               <WeekStrip planned={planned.data} activities={acts.data} routines={profile.data?.routines} onSelectDay={setDay} />
             </StateWrap>
           </section>
+          <RaceCountdown />
           <DailyInsight />
         </>
       )}

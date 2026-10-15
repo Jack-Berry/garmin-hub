@@ -24,6 +24,7 @@ const { scheduleId: exactScheduleId } = require('./schedule-id');
 const { planFinished } = require('./plan-date');
 const { createProactiveRouter } = require('./proactive-coach');
 const { createChatThreadsRouter } = require('./chat-threads');
+const { createFitnessRouter } = require('./fitness-trends');
 const { addHeatAdjustment, createGearRouter } = require('./gear');
 
 const app = express();
@@ -51,6 +52,7 @@ app.use('/api', keyGate(API_SECRET));
 app.use(express.json({ limit: '300kb' }));
 app.use('/api/coach', createProactiveRouter({ db, writeDb }));
 app.use('/api/chat-threads', createChatThreadsRouter({ db, writeDb }));
+app.use('/api', createFitnessRouter({ db }));
 app.use('/api/gear', createGearRouter({ db }));
 
 // Curated column lists, derived once from the schema (everything but raw_json).
@@ -245,6 +247,7 @@ app.get('/api/race-predictions', handler(async (req, res) => {
     ],
   });
 }));
+
 
 // Set/clear the manual race override for a planned workout. Body: { override }
 // where override is 1 (force race), 0 (force not-race), or null (revert to

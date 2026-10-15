@@ -64,6 +64,7 @@ export const api = {
   planned: (params = {}) => get(`/api/planned${qs(params)}`),
   recovery: (params = {}) => get(`/api/recovery${qs(params)}`),
   trainingBalance: () => get('/api/training-balance'),
+  fitness: (days = 120) => get(`/api/fitness${qs({ days })}`),
   gear: () => get('/api/gear'),
   weekly: () => get('/api/summary/weekly'),
   raceOverride: (scheduleId, override) =>
@@ -72,6 +73,8 @@ export const api = {
   saveProfile: (fields) => post('/api/profile', fields),
   personalRecords: () => get('/api/personal-records'),
   racePredictions: () => get('/api/race-predictions'),
+  predictionHistory: (days = 180) => get(`/api/race-predictions/history${qs({ days })}`),
+  raceCountdown: () => get('/api/race-countdown'),
   chat: (messages) => post('/api/coach/chat', { messages }),
   plan: (messages) => post('/api/coach/plan', { messages }),
   chatThreads: (mode) => get(`/api/chat-threads${qs({ mode })}`),

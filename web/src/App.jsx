@@ -14,6 +14,7 @@ import { Icon } from './ui';
 import { AccentProvider } from './accent';
 import StatusChip from './StatusChip';
 import ProactiveCards from './ProactiveCards';
+import TrendsCharts from './trends/TrendsCharts';
 import ShoeMileage from './gear/ShoeMileage';
 
 // How stale the data may be before opening the dashboard pulls it itself.
@@ -345,6 +346,7 @@ export default function App() {
             <>
               {appMode && <PersonalRecords />}
               {appMode && <Hero view="trends" />}
+              <TrendsCharts />
               <ShoeMileage />
               <Recovery />
             </>
