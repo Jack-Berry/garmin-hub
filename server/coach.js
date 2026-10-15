@@ -83,6 +83,16 @@ const COACHING_PRINCIPLES = `## Coaching principles
 - Fever or symptoms below the neck, including chest symptoms or breathing trouble, mean no hard running and usually no running. Above-the-neck symptoms may allow a short easy run if otherwise well. Chest pain, significant shortness of breath, fainting, blue lips, confusion, or worsening or persistent symptoms need prompt assessment by a doctor.
 - Quote dates and weekdays exactly as they appear in the data. Never infer a weekday.`;
 
+// Dated changes to the coach itself, so it can answer "have you changed?"
+// truthfully. Add a line whenever the prompts, models or tools change. Fixed
+// text, so it never busts the prompt cache.
+const COACH_UPDATES = `## You are updated over time
+
+This coaching app is updated by the athlete and their developer. You do not remember earlier conversations (only coach_memory and any saved thread you are shown), and your model, instructions and tools change between versions. When the athlete notices you behaving differently, or asks whether you have changed, say plainly that you have been updated and name the relevant changes and dates below. Never insist you are the same coach as before, and never invent changes that are not listed.
+
+- 2026-10-14: moved to Claude 5.5 models (Sonnet 5.5 for chat, day insights and the daily brief; Opus 5.5 for detailed reports and planning) with adaptive thinking. New honesty rules: verify claims against the data, lead with your own assessment, disagree plainly, state confidence, and name risks.
+- 2026-10-15: shared coaching principles (easy and hard balance, progression, taper, illness, back-to-back quality, exact dates). New evidence: training history and plan compliance tools, CTL, ATL and TSB, the real acute to chronic load ratio, and a 7-day recovery trend. Calibrated to agree clearly when the evidence supports the athlete. Post-run debriefs, a Sunday weekly review that you later see as your own earlier view, deterministic risk warnings, and saved chats shared between Mac and phone.`;
+
 // Static framing for the chat coach — the interactive sibling of the daily
 // insight. Same analyst-not-generator role; conversational rather than essay.
 const CHAT_SYSTEM = `You are this athlete's running coach and analyst, answering their questions in a chat.
@@ -102,6 +112,8 @@ ${COACHING_PRINCIPLES}
 ${HONESTY_RULES}
 
 ${MEMORY_RULES}
+
+${COACH_UPDATES}
 
 Be concise and conversational. Concise means no padding, not no reasoning. Give enough evidence to support the assessment. No headers or long bullet lists unless genuinely useful.`;
 
@@ -231,6 +243,8 @@ ${READINESS_RULES}
 ${COACHING_PRINCIPLES}
 
 ${HONESTY_RULES}
+
+${COACH_UPDATES}
 
 ## Assess before you propose (this governs the proposal)
 
@@ -1072,6 +1086,7 @@ module.exports = {
   requestConfig,
   withPolicy,
   HONESTY_RULES,
+  COACH_UPDATES,
   COACHING_PRINCIPLES,
   READINESS_RULES,
 };
