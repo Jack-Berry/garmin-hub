@@ -13,6 +13,7 @@ import PlanActivation from './PlanActivation';
 import { Icon } from './ui';
 import { AccentProvider } from './accent';
 import StatusChip from './StatusChip';
+import ProactiveCards from './ProactiveCards';
 
 // How stale the data may be before opening the dashboard pulls it itself.
 // 30 minutes: long enough that a reload, a second tab or a quick tab-switch
@@ -331,6 +332,7 @@ export default function App() {
 
         <main key={refreshKey} className={`mx-auto max-w-5xl space-y-4 px-3 py-4 md:space-y-5 md:px-6 md:py-6 ${appMode ? 'app-content' : ''}`}>
           {(!appMode || tab === 'today') && <Hero view={appMode ? 'today' : 'all'} />}
+          {(!appMode || tab === 'today') && <ProactiveCards />}
           {/* Saved-plan activation (Stage 9c): push to Garmin + the guided
               cancel-Runna step. Renders only while there's choreography left. */}
           {(!appMode || tab === 'today') && <PlanActivation />}

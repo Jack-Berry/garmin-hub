@@ -58,7 +58,8 @@ test('status returns unknown checks when host files and dump are absent', async 
   try {
     const body = await (await fetch(app.url)).json();
     assert.deepEqual(body.checks.map((check) => [check.name, check.state]), [
-      ['ingest', 'unknown'], ['brief', 'ok'], ['backup', 'unknown'], ['offsite', 'unknown'],
+      ['ingest', 'unknown'], ['debrief', 'unknown'], ['brief', 'ok'], ['weekly', 'unknown'],
+      ['backup', 'unknown'], ['offsite', 'unknown'],
     ]);
   } finally { await app.close(); }
 });

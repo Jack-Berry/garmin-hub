@@ -15,6 +15,7 @@ if [ "${DOCKER_FAIL:-0}" = 1 ]; then
   exit 9
 fi
 case "$*" in
+  */api/coach/*) curl "$@" ;;
   *pg_dump*) printf 'PGDMPstub database dump\n' ;;
   *pg_restore*)
     cat >/dev/null
@@ -23,10 +24,17 @@ case "$*" in
   *) echo "stubbed job success" ;;
 esac
 STUB
+cat > "$tmp/bin/curl" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$CURL_LOG"
+echo '{"ok":true}'
+STUB
 cat > "$tmp/bin/date" <<'STUB'
 #!/bin/sh
 if [ "${1:-}" = "+%H" ]; then
   printf '%s\n' "${FAKE_HOUR:-10}"
+elif [ "${1:-}" = "+%u" ]; then
+  printf '%s\n' "${FAKE_WEEKDAY:-7}"
 elif [ "${1:-}" = "-u" ] && [ "${2:-}" = "+%Y%m%dT%H%M%SZ" ] && [ -n "${FAKE_STAMP:-}" ]; then
   printf '%s\n' "$FAKE_STAMP"
 else
@@ -43,19 +51,23 @@ cat > "$tmp/bin/mv" <<'STUB'
 printf '%s\n' "$*" >> "$MV_LOG"
 /bin/mv "$@"
 STUB
-chmod +x "$tmp/bin/docker" "$tmp/bin/date" "$tmp/bin/sha256sum" "$tmp/bin/mv"
+chmod +x "$tmp/bin/docker" "$tmp/bin/curl" "$tmp/bin/date" "$tmp/bin/sha256sum" "$tmp/bin/mv"
 : > "$tmp/docker.log"
+: > "$tmp/curl.log"
 : > "$tmp/mv.log"
 
 run_job() {
   PATH="$tmp/bin:$PATH" DOCKER_LOG="$tmp/docker.log" GARMIN_HUB_ROOT="$repo" \
-    MV_LOG="$tmp/mv.log" REAL_SHA256SUM="$real_sha256sum" \
+    MV_LOG="$tmp/mv.log" CURL_LOG="$tmp/curl.log" REAL_SHA256SUM="$real_sha256sum" \
     GARMIN_HUB_STATUS_DIR="$tmp/status" GARMIN_HUB_BACKUP_DIR="$tmp/backups" \
     "$repo/deploy/droplet/jobs.sh" "$@"
 }
 
 run_job ingest >/dev/null
 node -e 'const s=require(process.argv[1]); if(s.job!=="ingest"||!s.ok)process.exit(1)' "$tmp/status/ingest.json"
+node -e 'const s=require(process.argv[1]); if(s.job!=="debrief"||!s.ok)process.exit(1)' "$tmp/status/debrief.json"
+grep -q '/api/coach/debriefs/pending' "$tmp/docker.log"
+grep -q '/api/coach/debriefs/pending' "$tmp/curl.log"
 
 FAKE_HOUR=10 run_job daily >/dev/null
 node -e 'const s=require(process.argv[1]); if(s.job!=="daily"||!s.ok)process.exit(1)' "$tmp/status/daily.json"
@@ -98,6 +110,17 @@ node -e 'const s=require(process.argv[1]); if(s.ok||!/archive rejection/.test(s.
 printf '{"job":"daily","ok":true,"finished_at":"2000-01-01T00:00:00Z","message":"old"}\n' > "$tmp/status/daily.json"
 FAKE_HOUR=09 run_job daily >/dev/null
 grep -q '2000-01-01' "$tmp/status/daily.json"
+
+FAKE_WEEKDAY=7 FAKE_HOUR=19 run_job weekly >/dev/null
+node -e 'const s=require(process.argv[1]); if(s.job!=="weekly"||!s.ok)process.exit(1)' "$tmp/status/weekly.json"
+grep -q '/api/coach/weekly' "$tmp/docker.log"
+grep -q '/api/coach/weekly' "$tmp/curl.log"
+
+printf '{"job":"weekly","ok":true,"finished_at":"2000-01-01T00:00:00Z","message":"old"}\n' > "$tmp/status/weekly.json"
+FAKE_WEEKDAY=6 FAKE_HOUR=19 run_job weekly >/dev/null
+grep -q '2000-01-01' "$tmp/status/weekly.json"
+FAKE_WEEKDAY=7 FAKE_HOUR=18 run_job weekly >/dev/null
+grep -q '2000-01-01' "$tmp/status/weekly.json"
 
 run_job mark offsite ok pulled >/dev/null
 node -e 'const s=require(process.argv[1]); if(s.job!=="offsite"||!s.ok||s.message!=="pulled")process.exit(1)' "$tmp/status/offsite.json"

@@ -2,7 +2,10 @@ const fs = require('fs/promises');
 const path = require('path');
 
 const HOURS = 60 * 60 * 1000;
-const THRESHOLDS = { ingest: 6 * HOURS, backup: 26 * HOURS, offsite: 48 * HOURS };
+const THRESHOLDS = {
+  ingest: 6 * HOURS, debrief: 6 * HOURS, weekly: 8 * 24 * HOURS,
+  backup: 26 * HOURS, offsite: 48 * HOURS,
+};
 
 const validTime = (value) => {
   const time = value ? new Date(value).getTime() : NaN;
@@ -60,10 +63,11 @@ function londonParts(now) {
 async function buildStatus({ db, statusDir, backupDir, now = Date.now() }) {
   const london = londonParts(now);
   const today = `${london.year}-${london.month}-${london.day}`;
-  const [ingestRow, briefRow, ingestFile, backupFile, offsiteFile, dump] = await Promise.all([
+  const [ingestRow, briefRow, ingestFile, debriefFile, weeklyFile, backupFile, offsiteFile, dump] = await Promise.all([
     db.get('SELECT last_run_at, ok, summary FROM ingest_state WHERE id = 1'),
     db.get("SELECT created_at FROM coach_notes WHERE note_type = 'daily' AND date_range_end = $1 ORDER BY created_at DESC LIMIT 1", [today]),
-    readJobFile(statusDir, 'ingest'), readJobFile(statusDir, 'backup'),
+    readJobFile(statusDir, 'ingest'), readJobFile(statusDir, 'debrief'),
+    readJobFile(statusDir, 'weekly'), readJobFile(statusDir, 'backup'),
     readJobFile(statusDir, 'offsite'), newestDump(backupDir),
   ]);
 
@@ -96,7 +100,9 @@ async function buildStatus({ db, statusDir, backupDir, now = Date.now() }) {
       : { name: 'backup', state: 'unknown', last_success: null, reason: 'No backup dump found' };
   }
   const offsite = fileCheck('offsite', offsiteFile, now, THRESHOLDS.offsite, null);
-  return { checks: [ingest, brief, backup, offsite] };
+  const debrief = fileCheck('debrief', debriefFile, now, THRESHOLDS.debrief, null);
+  const weekly = fileCheck('weekly', weeklyFile, now, THRESHOLDS.weekly, null);
+  return { checks: [ingest, debrief, brief, weekly, backup, offsite] };
 }
 
 function createHealthHandler(database, timeoutMs = 2000) {

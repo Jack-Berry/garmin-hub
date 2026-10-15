@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from './api';
 import { Markdown } from './ui';
+import { useFetch } from './useFetch';
+import DebriefCard from './DebriefCard';
 
 // On-demand coaching modal for a clicked week-strip day. Generates its insight
 // via generate() on mount (a stateless POST returning { content, model }),
@@ -10,7 +12,7 @@ import { Markdown } from './ui';
 // insight as the assistant's opening message), so questions can range across
 // the whole training picture, not just the clicked day. Chat lives in component
 // state only — not persisted. Matches the floating ChatWidget's UX.
-export default function InsightModal({ title, subtitle, generate, staticBody, chatSeed, onClose }) {
+export default function InsightModal({ title, subtitle, generate, staticBody, chatSeed, activityId, onClose }) {
   const [status, setStatus] = useState(staticBody ? 'done' : 'loading');
   const [content, setContent] = useState(staticBody || '');
   const [model, setModel] = useState(null);
@@ -23,6 +25,7 @@ export default function InsightModal({ title, subtitle, generate, staticBody, ch
   const [pending, setPending] = useState(false);
   const [chatError, setChatError] = useState(null);
   const scrollRef = useRef(null);
+  const debrief = useFetch(() => activityId ? api.debrief(activityId) : Promise.resolve(null), [activityId]);
 
   useEffect(() => {
     const onKey = (e) => e.key === 'Escape' && onClose();
@@ -112,6 +115,7 @@ export default function InsightModal({ title, subtitle, generate, staticBody, ch
             <p className="text-sm text-sem-red">Couldn't generate: {error}</p>
           ) : (
             <>
+              {activityId && <DebriefCard state={debrief} className="mb-5 border-b border-line pb-5" />}
               <Markdown className="font-body text-[15px] leading-relaxed text-ink-secondary">
                 {content}
               </Markdown>

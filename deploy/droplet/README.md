@@ -111,6 +111,7 @@ All HTTP errors fail the brief step.
 ```cron
 17 1-23/2 * * * /home/deploy/garmin-hub/deploy/droplet/jobs.sh ingest >> /home/deploy/garmin-hub/ingest.log 2>&1
 0 9,10 * * * /home/deploy/garmin-hub/deploy/droplet/jobs.sh daily >> /home/deploy/garmin-hub/daily.log 2>&1
+0 18,19 * * 0 /home/deploy/garmin-hub/deploy/droplet/jobs.sh weekly >> /home/deploy/garmin-hub/weekly.log 2>&1
 15 3 * * * /home/deploy/garmin-hub/deploy/droplet/jobs.sh backup >> /home/deploy/garmin-hub/backup.log 2>&1
 ```
 
@@ -127,6 +128,10 @@ Each host job writes its latest result atomically under
 `GET /api/status` endpoint combines these files with `ingest_state`, today's
 daily coach note, and the newest dump. `GET /api/health` also verifies the read
 database pool, so a database outage makes the container health check fail.
+The ingest job requests capped post-run debriefs only after a successful pull.
+The weekly cron is invoked at both possible UTC hours and `jobs.sh` proceeds
+only on Sunday at 19:00 Europe/London. Missing debrief or weekly status files
+remain unknown until each job has run once.
 
 The Mac offsite pull records its result through the narrow direct command:
 

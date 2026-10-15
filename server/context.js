@@ -12,6 +12,7 @@ const { computeZones } = require('./zones');
 const { resolveGoalPaces } = require('./goalpaces');
 const { computeTrainingLoad } = require('./training-load');
 const { parseTrainingBalance } = require('./training-balance');
+const { deriveRiskWarnings } = require('./risk-warnings');
 // Guard bounds — the SAME file the enforcer (ingest/pacer_cli.py) and the
 // builder's negative-split shape load, so the advisory copy can't drift.
 const GUARD_BOUNDS = require('../ingest/guard_bounds.json');
@@ -236,6 +237,19 @@ async function sectionMemory(db) {
     `SELECT id, created_at::date AS date, content FROM coach_notes
      WHERE note_type = 'memory' ORDER BY id`))
     .map((r) => ({ id: r.id, date: r.date, fact: r.content }));
+}
+
+async function sectionWeeklyReview(db) {
+  const row = await db.get(
+    `SELECT date_range_start, date_range_end, content, model
+     FROM coach_notes WHERE note_type = 'weekly'
+     ORDER BY date_range_end DESC, id DESC LIMIT 1`);
+  return row ? {
+    week_start: row.date_range_start,
+    week_end: row.date_range_end,
+    content: row.content,
+    model: row.model,
+  } : null;
 }
 
 // Recent runs over the window (runs only), each with a work-rep summary when
@@ -566,9 +580,10 @@ async function buildContext(db) {
   // stated date and the queried windows can never disagree.
   const today = localDate();
 
-  const [profile, coach_memory, recent_runs, recovery, upcoming, weekly_km, records, training_load] = await Promise.all([
+  const [profile, coach_memory, weekly_review, recent_runs, recovery, upcoming, weekly_km, records, training_load] = await Promise.all([
     sectionProfile(db),
     sectionMemory(db),
+    sectionWeeklyReview(db),
     sectionRecentRuns(db, today),
     sectionRecovery(db, today),
     sectionUpcoming(db, today),
@@ -587,11 +602,15 @@ async function buildContext(db) {
     window_days: WINDOW_DAYS,
     profile,
     coach_memory,
+    weekly_review,
     recent_runs,
     recovery,
     upcoming,
     weekly_mileage: weekly_km,
-    signals: deriveSignals(recovery, weekly_km),
+    signals: {
+      ...deriveSignals(recovery, weekly_km),
+      warnings: deriveRiskWarnings({ today, recovery, training_load, upcoming, profile, coach_memory }),
+    },
     training_load,
     personal_records: records.personal_records,
     race_predictions: records.race_predictions,
@@ -1251,7 +1270,7 @@ module.exports = {
   scheduledSummary, activityDetail, localDate,
   // Section builders — composable by surface (Stage 10c) and reusable by the
   // 10d tools. Each takes the caller's local `today`; none computes its own.
-  sectionProfile, sectionMemory, sectionRecentRuns, sectionRecovery,
+  sectionProfile, sectionMemory, sectionWeeklyReview, sectionRecentRuns, sectionRecovery,
   sectionAlignedRecovery, sectionUpcoming, sectionWeeklyMileage, sectionRecords,
   sectionTrainingLoad,
   deriveSignals,

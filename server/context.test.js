@@ -172,6 +172,10 @@ test('context is byte-stable across two builds on the same day', async () => {
   const db = {
     get: async (sql) => {
       if (sql.includes('FROM profile')) return {};
+      if (sql.includes("note_type = 'weekly'")) return {
+        date_range_start: '2026-10-05', date_range_end: '2026-10-11',
+        content: 'Stable carried-over review.', model: 'claude-opus-5-5',
+      };
       return undefined;
     },
     all: async (sql) => {
@@ -189,5 +193,6 @@ test('context is byte-stable across two builds on the same day', async () => {
   const first = JSON.stringify(await buildContext(db));
   const second = JSON.stringify(await buildContext(db));
   assert.equal(second, first);
+  assert.equal(JSON.parse(first).weekly_review.content, 'Stable carried-over review.');
   assert.match(JSON.parse(first).today_day, /^(Sun|Mon|Tue|Wed|Thu|Fri|Sat)$/);
 });

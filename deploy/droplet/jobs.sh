@@ -48,10 +48,24 @@ run_ingest() {
   $compose exec -T app python3.13 ingest/ingest.py </dev/null
 }
 
+run_coach_endpoint() {
+  endpoint=$1
+  $compose exec -T app sh -c \
+    "curl -sS --fail-with-body --max-time 240 -X POST http://127.0.0.1:3001/api/coach/$endpoint -H 'Content-Type: application/json' -H \"X-Api-Key: \$API_SECRET\" -d '{}'"
+}
+
+run_ingest_job() {
+  run_recorded ingest run_ingest || return $?
+  run_recorded debrief run_coach_endpoint debriefs/pending
+}
+
 run_daily() {
   run_ingest || return $?
-  $compose exec -T app sh -c \
-    'curl -sS --fail-with-body --max-time 180 -X POST http://127.0.0.1:3001/api/coach/daily -H "Content-Type: application/json" -H "X-Api-Key: $API_SECRET" -d "{}"'
+  run_coach_endpoint daily
+}
+
+run_weekly() {
+  run_coach_endpoint weekly
 }
 
 run_backup() {
@@ -89,11 +103,16 @@ run_backup() {
 
 case "${1:-}" in
   ingest)
-    run_recorded ingest run_ingest
+    run_ingest_job
     ;;
   daily)
     [ "$(TZ=Europe/London date +%H)" = "10" ] || exit 0
     run_recorded daily run_daily
+    ;;
+  weekly)
+    [ "$(TZ=Europe/London date +%u)" = "7" ] || exit 0
+    [ "$(TZ=Europe/London date +%H)" = "19" ] || exit 0
+    run_recorded weekly run_weekly
     ;;
   backup)
     run_recorded backup run_backup
@@ -104,7 +123,7 @@ case "${1:-}" in
     mark offsite "$3" "${4:-manual mark}" || exit 1
     ;;
   *)
-    echo "usage: $0 ingest|daily|backup|mark offsite ok|fail [message]" >&2
+    echo "usage: $0 ingest|daily|weekly|backup|mark offsite ok|fail [message]" >&2
     exit 2
     ;;
 esac

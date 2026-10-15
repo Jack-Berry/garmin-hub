@@ -1067,4 +1067,10 @@ module.exports = {
   runCoachTool,
   repairAssistantContent,
   visibleText,
+  getClient,
+  requestConfig,
+  withPolicy,
+  HONESTY_RULES,
+  COACHING_PRINCIPLES,
+  READINESS_RULES,
 };

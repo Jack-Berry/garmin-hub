@@ -68,6 +68,9 @@ export const api = {
   generateDaily: () => post('/api/coach/daily', {}),
   coachReport: () => post('/api/coach/report', {}),
   coachDay: (date) => post(`/api/coach/day/${date}`, {}),
+  debrief: (activityId) => get(`/api/coach/debriefs/${activityId}`),
+  weeklyReview: () => get('/api/coach/weekly/latest'),
+  risks: () => get('/api/coach/risks'),
   // maxAgeMinutes: only actually pull if the last run is older than this (the
   // dashboard's on-load refresh). Omit it to always pull (the manual button).
   refreshIngest: (maxAgeMinutes) =>

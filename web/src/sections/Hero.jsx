@@ -214,6 +214,7 @@ export default function Hero({ view = 'all' }) {
           title={shortDate(day.date)}
           subtitle={DAY_SUBTITLE[day.status]}
           chatSeed={chatSeedFor(day)}
+          activityId={day.activity_id}
           onClose={() => setDay(null)}
           {...(day.status === 'rest'
             ? { staticBody: 'Rest day. Nothing planned and no run logged.' }

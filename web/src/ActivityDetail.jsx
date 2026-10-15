@@ -7,6 +7,7 @@ import { useFetch } from './useFetch';
 import { AXIS, GRID, INK, Badge, Icon, StateWrap, btnPrimary } from './ui';
 import { duration, km, pace, paceFromMps, shortDate } from './format';
 import { matchIntervals, planMatchesActivity } from './activityMatch';
+import DebriefCard from './DebriefCard';
 
 const has = (value) => value != null && value !== '';
 const number = (value, digits = 0) => has(value) ? Number(value).toFixed(digits) : '-';
@@ -216,7 +217,7 @@ function PlannedActual({ planned, laps, activity, dayActivities }) {
   );
 }
 
-function DetailBody({ data, plannedState, dayActivities, onAskCoach }) {
+function DetailBody({ data, plannedState, debriefState, dayActivities, onAskCoach }) {
   const activity = data;
   const laps = data.laps || [];
   const football = activity.activity_group === 'football';
@@ -232,6 +233,7 @@ function DetailBody({ data, plannedState, dayActivities, onAskCoach }) {
         <Metric label="Load" value={has(activity.activity_training_load) ? number(activity.activity_training_load) : null} />
       </div>
       <div className="space-y-6 px-4 py-5 sm:px-6">
+        {activity.activity_group === 'run' && <DebriefCard state={debriefState} />}
         <PaceChart laps={laps} football={football} />
         <Zones activity={activity} />
         <FormMetrics activity={activity} laps={laps} />
@@ -253,6 +255,7 @@ export default function ActivityDetail({ activity, dayActivities, onClose, onAsk
   const date = activity.start_time_local?.slice(0, 10);
   const detail = useFetch(() => api.activity(activity.activity_id), [activity.activity_id]);
   const planned = useFetch(() => api.planned({ from: date, to: date }), [date]);
+  const debrief = useFetch(() => api.debrief(activity.activity_id), [activity.activity_id]);
 
   useEffect(() => {
     const onKey = (event) => event.key === 'Escape' && onClose();
@@ -271,7 +274,7 @@ export default function ActivityDetail({ activity, dayActivities, onClose, onAsk
           <button onClick={onClose} aria-label="Close activity detail" className="shrink-0 rounded-lg border border-line px-2.5 py-1 text-sm text-ink-secondary transition hover:bg-surface-2">✕</button>
         </header>
         <div className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
-          <div className="p-4 sm:p-6"><StateWrap loading={detail.loading} error={detail.error} empty={!detail.data}>{detail.data && <DetailBody data={detail.data} plannedState={planned} dayActivities={dayActivities} onAskCoach={onAskCoach} />}</StateWrap></div>
+          <div className="p-4 sm:p-6"><StateWrap loading={detail.loading} error={detail.error} empty={!detail.data}>{detail.data && <DetailBody data={detail.data} plannedState={planned} debriefState={debrief} dayActivities={dayActivities} onAskCoach={onAskCoach} />}</StateWrap></div>
         </div>
       </div>
     </div>

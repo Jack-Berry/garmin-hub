@@ -130,6 +130,7 @@ export default function WeekStrip({ planned, activities, routines, onSelectDay }
               onClick={() => onSelectDay({
                 date,
                 status,
+                activity_id: act?.activity_id || null,
                 routine: routineState ? { activity: routine.activity, state: routineState } : null,
               })}
               className={`flex min-w-0 flex-col border-t-2 px-0.5 py-2 text-left transition hover:bg-surface-2 sm:px-1.5 ${
