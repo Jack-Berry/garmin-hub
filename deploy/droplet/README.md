@@ -24,10 +24,14 @@ by `edge-caddy` on `connect-remote_default`.
 
    Create an Apple Push Notification service key for team `ZZ2RVM493V`, copy
    it to `deploy/droplet/secrets/AuthKey.p8`, and set `APNS_KEY_ID`,
-   `APNS_TEAM_ID`, `APNS_TOPIC`, and `APNS_HOST` in `.env`. Keep the key at
-   mode 600. The Compose app mounts it read-only at `/run/secrets/AuthKey.p8`.
+   `APNS_TEAM_ID`, `APNS_TOPIC`, and `APNS_HOST` in `.env`. Make it readable by
+   the unprivileged container user with
+   `chown 65532:65532 deploy/droplet/secrets/AuthKey.p8` followed by
+   `chmod 400 deploy/droplet/secrets/AuthKey.p8`. Compose mounts the secrets
+   directory read-only and the app reads `/run/secrets/AuthKey.p8`.
    If the key or configuration is absent, notification events remain in the
-   outbox and `/api/status` reports notifications disabled.
+   outbox, the server logs the configuration reason once without key contents,
+   and `/api/status` reports notifications disabled.
 
 3. Start the project from the repository root. The first Postgres start creates
    `garminhub_ro`, `garminhub_rw`, and the canonical schema.

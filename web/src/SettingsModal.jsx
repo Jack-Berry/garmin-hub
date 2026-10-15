@@ -102,6 +102,8 @@ function NotificationSettings() {
       <StateWrap loading={state.loading} error={state.error}>
         {!state.data?.notifications?.enabled && !state.data?.enabled ? (
           <p className="mt-2 text-sm text-ink-muted">Notifications are disabled on the server.</p>
+        ) : permission === 'registration_failed' ? (
+          <p className="mt-2 text-sm text-ink-muted">This iPhone could not register for notifications. Check the connection and reopen the app.</p>
         ) : permission !== 'granted' ? (
           <p className="mt-2 text-sm text-ink-muted">Notifications are not permitted on this iPhone. Enable them in iOS Settings.</p>
         ) : !token || state.data?.registered === false ? (

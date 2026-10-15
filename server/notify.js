@@ -36,10 +36,28 @@ const previousDate = (day) => {
   return value.toISOString().slice(0, 10);
 };
 
-function defaultTransport({ host, token, topic, deviceToken, payload }) {
-  return new Promise((resolve, reject) => {
-    const client = http2.connect(`https://${host}`);
-    client.once('error', reject);
+function createHttp2Transport({ connect = http2.connect, timeoutMs = 10000 } = {}) {
+  let session;
+  let sessionHost;
+  const close = (error) => {
+    const current = session;
+    session = null;
+    sessionHost = null;
+    if (current && !current.destroyed) current.destroy(error);
+  };
+  const getSession = (host) => {
+    if (session && sessionHost === host && !session.closed && !session.destroyed) return session;
+    close();
+    session = connect(`https://${host}`);
+    sessionHost = host;
+    const client = session;
+    client.on('error', () => { if (session === client) { session = null; sessionHost = null; } });
+    client.on('close', () => { if (session === client) { session = null; sessionHost = null; } });
+    client.setTimeout(timeoutMs, () => { if (session === client) close(new Error('APNs session timeout')); });
+    return client;
+  };
+  return ({ host, token, topic, deviceToken, payload }) => new Promise((resolve, reject) => {
+    const client = getSession(host);
     const request = client.request({
       ':method': 'POST', ':path': `/3/device/${deviceToken}`,
       authorization: `bearer ${token}`, 'apns-topic': topic,
@@ -47,37 +65,56 @@ function defaultTransport({ host, token, topic, deviceToken, payload }) {
     });
     let response = '';
     let status = 0;
+    let settled = false;
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      fn(value);
+    };
+    request.setTimeout(timeoutMs, () => {
+      const error = new Error('APNs request timeout');
+      close(error);
+      finish(reject, error);
+    });
     request.setEncoding('utf8');
     request.on('response', (headers) => { status = Number(headers[':status']); });
     request.on('data', (chunk) => { response += chunk; });
     request.on('end', () => {
-      client.close();
       let parsed = {};
       try { parsed = response ? JSON.parse(response) : {}; } catch (_) { /* APNs may return no JSON */ }
-      resolve({ status, reason: parsed.reason });
+      finish(resolve, { status, reason: parsed.reason });
     });
-    request.on('error', (error) => { client.close(); reject(error); });
+    request.on('error', (error) => finish(reject, error));
     request.end(JSON.stringify(payload));
   });
 }
 
-function loadConfig(env = process.env) {
+const defaultTransport = createHttp2Transport();
+
+function loadConfig(env = process.env, logger = console) {
   const required = ['APNS_KEY_PATH', 'APNS_KEY_ID', 'APNS_TEAM_ID', 'APNS_TOPIC'];
   const missing = required.filter((name) => !env[name]);
-  if (missing.length) return { enabled: false, missing };
+  if (missing.length) {
+    logger.warn(`APNs notifications disabled: missing ${missing.join(', ')}`);
+    return { enabled: false, missing };
+  }
   try {
     return {
       enabled: true, key: fs.readFileSync(env.APNS_KEY_PATH, 'utf8'),
       keyId: env.APNS_KEY_ID, teamId: env.APNS_TEAM_ID, topic: env.APNS_TOPIC,
       host: env.APNS_HOST || 'api.push.apple.com',
     };
-  } catch (_) { return { enabled: false, missing: ['APNS_KEY_PATH'] }; }
+  } catch (error) {
+    logger.warn(`APNs notifications disabled: APNS_KEY_PATH is unreadable (${error.code || 'read error'})`);
+    return { enabled: false, missing: ['APNS_KEY_PATH'] };
+  }
 }
 
 function createNotifyService({ db, writeDb, config = loadConfig(), transport = defaultTransport,
-  now = Date.now } = {}) {
+  transportTimeoutMs = 11000, now = Date.now } = {}) {
   let jwt;
   let flushing;
+  let enqueueVersion = 0;
   const authToken = () => {
     if (!jwt || now() / 1000 - jwt.issued > 50 * 60) jwt = createJwt({ ...config, now });
     return jwt.token;
@@ -109,8 +146,28 @@ function createNotifyService({ db, writeDb, config = loadConfig(), transport = d
       `INSERT INTO notification_outbox (type, dedupe_key, title, body, payload)
        VALUES ($1, $2, $3, $4, $5::jsonb) ON CONFLICT (dedupe_key) DO NOTHING RETURNING id`,
       [type, dedupeKey, title, body, JSON.stringify(payload)]);
-    await flush();
+    if (result.rowCount) enqueueVersion++;
+    void flush().catch(() => {});
     return { queued: Boolean(result.rowCount) };
+  };
+  const callTransport = (request) => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('APNs transport timeout')), transportTimeoutMs);
+    Promise.resolve().then(() => transport(request)).then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error) => { clearTimeout(timer); reject(error); },
+    );
+  });
+  const send = async (deviceToken, payload) => {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = await callTransport({ ...config, token: authToken(), deviceToken, payload });
+      if (result.status === 403 && ['ExpiredProviderToken', 'InvalidProviderToken'].includes(result.reason)
+          && attempt === 0) {
+        jwt = null;
+        continue;
+      }
+      return result;
+    }
+    return { status: 403, reason: 'InvalidProviderToken' };
   };
   const runFlush = async () => {
     if (!config.enabled || londonHour(now()) >= 22 || londonHour(now()) < 7) return { sent: 0 };
@@ -126,30 +183,38 @@ function createNotifyService({ db, writeDb, config = loadConfig(), transport = d
         `SELECT token FROM notification_devices
          WHERE COALESCE((preferences ->> $1)::boolean, true)`, [event.type]);
       let error = null;
+      let retry = false;
       for (const { token } of devices) {
         try {
-          const result = await transport({ ...config, token: authToken(), deviceToken: token,
-            payload: { aps: { alert: { title: event.title, body: event.body }, sound: 'default' }, ...event.payload } });
+          const result = await send(token,
+            { aps: { alert: { title: event.title, body: event.body }, sound: 'default' }, ...event.payload });
           if (result.status === 410 || ['Unregistered', 'BadDeviceToken'].includes(result.reason)) {
             await writeDb.run('DELETE FROM notification_devices WHERE token = $1', [token]);
           } else if (result.status < 200 || result.status >= 300) error = result.reason || `APNs ${result.status}`;
-        } catch (cause) { error = cause.message; }
+        } catch (cause) { error = cause.message; retry = true; }
       }
-      await writeDb.run('UPDATE notification_outbox SET sent_at = now(), error = $2 WHERE id = $1', [event.id, error]);
-      sent++;
+      if (retry) {
+        await writeDb.run('UPDATE notification_outbox SET error = $2 WHERE id = $1', [event.id, error]);
+      } else {
+        await writeDb.run('UPDATE notification_outbox SET sent_at = now(), error = $2 WHERE id = $1', [event.id, error]);
+        sent++;
+      }
     }
     return { sent };
   };
   const flush = () => {
-    if (!flushing) flushing = runFlush().finally(() => { flushing = null; });
+    if (!flushing) flushing = (async () => {
+      let version;
+      do { version = enqueueVersion; await runFlush(); } while (version !== enqueueVersion);
+    })().finally(() => { flushing = null; });
     return flushing;
   };
   const test = async (token) => {
     const row = await db.get('SELECT token FROM notification_devices WHERE token = $1', [token]);
     if (!row) throw new Error('device is not registered');
     if (!config.enabled) return status();
-    const result = await transport({ ...config, token: authToken(), deviceToken: token,
-      payload: { aps: { alert: { title: 'Garmin Hub', body: 'Notifications are working.' }, sound: 'default' }, type: 'test' } });
+    const result = await send(token,
+      { aps: { alert: { title: 'Garmin Hub', body: 'Notifications are working.' }, sound: 'default' }, type: 'test' });
     if (result.status === 410 || ['Unregistered', 'BadDeviceToken'].includes(result.reason)) {
       await writeDb.run('DELETE FROM notification_devices WHERE token = $1', [token]);
       throw new Error('device token is no longer registered');
@@ -159,22 +224,23 @@ function createNotifyService({ db, writeDb, config = loadConfig(), transport = d
   };
   const risks = async (warnings, day = londonDate(now())) => {
     const prior = await db.all(
-      `SELECT payload ->> 'warning' AS warning FROM notification_outbox
+      `SELECT payload -> 'warning' ->> 'code' AS code FROM notification_outbox
        WHERE type = 'risk' AND dedupe_key LIKE $1`, [`risk:${previousDate(day)}:%`]);
-    const priorWarnings = new Set(prior.map((row) => row.warning));
+    const priorCodes = new Set(prior.map((row) => row.code));
     const created = [];
     for (const warning of warnings || []) {
-      const key = crypto.createHash('sha256').update(String(warning)).digest('hex').slice(0, 20);
-      if (priorWarnings.has(String(warning))) {
+      if (!warning?.code || !warning?.title || !warning?.detail) continue;
+      const body = `${warning.title}: ${warning.detail}`;
+      if (priorCodes.has(warning.code)) {
         await writeDb.run(
           `INSERT INTO notification_outbox
              (type, dedupe_key, title, body, payload, sent_at, error)
            VALUES ('risk', $1, 'Training risk', $2, $3::jsonb, now(), 'present previous day')
            ON CONFLICT (dedupe_key) DO NOTHING`,
-          [`risk:${day}:${key}`, String(warning), JSON.stringify({ type: 'risk', warning })]);
+          [`risk:${day}:${warning.code}`, body, JSON.stringify({ type: 'risk', warning })]);
       } else {
-        created.push(await enqueue({ type: 'risk', dedupeKey: `risk:${day}:${key}`,
-          title: 'New training risk', body: String(warning), payload: { type: 'risk', warning } }));
+        created.push(await enqueue({ type: 'risk', dedupeKey: `risk:${day}:${warning.code}`,
+          title: 'New training risk', body, payload: { type: 'risk', warning } }));
       }
     }
     return { created: created.filter((item) => item.queued).length };
@@ -195,7 +261,7 @@ function createNotifyRouter(service) {
   router.post('/flush', handle(() => service.flush()));
   router.post('/job-failure', handle((req) => {
     const job = String(req.body?.job || 'unknown');
-    const day = String(req.body?.day || new Date().toISOString().slice(0, 10));
+    const day = String(req.body?.day || londonDate(Date.now()));
     return service.enqueue({ type: 'job_failure', dedupeKey: `job:${job}:${day}`,
       title: `${job} job failed`, body: String(req.body?.message || 'Check Garmin Hub status.'),
       payload: { type: 'job_failure', job } });
@@ -204,4 +270,4 @@ function createNotifyRouter(service) {
 }
 
 module.exports = { TYPES, DEFAULT_PREFS, createJwt, londonHour, londonDate, loadConfig,
-  createNotifyService, createNotifyRouter, defaultTransport };
+  createHttp2Transport, createNotifyService, createNotifyRouter, defaultTransport };

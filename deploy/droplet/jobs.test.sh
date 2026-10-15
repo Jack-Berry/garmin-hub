@@ -27,6 +27,7 @@ STUB
 cat > "$tmp/bin/curl" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$*" >> "$CURL_LOG"
+cat >> "$CURL_STDIN_LOG"
 echo '{"ok":true}'
 STUB
 cat > "$tmp/bin/date" <<'STUB'
@@ -54,11 +55,12 @@ STUB
 chmod +x "$tmp/bin/docker" "$tmp/bin/curl" "$tmp/bin/date" "$tmp/bin/sha256sum" "$tmp/bin/mv"
 : > "$tmp/docker.log"
 : > "$tmp/curl.log"
+: > "$tmp/curl-stdin.log"
 : > "$tmp/mv.log"
 
 run_job() {
   PATH="$tmp/bin:$PATH" DOCKER_LOG="$tmp/docker.log" GARMIN_HUB_ROOT="$repo" \
-    MV_LOG="$tmp/mv.log" CURL_LOG="$tmp/curl.log" REAL_SHA256SUM="$real_sha256sum" \
+    MV_LOG="$tmp/mv.log" CURL_LOG="$tmp/curl.log" CURL_STDIN_LOG="$tmp/curl-stdin.log" REAL_SHA256SUM="$real_sha256sum" \
     GARMIN_HUB_STATUS_DIR="$tmp/status" GARMIN_HUB_BACKUP_DIR="$tmp/backups" \
     "$repo/deploy/droplet/jobs.sh" "$@"
 }
@@ -79,6 +81,13 @@ set -e
 [ "$code" -eq 9 ]
 node -e 'const s=require(process.argv[1]); if(s.job!=="backup"||s.ok||!/stubbed job failure/.test(s.message))process.exit(1)' "$tmp/status/backup.json"
 grep -q '/api/notifications/job-failure' "$tmp/docker.log"
+
+: > "$tmp/curl.log"
+GARMIN_HUB_API_URL=https://hub.example API_SECRET=secret-not-on-argv \
+  run_job mark offsite fail "direct failure" >/dev/null
+grep -q '/api/notifications/job-failure' "$tmp/curl.log"
+! grep -q 'secret-not-on-argv' "$tmp/curl.log"
+grep -q 'X-Api-Key: secret-not-on-argv' "$tmp/curl-stdin.log"
 
 FAKE_STAMP=20261014T031500Z run_job backup >/dev/null
 dump="$tmp/backups/garminhub-20261014T031500Z.dump"

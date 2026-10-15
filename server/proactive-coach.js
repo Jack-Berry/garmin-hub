@@ -127,7 +127,7 @@ function createProactiveService({ db, writeDb, client, today = localDate,
       if (notifier) {
         await Promise.resolve().then(() => buildSignals(db))
           .then((warnings) => notifier.risks(warnings)).catch(() => {});
-        await notifier.flush().catch(() => {});
+        void notifier.flush().catch(() => {});
       }
       if (candidates.length && errors.length === candidates.length) {
         const error = new Error('Every pending debrief attempt failed.');

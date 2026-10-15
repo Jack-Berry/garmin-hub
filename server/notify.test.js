@@ -1,7 +1,9 @@
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
+const { EventEmitter } = require('node:events');
 const test = require('node:test');
-const { createJwt, londonHour, createNotifyService } = require('./notify');
+const { createJwt, londonHour, londonDate, loadConfig, createHttp2Transport, createNotifyService } = require('./notify');
+const { deriveRiskWarnings } = require('./risk-warnings');
 
 const keys = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
 const config = { enabled: true, key: keys.privateKey, keyId: 'KEY123', teamId: 'TEAM123',
@@ -44,6 +46,10 @@ function memoryDb() {
       const row = outbox.find((item) => item.id === params[0]);
       row.sent_at = 'now'; row.error = params[1]; return { rowCount: 1 };
     }
+    if (sql.includes('UPDATE notification_outbox SET error')) {
+      const row = outbox.find((item) => item.id === params[0]);
+      row.error = params[1]; return { rowCount: 1 };
+    }
     throw new Error(`Unhandled write: ${sql}`);
   } };
   const db = {
@@ -52,9 +58,9 @@ function memoryDb() {
       throw new Error(`Unhandled get: ${sql}`);
     },
     all: async (sql, params = []) => {
-      if (sql.includes("payload ->> 'warning'")) {
+      if (sql.includes("payload -> 'warning'")) {
         const prefix = params[0].replace('%', '');
-        return outbox.filter((row) => row.dedupe_key.startsWith(prefix)).map((row) => ({ warning: row.payload.warning }));
+        return outbox.filter((row) => row.dedupe_key.startsWith(prefix)).map((row) => ({ code: row.payload.warning.code }));
       }
       if (sql.includes('FROM notification_outbox')) return outbox.filter((row) => !row.sent_at);
       if (sql.includes('FROM notification_devices')) return [...devices.values()].filter((row) => row.preferences[params[0]] !== false);
@@ -72,6 +78,10 @@ test('ES256 JWT has the APNs shape and verifies', () => {
   assert.deepEqual(JSON.parse(Buffer.from(claims, 'base64url')), { iss: 'TEAM', iat: 1792065600 });
   assert.equal(crypto.verify('sha256', Buffer.from(`${header}.${claims}`),
     { key: keys.publicKey, dsaEncoding: 'ieee-p1363' }, Buffer.from(signature, 'base64url')), true);
+});
+
+test('notification dates use Europe London rather than UTC', () => {
+  assert.equal(londonDate(Date.parse('2026-07-31T23:30:00Z')), '2026-08-01');
 });
 
 test('JWT is cached then refreshed before one hour and APNs payload is shaped', async () => {
@@ -94,11 +104,13 @@ test('dedupe, preferences, quiet-hour hold, and later flush', async () => {
   const token = 'b'.repeat(64); await service.register(token);
   await service.enqueue({ type: 'debrief', dedupeKey: 'debrief:1', title: 'Ready', body: 'Run', payload: { type: 'debrief' } });
   await service.enqueue({ type: 'debrief', dedupeKey: 'debrief:1', title: 'Ready', body: 'Run' });
+  await service.flush();
   assert.equal(store.outbox.length, 1); assert.equal(calls.length, 0);
   clock = Date.parse('2026-10-16T06:05:00Z'); await service.flush();
   assert.equal(calls.length, 1);
   await service.preferences(token, { debrief: false });
   await service.enqueue({ type: 'debrief', dedupeKey: 'debrief:2', title: 'Ready', body: 'Run' });
+  await service.flush();
   assert.equal(calls.length, 1);
 });
 
@@ -111,12 +123,21 @@ test('missing config logs events without sending or throwing', async () => {
   assert.equal(store.outbox.length, 1); assert.equal(store.outbox[0].sent_at, null);
 });
 
+test('missing APNs configuration logs one reason without secret material', () => {
+  const messages = [];
+  assert.equal(loadConfig({}, { warn: (message) => messages.push(message) }).enabled, false);
+  assert.equal(messages.length, 1);
+  assert.match(messages[0], /missing APNS_KEY_PATH/);
+  assert.doesNotMatch(messages[0], /BEGIN PRIVATE KEY/);
+});
+
 test('held notifications older than 24 hours are dropped on a daytime flush', async () => {
   const store = memoryDb(); let clock = Date.parse('2026-10-15T22:30:00Z'); let calls = 0;
   const service = createNotifyService({ ...store, config, now: () => clock,
     transport: async () => { calls++; return { status: 200 }; } });
   await service.register('d'.repeat(64));
   await service.enqueue({ type: 'weekly', dedupeKey: 'old', title: 'Old', body: 'Old' });
+  await service.flush();
   store.outbox[0].old = true;
   clock = Date.parse('2026-10-17T08:00:00Z');
   await service.flush();
@@ -134,13 +155,113 @@ test('APNs invalid-token responses remove the device without exposing it', async
   assert.equal(store.devices.has(token), false);
 });
 
-test('risk trigger alerts only warnings absent from the previous day', async () => {
+test('risk trigger uses real warning objects and alerts only codes absent the previous day', async () => {
   const store = memoryDb();
   const service = createNotifyService({ ...store, config: { enabled: false },
     now: () => Date.parse('2026-10-15T12:00:00Z') });
-  await service.risks(['High load'], '2026-10-14');
-  const result = await service.risks(['High load', 'Low HRV'], '2026-10-15');
+  const first = deriveRiskWarnings({ today: '2026-10-14', recovery: { latest: { acwr: { ratio: 1.5 } } } });
+  const second = deriveRiskWarnings({ today: '2026-10-15', recovery: {
+    latest: { acwr: { ratio: 1.6 }, hrv_baseline: [50] },
+    last_7_days: [{ date: '2026-10-15', hrv: 40 }, { date: '2026-10-14', hrv: 42 }, { date: '2026-10-13', hrv: 44 }],
+  } });
+  await service.risks(first, '2026-10-14');
+  const result = await service.risks(second, '2026-10-15');
   assert.equal(result.created, 1);
-  assert.equal(store.outbox.filter((row) => row.body === 'High load').length, 2);
-  assert.equal(store.outbox.find((row) => row.dedupe_key.startsWith('risk:2026-10-15') && row.body === 'High load').error, 'present previous day');
+  assert.equal(store.outbox.filter((row) => row.dedupe_key.endsWith(':acwr')).length, 2);
+  assert.match(store.outbox.find((row) => row.dedupe_key.endsWith(':hrv_streak')).body, /^HRV trend: HRV has/);
+  assert.equal(store.outbox.find((row) => row.dedupe_key === 'risk:2026-10-15:acwr').error, 'present previous day');
+});
+
+test('provider-token rejection refreshes the JWT and retries once', async () => {
+  const store = memoryDb(); const tokens = []; let calls = 0;
+  let clock = Date.parse('2026-10-15T12:00:00Z');
+  const service = createNotifyService({ ...store, config,
+    now: () => clock, transport: async (request) => {
+      tokens.push(request.token); calls++;
+      clock += 1000;
+      return calls === 1 ? { status: 403, reason: 'ExpiredProviderToken' } : { status: 200 };
+    } });
+  const token = 'e'.repeat(64); await service.register(token); await service.test(token);
+  assert.equal(calls, 2);
+  assert.notEqual(tokens[0], tokens[1]);
+});
+
+test('flush makes a second pass when an event is enqueued during delivery', async () => {
+  const store = memoryDb(); const calls = [];
+  let release;
+  const firstStarted = new Promise((resolve) => { release = { resolve }; });
+  let unblock;
+  const blocked = new Promise((resolve) => { unblock = resolve; });
+  const service = createNotifyService({ ...store, config,
+    now: () => Date.parse('2026-10-15T12:00:00Z'), transport: async (request) => {
+      calls.push(request.payload.type);
+      if (calls.length === 1) { release.resolve(); await blocked; }
+      return { status: 200 };
+    } });
+  await service.register('1'.repeat(64));
+  await service.enqueue({ type: 'weekly', dedupeKey: 'first', title: 'First', body: 'First', payload: { type: 'first' } });
+  await firstStarted;
+  await service.enqueue({ type: 'weekly', dedupeKey: 'second', title: 'Second', body: 'Second', payload: { type: 'second' } });
+  unblock();
+  await service.flush();
+  assert.deepEqual(calls, ['first', 'second']);
+});
+
+test('a hung transport is bounded and leaves the event retryable without wedging flush', async () => {
+  const store = memoryDb(); let hang = true;
+  const service = createNotifyService({ ...store, config, transportTimeoutMs: 15,
+    now: () => Date.parse('2026-10-15T12:00:00Z'),
+    transport: () => hang ? new Promise(() => {}) : Promise.resolve({ status: 200 }) });
+  await service.register('f'.repeat(64));
+  await service.enqueue({ type: 'weekly', dedupeKey: 'weekly:hung', title: 'Review', body: 'Ready' });
+  await service.flush();
+  assert.equal(store.outbox[0].sent_at, null);
+  assert.match(store.outbox[0].error, /timeout/);
+  hang = false;
+  await service.flush();
+  assert.equal(store.outbox[0].sent_at, 'now');
+});
+
+test('HTTP2 transport reuses its session and applies session and request timeouts', async () => {
+  let connects = 0; const requests = [];
+  class Session extends EventEmitter {
+    constructor() { super(); this.closed = false; this.destroyed = false; }
+    setTimeout(value, callback) { this.timeout = value; this.timeoutCallback = callback; }
+    request() {
+      const request = new EventEmitter(); requests.push(request);
+      request.setTimeout = (value, callback) => { request.timeout = value; request.timeoutCallback = callback; };
+      request.setEncoding = () => {};
+      request.end = () => queueMicrotask(() => { request.emit('response', { ':status': 200 }); request.emit('end'); });
+      return request;
+    }
+    destroy() { this.destroyed = true; this.emit('close'); }
+  }
+  const session = new Session();
+  const transport = createHttp2Transport({ connect: () => { connects++; return session; }, timeoutMs: 25 });
+  const request = { host: 'example.test', token: 'jwt', topic: 'topic', deviceToken: 'device', payload: {} };
+  await transport(request); await transport(request);
+  assert.equal(connects, 1);
+  assert.equal(session.timeout, 25);
+  assert.deepEqual(requests.map((item) => item.timeout), [25, 25]);
+});
+
+test('HTTP2 request timeout rejects and destroys the reusable session', async () => {
+  class Session extends EventEmitter {
+    constructor() { super(); this.closed = false; this.destroyed = false; }
+    setTimeout() {}
+    request() {
+      const request = new EventEmitter();
+      request.setTimeout = (_value, callback) => { this.requestTimeout = callback; };
+      request.setEncoding = () => {};
+      request.end = () => {};
+      return request;
+    }
+    destroy(error) { this.destroyed = true; this.emit('error', error); this.emit('close'); }
+  }
+  const session = new Session();
+  const transport = createHttp2Transport({ connect: () => session, timeoutMs: 25 });
+  const pending = transport({ host: 'example.test', token: 'jwt', topic: 'topic', deviceToken: 'device', payload: {} });
+  session.requestTimeout();
+  await assert.rejects(pending, /request timeout/);
+  assert.equal(session.destroyed, true);
 });

@@ -13,7 +13,7 @@ struct SettingsView: View {
                 SecureField("API key", text: $key)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
-                Text("Use the API_SECRET configured on hub.berrydev.co.uk.")
+                Text("Use the API_SECRET configured on \(HubConfiguration.host).")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }

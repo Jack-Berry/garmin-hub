@@ -60,7 +60,7 @@ struct DashboardScreen: View {
 
     private func connect() async {
         state = .checking
-        var request = URLRequest(url: URL(string: "https://hub.berrydev.co.uk/api/health")!)
+        var request = URLRequest(url: HubConfiguration.url("api/health"))
         request.setValue(settings.apiKey, forHTTPHeaderField: "X-Api-Key")
         do {
             let (_, response) = try await URLSession.shared.data(for: request)

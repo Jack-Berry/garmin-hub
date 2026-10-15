@@ -20,7 +20,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     }
 
     func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
-        PushNotifications.shared.permission = "unavailable"
+        PushNotifications.shared.registrationFailed()
     }
 
     func userNotificationCenter(
@@ -73,12 +73,21 @@ final class PushNotifications: ObservableObject {
         UserDefaults.standard.set(token, forKey: "pushDeviceToken")
         onState?(token, permission)
         guard !apiKey.isEmpty else { return }
-        var request = URLRequest(url: URL(string: "https://hub.berrydev.co.uk/api/notifications/device")!)
+        var request = URLRequest(url: HubConfiguration.url("api/notifications/device"))
         request.httpMethod = "POST"
         request.setValue(apiKey, forHTTPHeaderField: "X-Api-Key")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try? JSONSerialization.data(withJSONObject: ["token": token, "platform": "ios"])
-        URLSession.shared.dataTask(with: request).resume()
+        URLSession.shared.dataTask(with: request) { [weak self] _, response, error in
+            let ok = error == nil && (response as? HTTPURLResponse).map { (200..<300).contains($0.statusCode) } == true
+            guard !ok else { return }
+            Task { @MainActor in self?.registrationFailed() }
+        }.resume()
+    }
+
+    func registrationFailed() {
+        permission = "registration_failed"
+        onState?(deviceToken ?? "", permission)
     }
 
     func open(_ payload: [AnyHashable: Any]) {

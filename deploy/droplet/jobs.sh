@@ -31,11 +31,12 @@ notify_failure() {
   body=$(printf '{"job":"%s","day":"%s","message":"%s"}' \
     "$(json_string "$job")" "$day" "$(json_string "$message")")
   if [ -n "${GARMIN_HUB_API_URL:-}" ] && [ -n "${API_SECRET:-}" ]; then
-    curl -sS --max-time 20 -X POST "${GARMIN_HUB_API_URL%/}/api/notifications/job-failure" \
-      -H 'Content-Type: application/json' -H "X-Api-Key: $API_SECRET" -d "$body" >/dev/null || true
+    printf 'X-Api-Key: %s\n' "$API_SECRET" | \
+      curl -sS --max-time 20 -X POST "${GARMIN_HUB_API_URL%/}/api/notifications/job-failure" \
+        -H 'Content-Type: application/json' -H @- -d "$body" >/dev/null || true
   else
     $compose exec -T app sh -c \
-      'curl -sS --max-time 20 -X POST http://127.0.0.1:3001/api/notifications/job-failure -H "Content-Type: application/json" -H "X-Api-Key: $API_SECRET" -d "$1"' sh "$body" \
+      'printf "X-Api-Key: %s\n" "$API_SECRET" | curl -sS --max-time 20 -X POST http://127.0.0.1:3001/api/notifications/job-failure -H "Content-Type: application/json" -H @- -d "$1"' sh "$body" \
       >/dev/null || true
   fi
 }

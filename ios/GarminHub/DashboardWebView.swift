@@ -24,7 +24,7 @@ struct DashboardWebView: UIViewRepresentable {
         let tokenLiteral = String(data: try! JSONSerialization.data(withJSONObject: token, options: .fragmentsAllowed), encoding: .utf8)!
         let permissionLiteral = String(data: try! JSONSerialization.data(withJSONObject: PushNotifications.shared.permission, options: .fragmentsAllowed), encoding: .utf8)!
         config.userContentController.addUserScript(WKUserScript(
-            source: "window.__GARMIN_HUB_APP__ = true; window.__HUB_API_KEY__ = \(literal); window.__HUB_DEVICE_TOKEN__ = \(tokenLiteral); window.__HUB_NOTIFICATION_PERMISSION__ = \(permissionLiteral); window.__HUB_PENDING_OPEN__ = null;",
+            source: "window.__GARMIN_HUB_APP__ = true; window.__HUB_API_KEY__ = \(literal); window.__HUB_DEVICE_TOKEN__ = \(tokenLiteral); window.__HUB_NOTIFICATION_PERMISSION__ = \(permissionLiteral); window.__HUB_PENDING_OPEN__ = window.__HUB_PENDING_OPEN__ || null;",
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
@@ -60,6 +60,9 @@ struct DashboardWebView: UIViewRepresentable {
         let onFailure: (String) -> Void
         let onOpenSettings: () -> Void
         let onThemeChange: (Bool) -> Void
+        var loaded = false
+        var pendingOpen: [String: Any]?
+        var pendingNotificationState: (String, String)?
 
         init(
             onFailure: @escaping (String) -> Void,
@@ -98,16 +101,33 @@ struct DashboardWebView: UIViewRepresentable {
             onFailure("The dashboard could not be reached. Check your connection and try again.")
         }
 
+        func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+            loaded = false
+        }
+
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            loaded = true
             if let payload = PushNotifications.shared.pendingPayload {
                 PushNotifications.shared.pendingPayload = nil
-                open(payload.reduce(into: [String: Any]()) { result, item in
-                    if let key = item.key as? String { result[key] = item.value }
-                })
+                if pendingOpen == nil {
+                    pendingOpen = payload.reduce(into: [String: Any]()) { result, item in
+                        if let key = item.key as? String { result[key] = item.value }
+                    }
+                }
+            }
+            if let payload = pendingOpen { pendingOpen = nil; deliver(payload) }
+            if let state = pendingNotificationState {
+                pendingNotificationState = nil
+                updateNotificationState(token: state.0, permission: state.1)
             }
         }
 
         func open(_ payload: [String: Any]) {
+            guard loaded else { pendingOpen = payload; return }
+            deliver(payload)
+        }
+
+        private func deliver(_ payload: [String: Any]) {
             guard JSONSerialization.isValidJSONObject(payload),
                   let data = try? JSONSerialization.data(withJSONObject: payload),
                   let json = String(data: data, encoding: .utf8) else { return }
@@ -115,6 +135,7 @@ struct DashboardWebView: UIViewRepresentable {
         }
 
         func updateNotificationState(token: String, permission: String) {
+            guard loaded else { pendingNotificationState = (token, permission); return }
             guard let data = try? JSONSerialization.data(withJSONObject: [token, permission]),
                   let values = try? JSONSerialization.jsonObject(with: data) as? [String],
                   let tokenData = try? JSONSerialization.data(withJSONObject: values[0], options: .fragmentsAllowed),
@@ -147,7 +168,7 @@ final class HubSchemeHandler: NSObject, WKURLSchemeHandler {
             schemeTask.didFailWithError(URLError(.badURL)); return
         }
         parts.scheme = "https"
-        parts.host = "hub.berrydev.co.uk"
+        parts.host = HubConfiguration.host
         guard let remote = parts.url else { schemeTask.didFailWithError(URLError(.badURL)); return }
         var request = URLRequest(url: remote)
         request.httpMethod = schemeTask.request.httpMethod

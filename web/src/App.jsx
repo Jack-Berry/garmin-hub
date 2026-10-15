@@ -244,8 +244,10 @@ export default function App() {
     window.__HUB_OPEN__ = async (payload = {}) => {
       setSettingsOpen(false);
       if (payload.type === 'debrief' && payload.activity_id) {
+        const activityId = String(payload.activity_id);
+        if (!/^\d+$/.test(activityId)) { setTab('activities'); return; }
         try {
-          const activity = await api.activity(payload.activity_id);
+          const activity = await api.activity(encodeURIComponent(activityId));
           setTab('activities');
           setDetailActivity({ activity, dayActivities: [activity] });
         } catch (_) { setTab('activities'); }

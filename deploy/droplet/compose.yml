@@ -68,7 +68,7 @@ services:
       - garth-cache:/var/lib/garmin-hub/garth
       - ./job-status:/run/garmin-hub-status:ro
       - ./backups:/var/lib/garmin-hub/backups:ro
-      - ./secrets/AuthKey.p8:/run/secrets/AuthKey.p8:ro
+      - ./secrets:/run/secrets:ro
     networks: [private, caddy]
     healthcheck:
       test: [CMD, node, -e, "fetch('http://127.0.0.1:3001/api/health',{headers:{'X-Api-Key':process.env.API_SECRET}}).then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
