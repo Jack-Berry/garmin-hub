@@ -162,7 +162,7 @@ export default function WeekStrip({ planned, activities, routines, onSelectDay }
 
                 {plan && (planStatus === 'done' || planStatus === 'partial' || (isPast && planStatus === 'pending')) && (
                   <span className={`font-mono text-[0.46rem] font-bold uppercase tracking-[0.08em] ${
-                    planStatus === 'partial' ? 'text-amber' : 'text-ink-muted'
+                    planStatus === 'partial' ? 'text-sem-amber' : 'text-ink-muted'
                   }`}>
                     {planStatus === 'done' ? 'Done' : planStatus === 'partial' ? 'Partial' : 'Missed'}
                   </span>
