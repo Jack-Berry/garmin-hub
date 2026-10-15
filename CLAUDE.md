@@ -1,6 +1,7 @@
 # Garmin Hub — Project Context
 
 - This Week planned-run markers and compliance use the shared `activityMatch.js` helpers; keep their 70% partial-distance threshold named and tested.
+- The month calendar lives in `web/src/calendar/Calendar.jsx`; keep day matching delegated to `activityMatch.js` and keep its desktop and app-mode placement responsive down to 375 px.
 
 ## What this is
 
