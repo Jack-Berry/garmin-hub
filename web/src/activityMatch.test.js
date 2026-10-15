@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { matchIntervals, planMatchesActivity, plannedDistance, plannedWorkSteps } from './activityMatch.js';
+import {
+  matchIntervals, planDayStatus, planMatchesActivity, plannedDistance, plannedWorkSteps,
+} from './activityMatch.js';
 
 const step = (distance, bounds = null, kind = 'interval') => ({
   type: 'ExecutableStepDTO',
@@ -86,6 +88,15 @@ test('only the closest plausible same-day run matches a planned distance', () =>
   const race = { activity_id: 'race', activity_group: 'run', distance_m: 10069 };
   assert.equal(planMatchesActivity(warmup, workout, [warmup, race]), false);
   assert.equal(planMatchesActivity(race, workout, [warmup, race]), true);
+});
+
+test('planned day status distinguishes done, partial and pending', () => {
+  const workout = { estimated_distance_m: 10000, steps: [] };
+  const done = { activity_id: 'done', activity_group: 'run', distance_m: 10000 };
+  const partial = { activity_id: 'partial', activity_group: 'run', distance_m: 6500 };
+  assert.equal(planDayStatus(workout, [done]), 'done');
+  assert.equal(planDayStatus(workout, [partial]), 'partial');
+  assert.equal(planDayStatus(workout, []), 'pending');
 });
 
 test('2026-07-12 grades 500 m pacer steps per 1 km lap without drifting', () => {

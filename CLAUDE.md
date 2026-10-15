@@ -1,5 +1,7 @@
 # Garmin Hub — Project Context
 
+- This Week planned-run markers and compliance use the shared `activityMatch.js` helpers; keep their 70% partial-distance threshold named and tested.
+
 ## What this is
 
 A personal, single-user web app that ingests my Garmin running data and provides a stats dashboard plus an AI coaching layer. The coach analyses planned-vs-actual training and, in one unified planning mode, can compose individual pace-target sessions or reviewed multi-week adapted plans, then push approved work to Garmin. It can also edit any future workout it can identify on the whole calendar; Runna remains a supported source, not a separate coaching mode.

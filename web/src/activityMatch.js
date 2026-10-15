@@ -296,3 +296,17 @@ export const planMatchesActivity = (activity, workout, dayActivities) => {
   return String(closest?.activity_id) === String(activity.activity_id)
     && Math.abs(activity.distance_m - target) <= tolerance;
 };
+
+// A run below this share of the planned distance is shown as partial rather
+// than leaving a planned cell looking complete.
+export const PARTIAL_DISTANCE_RATIO = 0.7;
+
+export const planDayStatus = (workout, dayActivities) => {
+  const runs = (dayActivities || []).filter((activity) => activity.activity_group === 'run');
+  if (!runs.length) return 'pending';
+  if (runs.some((activity) => planMatchesActivity(activity, workout, runs))) return 'done';
+  const target = Number(workout?.estimated_distance_m) || plannedDistance(workout?.steps);
+  return target > 0 && runs.some((activity) => Number(activity.distance_m) < target * PARTIAL_DISTANCE_RATIO)
+    ? 'partial'
+    : 'pending';
+};

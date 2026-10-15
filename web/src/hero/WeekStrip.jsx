@@ -1,4 +1,5 @@
 import { kmNum, dateOnly, ymd, routineGroup } from '../format';
+import { planDayStatus } from '../activityMatch';
 
 // Mon→Sun dates for the week containing `today` (Monday start).
 function weekDates(today) {
@@ -57,13 +58,17 @@ export default function WeekStrip({ planned, activities, routines, onSelectDay }
     if (!plannedByDate[w.calendar_date]) plannedByDate[w.calendar_date] = w;
   });
   const runByDate = {};
+  const runsByDate = {};
   // Logged activities keyed by `date|group` so a routine can find its match
   // (e.g. football → activity_group 'football') using the same ymd() dates.
   const actByDateGroup = {};
   (activities || []).forEach((a) => {
     const d = dateOnly(a.start_time_local);
     if (!d) return;
-    if (a.activity_group === 'run' && !runByDate[d]) runByDate[d] = a;
+    if (a.activity_group === 'run') {
+      if (!runByDate[d]) runByDate[d] = a;
+      (runsByDate[d] ||= []).push(a);
+    }
     const key = `${d}|${a.activity_group}`;
     if (!actByDateGroup[key]) actByDateGroup[key] = a;
   });
@@ -79,9 +84,12 @@ export default function WeekStrip({ planned, activities, routines, onSelectDay }
   return (
     <div className="flex flex-col">
       <header className="mb-3">
-        <h2 className="font-display text-[0.8125rem] font-bold uppercase tracking-[0.14em] text-ink">
-          This Week
-        </h2>
+        <div className="flex items-baseline justify-between gap-2">
+          <h2 className="font-display text-[0.8125rem] font-bold uppercase tracking-[0.14em] text-ink">
+            This Week
+          </h2>
+          <Compliance planned={plannedByDate} runs={runsByDate} today={todayStr} />
+        </div>
         <p className="mt-1 font-body text-nano uppercase tracking-[0.18em] text-ink-muted">
           Planned vs done · tap a day for detail
         </p>
@@ -91,6 +99,7 @@ export default function WeekStrip({ planned, activities, routines, onSelectDay }
           const date = ymd(d);
           const plan = plannedByDate[date];
           const act = runByDate[date];
+          const planStatus = plan ? planDayStatus(plan, runsByDate[date] || []) : null;
           const isToday = date === todayStr;
           const isPast = date < todayStr;
 
@@ -151,6 +160,18 @@ export default function WeekStrip({ planned, activities, routines, onSelectDay }
                   />
                 ) : null}
 
+                {plan && (planStatus === 'done' || planStatus === 'partial' || (isPast && planStatus === 'pending')) && (
+                  <span className={`font-mono text-[0.46rem] font-bold uppercase tracking-[0.08em] ${
+                    planStatus === 'partial' ? 'text-amber' : 'text-ink-muted'
+                  }`}>
+                    {planStatus === 'done' ? 'Done' : planStatus === 'partial' ? 'Partial' : 'Missed'}
+                  </span>
+                )}
+
+                {act && !plan && (
+                  <span className="font-mono text-[0.46rem] font-bold uppercase tracking-[0.08em] text-ink-muted">Done</span>
+                )}
+
                 {routineState && (
                   <ActivityBlock name={routine.activity} />
                 )}
@@ -164,5 +185,18 @@ export default function WeekStrip({ planned, activities, routines, onSelectDay }
         })}
       </div>
     </div>
+  );
+}
+
+function Compliance({ planned, runs, today }) {
+  const entries = Object.entries(planned).filter(([date, plan]) => (
+    date < today || planDayStatus(plan, runs[date] || []) === 'done'
+  ));
+  if (!entries.length) return null;
+  const done = entries.filter(([date, plan]) => planDayStatus(plan, runs[date] || []) === 'done').length;
+  return (
+    <span className="font-mono text-[0.48rem] uppercase tracking-[0.06em] text-ink-muted sm:text-nano">
+      {done} of {entries.length} done
+    </span>
   );
 }
