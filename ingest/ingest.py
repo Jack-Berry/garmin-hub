@@ -738,8 +738,7 @@ def ingest_activity_weather(g, conn, summary, sleep=time.sleep):
         "SELECT activity_id, start_time_local::date FROM activities "
         "WHERE activity_group='run' AND weather_raw_json IS NULL "
         "AND start_lat IS NOT NULL "
-        "AND activity_type NOT ILIKE '%treadmill%' "
-        "AND activity_type NOT ILIKE '%indoor%' "
+        "AND activity_type !~* '(treadmill|indoor)' "
         "AND (activity_id = ANY(%s::bigint[]) OR start_time_local::date >= %s) "
         "ORDER BY start_time_local DESC",
         (changed_ids or [0], date.today() - timedelta(days=WEATHER_RETRY_DAYS)),

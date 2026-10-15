@@ -41,6 +41,10 @@ class Conn:
         self.rollbacks = 0
 
     def execute(self, sql, params=None):
+        # psycopg treats every % in a parameterised query as a placeholder,
+        # so a literal LIKE '%x%' fails on the real driver but not here.
+        if params is not None:
+            assert "%" not in sql.replace("%s", "").replace("%%", ""), sql
         self.executed.append((sql, params))
         if "SELECT activity_id, start_time_local::date" in sql:
             return Result(rows=self.weather_rows)
@@ -98,7 +102,7 @@ class GearWeatherTests(unittest.TestCase):
         ingest_activity_weather(garmin, conn, summary, sleep=lambda _s: None)
         self.assertEqual(garmin.weather_calls, 1)
         self.assertIn("start_lat IS NOT NULL", conn.executed[0][0])
-        self.assertIn("NOT ILIKE '%treadmill%'", conn.executed[0][0])
+        self.assertIn("!~* '(treadmill|indoor)'", conn.executed[0][0])
         self.assertTrue(any("UPDATE activities SET" in sql for sql, _ in conn.executed))
 
     def test_recent_empty_weather_stays_null_and_failure_is_only_a_warning(self):

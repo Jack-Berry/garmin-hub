@@ -36,8 +36,7 @@ def pending_work(conn):
         "SELECT activity_id, start_time_local::date FROM activities "
         "WHERE activity_group='run' AND weather_raw_json IS NULL "
         "AND start_lat IS NOT NULL "
-        "AND activity_type NOT ILIKE '%treadmill%' "
-        "AND activity_type NOT ILIKE '%indoor%' "
+        "AND activity_type !~* '(treadmill|indoor)' "
         "ORDER BY start_time_local DESC").fetchall())
     return gear, weather
 
