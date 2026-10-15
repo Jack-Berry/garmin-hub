@@ -3,6 +3,8 @@ WORKDIR /src/web
 COPY web/package*.json ./
 RUN npm ci
 COPY web/ ./
+# The activity view grades intervals against the pacer guard's band rules.
+COPY ingest/guard_bounds.json /src/ingest/guard_bounds.json
 RUN HUB_HOSTED_BUILD=1 VITE_API_BASE= env -u VITE_API_SECRET npm run build
 
 FROM node:22-bookworm-slim AS server-deps
