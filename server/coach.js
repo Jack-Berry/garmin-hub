@@ -16,6 +16,10 @@ const {
   activityDetail,
   localDate,
 } = require("./context");
+const {
+  trainingHistorySummary,
+  planComplianceSummary,
+} = require("./coach-evidence");
 
 // Opus for deep reports and planning, Sonnet for frequent interactions.
 const MODEL = "claude-opus-5-5";
@@ -66,6 +70,16 @@ Verify the athlete's claims about their training against the data before agreein
 
 Hold your position when challenged without new information. Change it only when new facts justify the change, then leave the decision with the athlete. Name material risks and trade-offs they did not ask about, including injury or illness signals, load spikes, race proximity, and unrealistic goals. Do not flatter, praise the question, or soften a no into a maybe.`;
 
+const COACHING_PRINCIPLES = `## Coaching principles
+
+- Keep most running easy and separate genuinely hard sessions with easy running or rest. Back-to-back quality is not the default; use it only when the plan intentionally pairs sessions and recovery markers support it.
+- Progress volume conservatively from the athlete's demonstrated load. Avoid sharp jumps, preserve recovery weeks, and reduce volume before adding intensity.
+- Taper by reducing fatigue while retaining small doses of familiar intensity. Race week is not the time for a hard fitness-building session or untested work.
+- After illness or a niggle, resume only when normal daily activity is comfortable, then rebuild with short easy running before quality. Pain that changes gait or worsens during a run means stop and reassess.
+- Read HRV and readiness against the athlete's baseline and multi-day trend. One reading can inform a decision but should not dictate it alone.
+- Fever or symptoms below the neck, including chest symptoms or breathing trouble, mean no hard running and usually no running. Above-the-neck symptoms may allow a short easy run if otherwise well. Chest pain, significant shortness of breath, fainting, blue lips, confusion, or worsening or persistent symptoms need prompt assessment by a doctor.
+- Quote dates and weekdays exactly as they appear in the data. Never infer a weekday.`;
+
 // Static framing for the chat coach — the interactive sibling of the daily
 // insight. Same analyst-not-generator role; conversational rather than essay.
 const CHAT_SYSTEM = `You are this athlete's running coach and analyst, answering their questions in a chat.
@@ -79,6 +93,8 @@ The injected context only covers roughly the next 14 days of planned workouts. W
 Recent runs are summarised to whole-run averages plus a one-line work-rep summary. The splits are all there — call get_activity_detail for the real per-lap table (HR, cadence, power, running dynamics) whenever the question is about how a session actually went: HR drift across reps, fading, form or economy, pacing execution. Never estimate within-run numbers or tell the athlete you only have session averages.
 
 ${READINESS_RULES}
+
+${COACHING_PRINCIPLES}
 
 ${HONESTY_RULES}
 
@@ -208,6 +224,8 @@ Before proposing or editing anything, call get_scheduled_workouts for the dates 
 The Garmin calendar is the athlete's source of truth. Never claim a day is empty, or that a workout does not exist, without a get_scheduled_workouts call whose range covers that date.
 
 ${READINESS_RULES}
+
+${COACHING_PRINCIPLES}
 
 ${HONESTY_RULES}
 
@@ -368,6 +386,8 @@ Focus on how their body is responding to training: recovery trends (HRV vs basel
 
 ${READINESS_RULES}
 
+${COACHING_PRINCIPLES}
+
 ${HONESTY_RULES}
 
 Be specific: cite actual numbers (paces, HR, HRV, mileage, dates). That specificity is the value, so keep it. Avoid generic advice ("stay hydrated", "listen to your body").
@@ -406,6 +426,8 @@ The focus day carries every run logged on it (usually one; a double day carries 
 
 ${READINESS_RULES}
 
+${COACHING_PRINCIPLES}
+
 ${HONESTY_RULES}
 
 Be specific with real numbers (paces, HR, load). Keep to a few short sentences or a couple of tight bullets. One short markdown header at most, only if it helps. No bold TL;DR line. Do NOT use em-dashes or the ~ symbol. Second person.`;
@@ -414,6 +436,8 @@ const DAY_PLANNED_SYSTEM = `You are this athlete's running coach giving practica
 
 From the focus workout (title, distance, structured steps with any pace targets) and the backdrop context (current recovery and readiness, recent training load, goal paces, PRs), advise how to approach and execute it: what it's training, sensible pacing for the reps or segments, and any adjustment today's recovery or recent load warrants. If it's a race, factor its proximity and goal pace.
 
+${COACHING_PRINCIPLES}
+
 ${HONESTY_RULES}
 
 Do not rewrite the workout here; coach its execution. Workout changes belong in planning mode, regardless of their source. Be specific with paces and numbers. A few short sentences or tight bullets. One short markdown header at most. No bold TL;DR line. Do NOT use em-dashes or the ~ symbol. Second person.`;
@@ -421,6 +445,8 @@ Do not rewrite the workout here; coach its execution. Workout changes belong in 
 const DAY_ROUTINE_SYSTEM = `You are this athlete's running coach commenting on a recurring non-running session in their week (e.g. football, gym, cycling).
 
 You have the session (activity, intensity 1-10, whether it has been logged today) plus the backdrop context (recovery, recent runs, upcoming planned runs, goal paces). Treat it as cross-training that affects running load and recovery. For an upcoming or expected session, advise how hard to go given current recovery and any nearby running workouts, and how to protect the next run. For a completed one, note how it adds to the week's load and what that means for upcoming runs.
+
+${COACHING_PRINCIPLES}
 
 ${HONESTY_RULES}
 
@@ -558,6 +584,37 @@ const ACTIVITY_TOOL = {
     },
   },
 };
+
+const TRAINING_HISTORY_TOOL = {
+  name: "get_training_history",
+  description:
+    "Fetch 1 to 52 weeks of compact training evidence, default 12: weekly run distance, " +
+    "run count, longest run, Garmin HR-zone intensity time, summed training load, easy-run " +
+    "aerobic efficiency at a comparable HR band, long-run HR decoupling from lap halves, " +
+    "and races. The output states every method. Call it for load progression, intensity " +
+    "balance, durability, aerobic-efficiency trends, or history beyond the injected window.",
+  input_schema: {
+    type: "object",
+    properties: {
+      weeks: { type: "integer", minimum: 1, maximum: 52, default: 12 },
+    },
+  },
+};
+
+const PLAN_COMPLIANCE_TOOL = {
+  name: "get_plan_compliance",
+  description:
+    "Fetch 1 to 12 weeks of planned-versus-completed running, default 4. It uses the same " +
+    "live app precedence and race dedupe as normal calendar reads, then marks each session " +
+    "completed, partial, missed, or extra with planned and completed distance plus weekly " +
+    "completion percentage. Call it before judging adherence or claiming sessions were missed.",
+  input_schema: {
+    type: "object",
+    properties: {
+      weeks: { type: "integer", minimum: 1, maximum: 12, default: 4 },
+    },
+  },
+};
 // --- Silent memory tools --------------------------------------------------
 // The coach's persistent memory across conversations: durable athlete facts
 // (race debriefs, illnesses, context for training gaps) stored as
@@ -625,10 +682,19 @@ async function runForgetTool(input) {
   return result.rowCount ? `Forgotten (id ${id}).` : `No memory fact with id ${id}.`;
 }
 
-const COACH_TOOLS = [SCHEDULED_TOOL, ACTIVITY_TOOL, REMEMBER_TOOL, FORGET_TOOL];
+const COACH_TOOLS = [
+  SCHEDULED_TOOL,
+  ACTIVITY_TOOL,
+  TRAINING_HISTORY_TOOL,
+  PLAN_COMPLIANCE_TOOL,
+  REMEMBER_TOOL,
+  FORGET_TOOL,
+];
 const executeCoachTool = (db, b) =>
   b.name === "get_scheduled_workouts" ? runScheduledTool(db, b.input)
     : b.name === "get_activity_detail" ? runActivityTool(db, b.input)
+    : b.name === "get_training_history" ? trainingHistorySummary(db, b.input, localDate())
+    : b.name === "get_plan_compliance" ? planComplianceSummary(db, b.input, localDate())
     : b.name === "remember_fact" ? runRememberTool(db, b.input)
     : b.name === "forget_fact" ? runForgetTool(b.input)
     : `Unknown tool ${b.name}.`;

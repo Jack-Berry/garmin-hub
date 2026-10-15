@@ -10,6 +10,7 @@ const {
 } = require('./planned');
 const { computeZones } = require('./zones');
 const { resolveGoalPaces } = require('./goalpaces');
+const { computeTrainingLoad } = require('./training-load');
 // Guard bounds — the SAME file the enforcer (ingest/pacer_cli.py) and the
 // builder's negative-split shape load, so the advisory copy can't drift.
 const GUARD_BOUNDS = require('../ingest/guard_bounds.json');
@@ -243,7 +244,7 @@ async function sectionRecentRuns(db, today) {
     `SELECT activity_id, start_time_local::date AS date, distance_m, duration_s, avg_hr,
             hr_zone1_s, hr_zone2_s, hr_zone3_s, hr_zone4_s, hr_zone5_s,
             activity_training_load, training_effect_label, aerobic_training_effect,
-            elevation_gain_m
+            elevation_gain_m, avg_grade_adjusted_speed_mps
      FROM activities
      WHERE activity_group = 'run' AND distance_m > 0
        AND start_time_local >= $1
@@ -268,8 +269,11 @@ async function sectionRecentRuns(db, today) {
       [r.hr_zone1_s, r.hr_zone2_s, r.hr_zone3_s, r.hr_zone4_s, r.hr_zone5_s]);
     const run = {
       date: r.date,
+      day: dowOf(r.date),
       km,
       pace: pace(r.duration_s / km),
+      grade_adjusted_pace: r.avg_grade_adjusted_speed_mps
+        ? `${pace(1000 / r.avg_grade_adjusted_speed_mps)}/km` : null,
       avg_hr: r.avg_hr,
       hr_min_by_zone: zoneMin,
       load: r.activity_training_load != null ? Math.round(r.activity_training_load) : null,
@@ -289,7 +293,9 @@ async function sectionRecentRuns(db, today) {
 const RECOVERY_COLS = `calendar_date, hrv_last_night, hrv_status,
             hrv_baseline_balanced_low, hrv_baseline_balanced_upper,
             resting_hr, sleep_score, readiness_score, readiness_level,
-            readiness_context, readiness_wake_score, readiness_wake_level`;
+            readiness_context, readiness_wake_score, readiness_wake_level,
+            acute_load, acwr_factor_pct, recovery_time_minutes,
+            recovery_time_factor_pct, training_status, bb_charged, bb_drained`;
 
 // Which reading `readiness_score` actually is. Garmin re-reads readiness after
 // a workout, so on any day with a run the stored score is the POST-exercise
@@ -317,6 +323,17 @@ const recoverySnapshot = (r = {}) => ({
   readiness_measured: READINESS_WHEN[r.readiness_context] || null,
   readiness_on_waking: r.readiness_wake_score ?? null,
   readiness_level_on_waking: r.readiness_wake_level ?? null,
+  acute_load: r.acute_load ?? null,
+  acwr_factor_pct: r.acwr_factor_pct ?? null,
+  recovery_time_minutes: r.recovery_time_minutes ?? null,
+  recovery_time_factor_pct: r.recovery_time_factor_pct ?? null,
+  training_status: r.training_status ?? null,
+  body_battery: r.bb_charged == null && r.bb_drained == null ? null : {
+    charged: r.bb_charged ?? null,
+    drained: r.bb_drained ?? null,
+    net: r.bb_charged != null && r.bb_drained != null
+      ? r.bb_charged - r.bb_drained : null,
+  },
 });
 
 // Recovery for ONE day (`asOf`, default today): that day's snapshot plus the
@@ -343,6 +360,12 @@ async function sectionRecovery(db, asOf) {
       sleep_score: avg('sleep_score'),
       readiness_score: avg('readiness_score'),
       readiness_on_waking: avg('readiness_wake_score'),
+      acute_load: avg('acute_load'),
+      acwr_factor_pct: avg('acwr_factor_pct'),
+      recovery_time_minutes: avg('recovery_time_minutes'),
+      recovery_time_factor_pct: avg('recovery_time_factor_pct'),
+      body_battery_charged: avg('bb_charged'),
+      body_battery_drained: avg('bb_drained'),
     },
   };
 }
@@ -396,12 +419,26 @@ async function sectionUpcoming(db, today) {
   // App-plan precedence (a live app row owns its date) before the race collapse.
   return collapseRaceDuplicates(applyAppPlanPrecedence(planRows, today)).map((p) => ({
     date: p.calendar_date,
+    day: dowOf(p.calendar_date),
     title: p.title,
     km: p.estimated_distance_m ? +(p.estimated_distance_m / 1000).toFixed(2) : null,
     is_race: !!p.is_race,
     pacer_ready: !!p.pacer_available,
     steps: parseSteps(p.steps_json),
   }));
+}
+
+// Fitness and fatigue from enough daily Garmin load history to warm both
+// exponentially weighted averages. The pure calculation lives separately so
+// its recurrence is directly unit tested.
+async function sectionTrainingLoad(db, today) {
+  const rows = await db.all(
+    `SELECT start_time_local::date AS date, activity_training_load AS load
+     FROM activities
+     WHERE activity_training_load IS NOT NULL AND start_time_local::date >= $1
+       AND start_time_local::date <= $2
+     ORDER BY start_time_local`, [shiftDate(today, -119), today]);
+  return computeTrainingLoad(rows, today, 120);
 }
 
 // Weekly mileage (runs only), newest first, with real Monday labels. The
@@ -506,7 +543,7 @@ async function buildContext(db) {
   // stated date and the queried windows can never disagree.
   const today = localDate();
 
-  const [profile, coach_memory, recent_runs, recovery, upcoming, weekly_km, records] = await Promise.all([
+  const [profile, coach_memory, recent_runs, recovery, upcoming, weekly_km, records, training_load] = await Promise.all([
     sectionProfile(db),
     sectionMemory(db),
     sectionRecentRuns(db, today),
@@ -514,6 +551,7 @@ async function buildContext(db) {
     sectionUpcoming(db, today),
     sectionWeeklyMileage(db, today),
     sectionRecords(db),
+    sectionTrainingLoad(db, today),
   ]);
 
   return {
@@ -530,6 +568,7 @@ async function buildContext(db) {
     upcoming,
     weekly_mileage: weekly_km,
     signals: deriveSignals(recovery, weekly_km),
+    training_load,
     personal_records: records.personal_records,
     race_predictions: records.race_predictions,
   };
@@ -550,7 +589,8 @@ async function buildDayFocus(db, date) {
     `SELECT activity_id, name, start_time_local::date AS date, distance_m, duration_s,
             avg_hr, max_hr, hr_zone1_s, hr_zone2_s, hr_zone3_s, hr_zone4_s, hr_zone5_s,
             avg_cadence_spm, avg_power, aerobic_training_effect, anaerobic_training_effect,
-            training_effect_label, activity_training_load, elevation_gain_m
+            training_effect_label, activity_training_load, elevation_gain_m,
+            avg_grade_adjusted_speed_mps
      FROM activities
      WHERE activity_group = 'run' AND distance_m > 0 AND start_time_local::date = $1
      ORDER BY start_time_local`, [date]);
@@ -572,6 +612,8 @@ async function buildDayFocus(db, date) {
               DESC NULLS LAST, p.schedule_id LIMIT 1`, [date, today]);
 
   const planned = planRow ? {
+    date,
+    day: dowOf(date),
     title: planRow.title,
     km: planRow.estimated_distance_m ? +(planRow.estimated_distance_m / 1000).toFixed(2) : null,
     is_race: !!planRow.is_race,
@@ -619,9 +661,12 @@ async function buildDayFocus(db, date) {
       const km = +(a.distance_m / 1000).toFixed(2);
       const run = {
         date: a.date,
+        day: dowOf(a.date),
         name: a.name,
         km,
         pace: pace(a.duration_s / km),
+        grade_adjusted_pace: a.avg_grade_adjusted_speed_mps
+          ? `${pace(1000 / a.avg_grade_adjusted_speed_mps)}/km` : null,
         avg_hr: a.avg_hr,
         max_hr: a.max_hr,
         hr_min_by_zone: zoneMinutes(
@@ -638,13 +683,13 @@ async function buildDayFocus(db, date) {
       if (wi) run.work_intervals = wi;
       return run;
     });
-    return { kind: 'completed', date, runs, planned, routine, recovery };
+    return { kind: 'completed', date, day: dowOf(date), runs, planned, routine, recovery };
   }
 
   if (planned) {
     return date < today
-      ? { kind: 'missed', date, planned, routine }
-      : { kind: 'planned', date, planned, routine };
+      ? { kind: 'missed', date, day: dowOf(date), planned, routine }
+      : { kind: 'planned', date, day: dowOf(date), planned, routine };
   }
   if (routine) return { kind: 'routine', date, routine };
   return { kind: 'rest', date };
@@ -690,12 +735,13 @@ async function renderContextDump(db) {
   if (!c.recent_runs.length) out.push('No runs in window.');
   c.recent_runs.forEach((r) => {
     const bits = [`${r.km}km @ ${r.pace}/km`];
+    if (r.grade_adjusted_pace) bits.push(`GAP ${r.grade_adjusted_pace}`);
     if (r.avg_hr != null) bits.push(`HR ${r.avg_hr}`);
     if (r.load != null) bits.push(`load ${r.load}`);
     if (r.effect) bits.push(r.effect);
     if (r.elev_m != null) bits.push(`+${r.elev_m}m`);
     if (r.note) bits.push(r.note);
-    out.push(`${r.date} — ${bits.join(', ')}`);
+    out.push(`${r.date} (${r.day}): ${bits.join(', ')}`);
     if (r.work_intervals) out.push(`    intervals: ${r.work_intervals}`);
   });
 
@@ -713,6 +759,17 @@ async function renderContextDump(db) {
     `14-day avg: HRV ${A.hrv ?? '—'}, resting HR ${A.resting_hr ?? '—'}, ` +
     `sleep ${A.sleep_score ?? '—'}, readiness ${A.readiness_score ?? '—'}`
   );
+  out.push(
+    `Load: acute ${L.acute_load ?? 'null'}, ACWR factor ${L.acwr_factor_pct ?? 'null'}%, ` +
+    `recovery time ${L.recovery_time_minutes ?? 'null'} min, status ${L.training_status || 'null'}, ` +
+    `body battery ${L.body_battery ? JSON.stringify(L.body_battery) : 'null'}`
+  );
+
+  section('DERIVED FITNESS AND FATIGUE');
+  out.push(c.training_load.method);
+  out.push(`Today: CTL ${c.training_load.today.ctl}, ATL ${c.training_load.today.atl}, TSB ${c.training_load.today.tsb}`);
+  out.push(`Eight-week trend: ${c.training_load.trend_8w.map((p) =>
+    `${p.date} CTL ${p.ctl}, ATL ${p.atl}, TSB ${p.tsb}`).join(' | ')}`);
 
   // --- Upcoming planned workouts ---
   section(`UPCOMING PLANNED WORKOUTS (next ${c.window_days} days)`);
@@ -720,7 +777,7 @@ async function renderContextDump(db) {
   c.upcoming.forEach((p) => {
     const km = p.km != null ? ` — ${p.km}km` : '';
     const tags = `${p.is_race ? '  [RACE]' : ''}${p.pacer_ready ? '  [pacer ready]' : ''}`;
-    out.push(`${p.date} — ${p.title || 'workout'}${km}${tags}`);
+    out.push(`${p.date} (${p.day}): ${p.title || 'workout'}${km}${tags}`);
     if (p.steps && p.steps.length) out.push(`    steps: ${p.steps.join(' | ')}`);
   });
 
@@ -858,6 +915,7 @@ async function buildPlanningContext(db, recentPushes = []) {
     sessions: calendarRows.map((s) => ({
       schedule_id: s.schedule_id,
       date: s.calendar_date,
+      day: dowOf(s.calendar_date),
       title: s.title,
       km: s.estimated_distance_m ? +(s.estimated_distance_m / 1000).toFixed(2) : null,
       source: s.source,
@@ -906,6 +964,7 @@ async function buildPlanningContext(db, recentPushes = []) {
        ORDER BY calendar_date`, [draft.plan_id]))
       .map((s) => ({
         date: s.calendar_date,
+        day: dowOf(s.calendar_date),
         title: s.title,
         type: s.type,
         km: s.estimated_distance_m ? +(s.estimated_distance_m / 1000).toFixed(1) : null,
@@ -950,7 +1009,7 @@ async function scheduledSummary(db, from, to) {
     const race = p.is_race ? '  [RACE]' : '';
     const source = p.source === 'app' ? '[app-planned]'
       : p.source === 'garmin' ? '[garmin]' : '[runna-feed]';
-    lines.push(`${p.calendar_date} — ${p.title || 'workout'}${km}${race}  ${source}  [id ${p.schedule_id}]`);
+    lines.push(`${p.calendar_date} (${dowOf(p.calendar_date)}): ${p.title || 'workout'}${km}${race}  ${source}  [id ${p.schedule_id}]`);
     const steps = parseSteps(p.steps_json);
     if (steps && steps.length) lines.push(`    steps: ${steps.join(' | ')}`);
   }
@@ -1164,5 +1223,6 @@ module.exports = {
   // 10d tools. Each takes the caller's local `today`; none computes its own.
   sectionProfile, sectionMemory, sectionRecentRuns, sectionRecovery,
   sectionAlignedRecovery, sectionUpcoming, sectionWeeklyMileage, sectionRecords,
+  sectionTrainingLoad,
   deriveSignals,
 };

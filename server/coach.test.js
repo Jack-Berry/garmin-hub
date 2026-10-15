@@ -53,6 +53,8 @@ test('tool loop keeps tools on the capped fallback and preserves thinking blocks
   assert.equal(response.content[0].text, 'answer');
   assert.equal(calls.length, 5);
   assert.ok(calls.every((call) => Array.isArray(call.tools)));
+  assert.ok(calls[0].tools.some((tool) => tool.name === 'get_training_history'));
+  assert.ok(calls[0].tools.some((tool) => tool.name === 'get_plan_compliance'));
   assert.match(calls.at(-1).messages.at(-1).content[0].text, /Answer now/);
   assert.deepEqual(calls.at(-1).tool_choice, { type: 'none' });
   for (let index = 0; index < contents.length; index++) {

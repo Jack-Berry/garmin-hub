@@ -1,7 +1,8 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const {
-  buildDayFocus, deriveSignals, sectionProfile, sectionWeeklyMileage,
+  buildContext, buildDayFocus, deriveSignals, sectionProfile,
+  sectionRecentRuns, sectionRecovery, sectionUpcoming, sectionWeeklyMileage,
 } = require('./context');
 
 const baseRecovery = (latest) => ({
@@ -96,4 +97,54 @@ test('profile context skips a malformed race date with a warning', async () => {
   assert.equal(profile.races.length, 1);
   assert.match(profile.races[0], /^Good race.*2026-11-01.*20:00$/);
   assert.match(profile.warnings[0], /Bad race \(2026-99-99\)/);
+});
+
+test('recent runs and planned entries carry explicit weekday labels', async () => {
+  const recentDb = {
+    all: async (sql) => sql.includes('FROM activities') ? [{
+      activity_id: '1', date: '2026-10-12', distance_m: 5000, duration_s: 1500,
+    }] : [],
+  };
+  const recent = await sectionRecentRuns(recentDb, '2026-10-14');
+  assert.equal(recent[0].day, 'Mon');
+
+  const plannedDb = { all: async () => [{
+    calendar_date: '2026-10-18', title: 'Long run', estimated_distance_m: 18000,
+    source: 'garmin', is_race_auto: 0, is_race_override: null, is_race: 0,
+    steps_json: null, plan_status: null,
+  }] };
+  const upcoming = await sectionUpcoming(plannedDb, '2026-10-14');
+  assert.equal(upcoming[0].day, 'Sun');
+});
+
+test('missing recovery load fields stay null rather than becoming zero', async () => {
+  const recovery = await sectionRecovery({ all: async () => [{}] }, '2026-10-14');
+  assert.equal(recovery.latest.acute_load, null);
+  assert.equal(recovery.latest.acwr_factor_pct, null);
+  assert.equal(recovery.latest.recovery_time_minutes, null);
+  assert.equal(recovery.latest.body_battery, null);
+  assert.equal(recovery.avg_14d.acute_load, null);
+});
+
+test('context is byte-stable across two builds on the same day', async () => {
+  const db = {
+    get: async (sql) => {
+      if (sql.includes('FROM profile')) return {};
+      return undefined;
+    },
+    all: async (sql) => {
+      if (sql.includes("note_type = 'memory'")) return [];
+      if (sql.includes('FROM recovery')) return [];
+      if (sql.includes('FROM planned_workouts')) return [];
+      if (sql.includes('FROM personal_records')) return [];
+      if (sql.includes('FROM race_predictions')) return [];
+      if (sql.includes('date_trunc')) return [];
+      if (sql.includes('activity_training_load AS load')) return [];
+      if (sql.includes('FROM activities')) return [];
+      return [];
+    },
+  };
+  const first = JSON.stringify(await buildContext(db));
+  const second = JSON.stringify(await buildContext(db));
+  assert.equal(second, first);
 });
