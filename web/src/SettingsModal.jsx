@@ -4,6 +4,7 @@ import { useFetch } from './useFetch';
 import { StateWrap } from './ui';
 import { useAccent } from './accent';
 import { ACCENTS, ACCENT_KEYS } from './accents';
+import { ShoeMileageContent } from './gear/ShoeMileage';
 
 const inputCls =
   'w-full rounded-lg border border-line bg-surface-2 px-3 py-2 text-sm text-ink shadow-sm outline-none transition placeholder:text-ink-muted focus:border-acc focus:ring-2 focus:ring-acc/20';
@@ -70,6 +71,7 @@ function Group({ title, hint, children }) {
 // shoe / race / injury lists + notes inline, and saves everything at once.
 export default function SettingsModal({ onClose }) {
   const { data, loading, error } = useFetch(() => api.profile());
+  const gear = useFetch(() => api.gear());
   const [shoes, setShoes] = useState([]);
   const [races, setRaces] = useState([]);
   const [injuries, setInjuries] = useState([]);
@@ -110,7 +112,11 @@ export default function SettingsModal({ onClose }) {
     try {
       await api.saveProfile({
         // Drop fully-empty rows so blanks don't accumulate.
-        shoes: shoes.filter((s) => s.name?.trim() || s.purpose?.trim()),
+        shoes: shoes.filter((s) => s.name?.trim() || s.purpose?.trim()).map((s) => ({
+          ...s,
+          mileage_alert_km: s.mileage_alert_km === '' || s.mileage_alert_km == null
+            ? null : Number(s.mileage_alert_km),
+        })),
         races: races.filter((r) => r.name?.trim() || r.date || r.goal_time?.trim()),
         injuries: injuries.map((s) => s.trim()).filter(Boolean),
         routines: routines
@@ -184,7 +190,7 @@ export default function SettingsModal({ onClose }) {
           <StateWrap loading={loading} error={error}>
             <Group title="Shoes" hint="Your shoes and what each is for (daily, tempo, race…)">
               {shoes.map((s, i) => (
-                <div key={i} className="flex items-center gap-2">
+                <div key={i} className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_1fr_8rem_auto]">
                   <input
                     className={inputCls}
                     placeholder="Shoe name"
@@ -197,12 +203,25 @@ export default function SettingsModal({ onClose }) {
                     value={s.purpose || ''}
                     onChange={(e) => setShoe(i, { purpose: e.target.value })}
                   />
+                  <input
+                    className={inputCls}
+                    type="number"
+                    min="1"
+                    placeholder="Alert km"
+                    aria-label="Mileage alert in kilometres"
+                    value={s.mileage_alert_km ?? ''}
+                    onChange={(e) => setShoe(i, { mileage_alert_km: e.target.value })}
+                  />
                   <DelBtn onClick={() => remove(setShoes)(i)} label="Remove shoe" />
                 </div>
               ))}
               <button type="button" className={addBtnCls} onClick={() => { setShoes((a) => [...a, { name: '', purpose: '' }]); dirty(); }}>
                 + Add shoe
               </button>
+              <div className="mt-4 border-t border-line pt-4">
+                <p className="mb-2 font-body text-micro font-semibold uppercase tracking-[0.1em] text-ink-muted">Garmin mileage</p>
+                <ShoeMileageContent state={gear} />
+              </div>
             </Group>
 
             <Group title="Upcoming races" hint="Race, date (optional), and a goal time — leave goal time blank for “just running it”.">

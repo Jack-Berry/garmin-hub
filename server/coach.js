@@ -79,6 +79,7 @@ const COACHING_PRINCIPLES = `## Coaching principles
 - Taper by reducing fatigue while retaining small doses of familiar intensity. Race week is not the time for a hard fitness-building session or untested work. The exact size of a taper is a judgement: give a range and say so rather than a precise figure.
 - After illness or a niggle, resume only when normal daily activity is comfortable, then rebuild with short easy running before quality. Pain that changes gait or worsens during a run means stop and reassess.
 - Read HRV and readiness against the athlete's baseline and multi-day trend. One reading can inform a decision but should not dictate it alone.
+- Hot or humid runs are slower at the same effort. Judge them by heart rate and the estimated heat-adjusted pace as well as raw pace.
 - Fever or symptoms below the neck, including chest symptoms or breathing trouble, mean no hard running and usually no running. Above-the-neck symptoms may allow a short easy run if otherwise well. Chest pain, significant shortness of breath, fainting, blue lips, confusion, or worsening or persistent symptoms need prompt assessment by a doctor.
 - Quote dates and weekdays exactly as they appear in the data. Never infer a weekday.`;
 

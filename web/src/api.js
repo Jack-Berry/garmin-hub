@@ -64,6 +64,7 @@ export const api = {
   planned: (params = {}) => get(`/api/planned${qs(params)}`),
   recovery: (params = {}) => get(`/api/recovery${qs(params)}`),
   trainingBalance: () => get('/api/training-balance'),
+  gear: () => get('/api/gear'),
   weekly: () => get('/api/summary/weekly'),
   raceOverride: (scheduleId, override) =>
     post(`/api/planned/${scheduleId}/race-override`, { override }),

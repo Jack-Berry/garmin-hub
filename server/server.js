@@ -24,6 +24,7 @@ const { scheduleId: exactScheduleId } = require('./schedule-id');
 const { planFinished } = require('./plan-date');
 const { createProactiveRouter } = require('./proactive-coach');
 const { createChatThreadsRouter } = require('./chat-threads');
+const { addHeatAdjustment, createGearRouter } = require('./gear');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -50,6 +51,7 @@ app.use('/api', keyGate(API_SECRET));
 app.use(express.json({ limit: '300kb' }));
 app.use('/api/coach', createProactiveRouter({ db, writeDb }));
 app.use('/api/chat-threads', createChatThreadsRouter({ db, writeDb }));
+app.use('/api/gear', createGearRouter({ db }));
 
 // Curated column lists, derived once from the schema (everything but raw_json).
 // Async, so they're awaited in start() below — routes never see them empty.
@@ -59,7 +61,7 @@ const cols = async (table) =>
      WHERE table_schema = 'public' AND table_name = $1
      ORDER BY ordinal_position`, [table]))
     .map((c) => c.column_name)
-    .filter((n) => n !== 'raw_json');
+    .filter((n) => !n.endsWith('raw_json'));
 
 let ACTIVITY_COLS = [];
 let LAP_COLS = [];
@@ -108,7 +110,7 @@ app.get('/api/activities/:id', handler(async (req, res) => {
   const lapSelect = includeRaw ? '*' : LAP_COLS.join(', ');
   const laps = await db.all(
     `SELECT ${lapSelect} FROM laps WHERE activity_id = $1 ORDER BY lap_index`, [id]);
-  res.json({ ...activity, laps });
+  res.json({ ...addHeatAdjustment(activity), laps });
 }));
 
 // Planned workouts ordered by date, with derived is_race and parsed steps.

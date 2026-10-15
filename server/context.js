@@ -195,11 +195,19 @@ async function sectionProfile(db) {
   const profileRow = await db.get(
     'SELECT shoes_json, races_json, injuries_json, routines_json, general_notes FROM profile WHERE id = 1'
   ) || {};
+  const gearRows = db.all ? await db.all(
+    `SELECT display_name, garmin_total_distance_m, retired
+     FROM gear ORDER BY retired, display_name, gear_uuid`) : [];
   const raceData = safeRaces(profileRow.races_json);
   return {
     shoes: parseList(profileRow.shoes_json)
       .filter((s) => s && s.name)
       .map((s) => (s.purpose ? `${s.name} (${s.purpose})` : s.name)),
+    current_shoe_mileage: gearRows.map((g) => ({
+      name: g.display_name,
+      km: g.garmin_total_distance_m == null ? null : Math.round(g.garmin_total_distance_m / 1000),
+      retired: Boolean(g.retired),
+    })),
     races: raceData.races
       .filter((r) => r && (r.name || r.date))
       .map((r) => {
@@ -260,7 +268,8 @@ async function sectionRecentRuns(db, today) {
     `SELECT activity_id, start_time_local::date AS date, distance_m, duration_s, avg_hr,
             hr_zone1_s, hr_zone2_s, hr_zone3_s, hr_zone4_s, hr_zone5_s,
             activity_training_load, training_effect_label, aerobic_training_effect,
-            elevation_gain_m, avg_grade_adjusted_speed_mps
+            elevation_gain_m, avg_grade_adjusted_speed_mps,
+            temperature_c, dew_point_c
      FROM activities
      WHERE activity_group = 'run' AND distance_m > 0
        AND start_time_local >= $1
@@ -295,6 +304,8 @@ async function sectionRecentRuns(db, today) {
       load: r.activity_training_load != null ? Math.round(r.activity_training_load) : null,
       effect: r.training_effect_label,
       elev_m: r.elevation_gain_m != null ? Math.round(r.elevation_gain_m) : null,
+      temperature_c: r.temperature_c != null ? +Number(r.temperature_c).toFixed(1) : null,
+      dew_point_c: r.dew_point_c != null ? +Number(r.dew_point_c).toFixed(1) : null,
     };
     if (km >= 10) run.note = 'long run';
     const wi = workIntervalSummary(lapsByActivity.get(r.activity_id) || []);
@@ -1081,7 +1092,8 @@ const ACTIVITY_COLS = `activity_id, start_time_local, start_time_local::date AS 
        avg_cadence_spm, avg_power, norm_power, avg_ground_contact_ms,
        avg_stride_length_cm, avg_vertical_oscillation_cm, avg_vertical_ratio,
        aerobic_training_effect, anaerobic_training_effect, training_effect_label,
-       activity_training_load, elevation_gain_m, vo2max`;
+       activity_training_load, elevation_gain_m, vo2max,
+       temperature_c, humidity_pct, dew_point_c`;
 
 // A long auto-lapped run is one lap per km, but a badly-lapped session can run
 // to hundreds — cap the table rather than flood the model, and say so.
@@ -1157,6 +1169,9 @@ const activityHeader = (a) => {
     [a.vo2max, (v) => `VO2max ${num(v)}`],
   ].filter(([v]) => v != null).map(([v, f]) => f(v));
   if (form.length) lines.push(`  whole-run form: ${form.join(', ')}`);
+  if (a.temperature_c != null) {
+    lines.push(`  weather: ${dec(a.temperature_c)}C, humidity ${num(a.humidity_pct)}%, dew point ${dec(a.dew_point_c)}C`);
+  }
   return lines;
 };
 

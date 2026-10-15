@@ -233,6 +233,22 @@ function DetailBody({ data, plannedState, debriefState, dayActivities, onAskCoac
         <Metric label="Load" value={has(activity.activity_training_load) ? number(activity.activity_training_load) : null} />
       </div>
       <div className="space-y-6 px-4 py-5 sm:px-6">
+        {has(activity.temperature_c) && (
+          <section className="rounded-lg border border-line bg-surface-2 p-3">
+            <h3 className="font-display text-xs font-bold uppercase tracking-[0.14em] text-ink">Run weather</h3>
+            <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <Metric label="Temperature" value={`${number(activity.temperature_c, 1)}°C`} />
+              <Metric label="Humidity" value={has(activity.humidity_pct) ? `${number(activity.humidity_pct)}%` : null} />
+              <Metric label="Dew point" value={has(activity.dew_point_c) ? `${number(activity.dew_point_c, 1)}°C` : null} />
+              <Metric label="Heat adjusted estimate" value={activity.heat_adjustment ? paceLabel(activity.heat_adjustment.cool_equivalent_pace_s_per_km) : null} />
+            </div>
+            {activity.heat_adjustment && (
+              <p className="mt-3 text-xs text-ink-muted">
+                Estimated cool weather equivalent using the temperature plus dew point rule, {activity.heat_adjustment.slowdown_pct}% adjustment.
+              </p>
+            )}
+          </section>
+        )}
         {activity.activity_group === 'run' && <DebriefCard state={debriefState} />}
         <PaceChart laps={laps} football={football} />
         <Zones activity={activity} />

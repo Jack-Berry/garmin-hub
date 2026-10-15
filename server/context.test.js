@@ -197,3 +197,22 @@ test('context is byte-stable across two builds on the same day', async () => {
   assert.match(JSON.parse(first).weekly_review.source, /own weekly review written 2026-10-11.*re-check/);
   assert.match(JSON.parse(first).today_day, /^(Sun|Mon|Tue|Wed|Thu|Fri|Sat)$/);
 });
+
+test('context stays byte-stable and carries recorded weather', async () => {
+  const run = {
+    activity_id: '9', date: '2026-10-12', distance_m: 10000, duration_s: 3000,
+    temperature_c: 24.6, dew_point_c: 18.2,
+  };
+  const db = {
+    get: async (sql) => sql.includes('FROM profile') ? {} : undefined,
+    all: async (sql) => {
+      if (sql.includes('FROM activities') && sql.includes("activity_group = 'run'")) return [run];
+      return [];
+    },
+  };
+  const first = await sectionRecentRuns(db, '2026-10-14');
+  const second = await sectionRecentRuns(db, '2026-10-14');
+  assert.equal(JSON.stringify(second), JSON.stringify(first));
+  assert.equal(first[0].temperature_c, 24.6);
+  assert.equal(first[0].dew_point_c, 18.2);
+});

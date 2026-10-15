@@ -41,6 +41,8 @@ PLANNED_WINDOW_FWD = 84      # days after today to scan (12 wks — the coach's
 RECOVERY_WINDOW = 30         # days back from today to fetch recovery data
 RECOVERY_REFETCH = 3         # always re-fetch the most recent N days (fill in late)
 RECOVERY_DELAY_S = 0.5       # pause between per-date fetches (rate-limit courtesy)
+GEAR_DELAY_S = 0.5           # pause between gear and weather API calls
+RATE_LIMIT_BACKOFF_S = 5
 
 # Garmin personal-record typeIds we surface — running only. Garmin sends no
 # human label (prTypeLabelKey is null), so the typeId -> (label, value_kind) map
@@ -100,6 +102,18 @@ def nested(d, *path):
             return None
         cur = cur.get(k)
     return cur
+
+
+def as_list(value, *keys):
+    """Normalise Garmin endpoints that vary between list and wrapper dicts."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        for key in keys:
+            if isinstance(value.get(key), list):
+                return value[key]
+        return [value] if any(value.values()) else []
+    return []
 
 
 def dumps(obj):
@@ -310,6 +324,8 @@ def ingest_activities(g, conn, summary):
 
         if not unchanged:
             ingest_laps(g, conn, aid, summary)
+            if row["activity_group"] == "run":
+                summary["_changed_run_ids"].append(aid)
 
 
 def ingest_laps(g, conn, aid, summary):
@@ -572,6 +588,102 @@ def _is_rate_limit(e):
     return "429" in s or "too many requests" in s or "rate limit" in s
 
 
+def call_with_rate_limit_retry(call, label, sleep=time.sleep,
+                               backoff_s=RATE_LIMIT_BACKOFF_S):
+    """Call Garmin once, backing off and retrying one 429 response."""
+    try:
+        return call()
+    except Exception as error:
+        if not _is_rate_limit(error):
+            raise
+        print(f"  {label} rate-limited, backing off {backoff_s}s, retrying once")
+        sleep(backoff_s)
+        return call()
+
+
+# =========================================================================
+# Pull 3 - Gear assignment and activity weather
+# =========================================================================
+def gear_row(item, stats=None):
+    stats = stats or {}
+    combined = {**item, **stats}
+    uuid = pick(combined, "uuid", "gearUuid", "gearUUID")
+    if not uuid:
+        return None
+    status = pick(combined, "gearStatusName", "status")
+    return {
+        "gear_uuid": str(uuid),
+        "display_name": pick(combined, "displayName", "gearName", "name"),
+        "make_name": pick(combined, "gearMakeName", "makeName"),
+        "model_name": pick(combined, "gearModelName", "modelName", "customMakeModel"),
+        "status": status,
+        "date_begin": pick(combined, "dateBegin"),
+        "retired": str(status or "").lower() not in ("", "active"),
+        "garmin_total_distance_m": pick(combined, "totalDistance", "totalDistanceMeters"),
+        "raw_json": dumps({"gear": item, "stats": stats}),
+    }
+
+
+def weather_row(payload):
+    payload = payload if isinstance(payload, dict) else {}
+    return {
+        "temperature_c": pick(payload, "temp", "temperature"),
+        "apparent_temperature_c": pick(payload, "apparentTemp", "apparentTemperature"),
+        "humidity_pct": pick(payload, "relativeHumidity", "humidity"),
+        "dew_point_c": pick(payload, "dewPoint"),
+        "wind_speed_mps": pick(payload, "windSpeed"),
+        "weather_raw_json": dumps(payload),
+    }
+
+
+def ingest_gear(g, conn, summary, sleep=time.sleep):
+    profile_key = getattr(g, "display_name", None)
+    if not profile_key:
+        raise RuntimeError("Garmin display name unavailable for gear lookup")
+    items = as_list(g.get_gear(profile_key), "gear", "gearStats")
+    for item in items:
+        uuid = pick(item, "uuid", "gearUuid", "gearUUID")
+        if not uuid:
+            continue
+        stats = call_with_rate_limit_retry(
+            lambda uuid=uuid: g.get_gear_stats(uuid), f"gear stats {uuid}", sleep)
+        row = gear_row(item, stats)
+        result = upsert(conn, "gear", ["gear_uuid"], row)
+        summary["gear"][result] += 1
+        activities = call_with_rate_limit_retry(
+            lambda uuid=uuid: g.get_gear_activities(uuid),
+            f"gear activities {uuid}", sleep)
+        for activity in as_list(activities, "activities", "activityList"):
+            aid = pick(activity, "activityId", "activity_id")
+            if aid is not None:
+                conn.execute(
+                    "UPDATE activities SET gear_uuid=%s WHERE activity_id=%s",
+                    (str(uuid), aid))
+        sleep(GEAR_DELAY_S)
+
+
+def ingest_activity_weather(g, conn, summary, sleep=time.sleep):
+    for aid in summary["_changed_run_ids"]:
+        existing = conn.execute(
+            "SELECT weather_raw_json FROM activities WHERE activity_id=%s", (aid,)
+        ).fetchone()
+        if not existing or existing[0] is not None:
+            continue
+        try:
+            payload = call_with_rate_limit_retry(
+                lambda aid=aid: g.get_activity_weather(aid),
+                f"weather {aid}", sleep)
+            values = weather_row(payload)
+            assignments = ", ".join(f"{key}=%s" for key in values)
+            conn.execute(
+                f"UPDATE activities SET {assignments} WHERE activity_id=%s",
+                [*values.values(), aid])
+            summary["weather"]["updated"] += 1
+        except Exception as error:
+            summary["errors"].append(f"weather {aid}: {error}")
+        sleep(GEAR_DELAY_S)
+
+
 def ingest_recovery(g, conn, summary):
     today = date.today()
     dates = [str(today - timedelta(days=i)) for i in range(RECOVERY_WINDOW)]
@@ -615,8 +727,8 @@ def ingest_recovery(g, conn, summary):
         try:
             sources, failed = fetch_shapes(d)
         except Exception:
-            print(f"  recovery {d} … rate-limited — backing off 5s, retrying once")
-            time.sleep(5)
+            print(f"  recovery {d}: rate-limited, backing off {RATE_LIMIT_BACKOFF_S}s, retrying once")
+            time.sleep(RATE_LIMIT_BACKOFF_S)
             try:
                 sources, failed = fetch_shapes(d)
             except Exception as e:
@@ -815,6 +927,9 @@ def new_summary():
         "personal_records": {"inserted": 0, "updated": 0},
         "race_predictions": {"inserted": 0, "updated": 0},
         "lactate_threshold": {"inserted": 0, "updated": 0},
+        "gear": {"inserted": 0, "updated": 0},
+        "weather": {"inserted": 0, "updated": 0},
+        "_changed_run_ids": [],
         "errors": [],
     }
 
@@ -837,6 +952,17 @@ def record_ingest_state(conn, summary):
         print(f"  (could not record ingest_state: {error})")
 
 
+def run_sections(g, conn, summary, sections):
+    """Run independent ingest transactions so one failure cannot poison later pulls."""
+    for label, fn in sections:
+        try:
+            fn(g, conn, summary)
+            conn.commit()
+        except Exception as error:
+            conn.rollback()
+            summary["errors"].append(f"{label} pull failed: {error}")
+
+
 def main():
     load_dotenv(ENV_PATH)
 
@@ -853,21 +979,17 @@ def main():
         conn.close()
         raise SystemExit(1) from error
 
-    for label, fn in (("activities", ingest_activities),
-                      ("planned", ingest_planned),
-                      ("runna_ical", ingest_runna_ical),  # AFTER planned: dedupes against Garmin dates
-                      ("recovery", ingest_recovery),
-                      ("personal_records", ingest_personal_records),
-                      ("race_predictions", ingest_race_predictions),
-                      ("lactate_threshold", ingest_lactate_threshold)):
-        try:
-            fn(g, conn, summary)
-            conn.commit()
-        except Exception as e:
-            # psycopg aborts the transaction on a SQL error — roll back so this
-            # section's partial writes vanish and the next section starts clean.
-            conn.rollback()
-            summary["errors"].append(f"{label} pull failed: {e}")
+    run_sections(g, conn, summary, (
+        ("activities", ingest_activities),
+        ("gear", ingest_gear),
+        ("weather", ingest_activity_weather),
+        ("planned", ingest_planned),
+        ("runna_ical", ingest_runna_ical),
+        ("recovery", ingest_recovery),
+        ("personal_records", ingest_personal_records),
+        ("race_predictions", ingest_race_predictions),
+        ("lactate_threshold", ingest_lactate_threshold),
+    ))
 
     # --- Record the run ----------------------------------------------------
     # Written here, at the end of main, so EVERY ingest path records itself:
@@ -881,7 +1003,8 @@ def main():
     # --- Summary -----------------------------------------------------------
     print("\n=== Ingest summary ===")
     for t in ("activities", "laps", "planned", "runna_ical", "recovery",
-              "personal_records", "race_predictions", "lactate_threshold"):
+              "personal_records", "race_predictions", "lactate_threshold",
+              "gear", "weather"):
         s = summary[t]
         extra = f"  deleted={s['deleted']:4d}" if "deleted" in s else ""
         print(f"{t:12s} inserted={s['inserted']:4d}  updated={s['updated']:4d}{extra}")

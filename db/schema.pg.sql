@@ -103,11 +103,32 @@ CREATE TABLE IF NOT EXISTS activities (
 
   -- Appended by SQLite migration (live column order preserved)
   activity_type                text,    -- Garmin activityType.typeKey
-  activity_group               text     -- derived bucket: run/football/walk/other
+  activity_group               text,    -- derived bucket: run/football/walk/other
+
+  -- Garmin gear and recorded activity weather
+  gear_uuid                    text,
+  temperature_c                double precision,
+  apparent_temperature_c       double precision,
+  humidity_pct                 double precision,
+  dew_point_c                  double precision,
+  wind_speed_mps               double precision,
+  weather_raw_json             jsonb
 );
 
 CREATE INDEX IF NOT EXISTS idx_activities_start_time_local
   ON activities (start_time_local);
+
+CREATE TABLE IF NOT EXISTS gear (
+  gear_uuid                    text PRIMARY KEY,
+  display_name                 text,
+  make_name                    text,
+  model_name                   text,
+  status                       text,
+  date_begin                   date,
+  retired                      boolean NOT NULL DEFAULT false,
+  garmin_total_distance_m      double precision,
+  raw_json                     jsonb
+);
 
 CREATE TABLE IF NOT EXISTS laps (
   activity_id                  bigint NOT NULL,
