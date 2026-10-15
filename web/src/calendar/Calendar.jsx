@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { api } from '../api';
 import { useFetch } from '../useFetch';
 import { dateOnly, kmNum, routineGroup, shortDate, ymd } from '../format';
-import { planDayStatus } from '../activityMatch';
+import { planCompliance, planDayStatus } from '../activityMatch';
 import { Section, StateWrap } from '../ui';
 import InsightModal from '../InsightModal';
 
@@ -35,7 +35,7 @@ function statusFor(plan, runs, date, today) {
 function CalendarBody({ month, setMonth, onSelectDay }) {
   const range = useMemo(() => fetchRange(month), [month]);
   const planned = useFetch(() => api.planned({ from: range.from, to: range.to }), [range.from, range.to]);
-  const activities = useFetch(() => api.activities({ from: range.from, to: range.to, limit: 500 }), [range.from, range.to]);
+  const activities = useFetch(() => api.activities({ from: range.from, to: `${range.to} 23:59:59`, limit: 500 }), [range.from, range.to]);
   const profile = useFetch(() => api.profile(), []);
   const loading = planned.loading || activities.loading || profile.loading;
   const error = planned.error || activities.error || profile.error;
@@ -60,10 +60,12 @@ function CalendarBody({ month, setMonth, onSelectDay }) {
 
   const days = [];
   for (let date = range.gridStart; date <= range.gridEnd; date = addDays(date, 1)) days.push(date);
-  const plannedEntries = Object.entries(plansByDate);
-  const done = plannedEntries.filter(([date, plan]) => statusFor(plan, runsByDate[date] || [], date, today) === 'done').length;
-  const totalKm = (activities.data || [])
-    .filter((activity) => activity.activity_group === 'run')
+  // The summary covers this month only, not the neighbouring grey days, and
+  // counts planned runs that are past or already done, like This Week.
+  const monthKey = ymd(range.first).slice(0, 7);
+  const inMonth = (entries) => Object.fromEntries(Object.entries(entries).filter(([date]) => date.startsWith(monthKey)));
+  const compliance = planCompliance(inMonth(plansByDate), runsByDate, today);
+  const totalKm = Object.values(inMonth(runsByDate)).flat()
     .reduce((sum, activity) => sum + Number(activity.distance_m || 0), 0);
 
   return (
@@ -76,37 +78,37 @@ function CalendarBody({ month, setMonth, onSelectDay }) {
         </div>
         <button onClick={() => setMonth(monthStart(new Date()))} className="rounded-md border border-line px-2.5 py-1.5 font-body text-nano font-semibold uppercase tracking-[0.12em] text-ink-secondary hover:bg-surface-2">Today</button>
       </div>
-      <p className="mt-3 font-mono text-nano uppercase tracking-[0.1em] text-ink-muted">{done} of {plannedEntries.length} planned runs done · {kmNum(totalKm) || 0} km run distance</p>
+      <p className="mt-3 font-mono text-nano uppercase tracking-[0.1em] text-ink-muted">{compliance.done} of {compliance.total} planned runs done · {kmNum(totalKm) || 0} km run distance</p>
       <div className="mt-4 grid grid-cols-7 gap-px" role="grid" aria-label={`${monthLabel(month)} calendar`}>
         {DOW.map((day) => <div key={day} className="pb-1 text-center font-body text-[0.48rem] font-semibold uppercase tracking-[0.08em] text-ink-muted sm:text-nano">{day}</div>)}
         {days.map((date) => {
           const dateText = ymd(date);
-          const inMonth = date.getMonth() === month.getMonth();
+          const inThisMonth = date.getMonth() === month.getMonth();
           const isToday = dateText === today;
           const plan = plansByDate[dateText];
           const runs = runsByDate[dateText] || [];
-          const activity = runs[0];
+          const runKm = runs.reduce((sum, run) => sum + Number(run.distance_m || 0), 0);
+          const activity = runs.reduce((longest, run) => (!longest || Number(run.distance_m) > Number(longest.distance_m) ? run : longest), null);
           const status = statusFor(plan, runs, dateText, today);
           const routine = routinesByDow[DOW[(date.getDay() + 6) % 7]];
           const routineActivity = routine && (allRunsByDate[dateText] || []).find((item) => item.activity_group === routineGroup(routine.activity));
-          const detail = activity ? `${kmNum(activity.distance_m) || 0} km` : plan?.estimated_distance_m ? `${kmNum(plan.estimated_distance_m)} km` : routineActivity ? routine.activity : null;
           const dayStatus = activity ? 'completed' : plan ? 'planned' : routineActivity ? 'routine_done' : routine && dateText >= today ? 'routine_expected' : 'rest';
           return (
             <button
               key={dateText}
               onClick={() => onSelectDay({ date: dateText, status: dayStatus, activity_id: activity?.activity_id || null, routine: routine && !activity ? { activity: routine.activity, state: routineActivity ? 'done' : 'expected' } : null })}
-              className={`min-w-0 min-h-[4.8rem] border border-line p-1.5 text-left transition hover:bg-surface-2 sm:min-h-[6.5rem] sm:p-2 ${inMonth ? 'bg-surface-1' : 'bg-surface-0 opacity-45'} ${isToday ? 'border-acc' : ''}`}
+              className={`min-w-0 min-h-[4.8rem] border p-1.5 text-left transition hover:bg-surface-2 sm:min-h-[6.5rem] sm:p-2 ${inThisMonth ? 'bg-surface-1' : 'bg-surface-0 opacity-45'} ${isToday ? 'border-acc' : 'border-line'}`}
               aria-label={shortDate(dateText)}
               role="gridcell"
             >
-              <div className={`flex items-center justify-between font-mono text-nano tabular-nums ${isToday ? 'text-acc' : 'text-ink-muted'}`}><span>{date.getDate()}</span>{plan?.is_race ? <span className="rounded border border-line px-1 text-[0.42rem] font-bold tracking-[0.08em] text-ink-secondary">RACE</span> : null}</div>
+              <div className={`flex flex-wrap items-center justify-between gap-0.5 font-mono text-nano tabular-nums ${isToday ? 'font-bold text-ink' : 'text-ink-muted'}`}><span>{date.getDate()}</span>{plan?.is_race ? <span className="rounded border border-line px-0.5 text-[0.42rem] font-bold leading-tight tracking-[0.04em] text-ink-secondary">RACE</span> : null}</div>
               <div className="mt-2 min-w-0 space-y-1">
                 {plan && <div className="truncate font-display text-[0.55rem] font-bold uppercase leading-tight text-ink sm:text-[0.7rem]" title={plan.title}>{workoutName(plan)}</div>}
-                {activity && <div className="font-mono text-[0.55rem] tabular-nums text-ink-secondary sm:text-nano">{kmNum(activity.distance_m) || 0} km</div>}
+                {activity && <div className="font-mono text-[0.55rem] tabular-nums text-ink-secondary sm:text-nano">{kmNum(runKm) || 0} km{runs.length > 1 ? ` (${runs.length})` : ''}</div>}
                 {!activity && !plan && routineActivity && <div className="truncate font-display text-[0.55rem] font-bold uppercase text-ink sm:text-[0.7rem]">{routine.activity}</div>}
                 {!activity && !plan && !routineActivity && routine && dateText >= today && <div className="truncate font-display text-[0.55rem] font-bold uppercase text-ink-muted sm:text-[0.7rem]">{routine.activity}</div>}
                 {!activity && !plan && !routine && <div className="font-display text-[0.55rem] font-bold uppercase text-ink-muted sm:text-[0.7rem]">Rest</div>}
-                {detail && plan && <div className="font-mono text-[0.5rem] tabular-nums text-ink-muted">{activity ? `${kmNum(activity.distance_m) || 0} km` : detail}</div>}
+                {plan?.estimated_distance_m ? <div className="font-mono text-[0.5rem] tabular-nums text-ink-muted">{activity ? 'plan ' : ''}{kmNum(plan.estimated_distance_m)} km</div> : null}
                 {status && <div className={`font-mono text-[0.46rem] font-bold uppercase tracking-[0.05em] ${status === 'partial' ? 'text-sem-amber' : 'text-ink-muted'}`}>{status}</div>}
                 {activity && !plan && <div className="font-mono text-[0.46rem] font-bold uppercase tracking-[0.05em] text-ink-muted">Done</div>}
               </div>
