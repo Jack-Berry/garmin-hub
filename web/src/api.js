@@ -36,6 +36,15 @@ async function post(path, body) {
   return res.json();
 }
 
+async function del(path) {
+  const res = await fetch(`${BASE}${path}`, {
+    method: 'DELETE',
+    headers: { 'X-Api-Key': SECRET },
+  });
+  if (!res.ok) throw new Error(`DELETE ${path} → ${res.status} ${res.statusText}`);
+  return res.json();
+}
+
 export const api = {
   health: () => get('/api/health'),
   status: () => get('/api/status'),
@@ -53,6 +62,10 @@ export const api = {
   racePredictions: () => get('/api/race-predictions'),
   chat: (messages) => post('/api/coach/chat', { messages }),
   plan: (messages) => post('/api/coach/plan', { messages }),
+  chatThreads: (mode) => get(`/api/chat-threads${qs({ mode })}`),
+  chatThread: (id) => get(`/api/chat-threads/${id}`),
+  saveChatThread: (thread) => post('/api/chat-threads', thread),
+  deleteChatThread: (id) => del(`/api/chat-threads/${id}`),
   savePlan: (plan) => post('/api/plan/save', { plan }),
   planCurrent: () => get('/api/plan/current'),
   planPushNext: (planId) => post(`/api/plan/${planId}/push-next`, {}),

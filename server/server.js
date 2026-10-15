@@ -23,6 +23,7 @@ const { pacerInput, createWriteGate } = require('./garmin-write');
 const { scheduleId: exactScheduleId } = require('./schedule-id');
 const { planFinished } = require('./plan-date');
 const { createProactiveRouter } = require('./proactive-coach');
+const { createChatThreadsRouter } = require('./chat-threads');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -46,8 +47,9 @@ app.use(cors(ORIGINS));
 // The one auth gate for every /api route. Kept as a single middleware so it's
 // trivially replaceable if hosting brings its own auth (e.g. Cloudflare Access).
 app.use('/api', keyGate(API_SECRET));
-app.use(express.json());
+app.use(express.json({ limit: '300kb' }));
 app.use('/api/coach', createProactiveRouter({ db, writeDb }));
+app.use('/api/chat-threads', createChatThreadsRouter({ db, writeDb }));
 
 // Curated column lists, derived once from the schema (everything but raw_json).
 // Async, so they're awaited in start() below — routes never see them empty.

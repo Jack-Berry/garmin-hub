@@ -6,12 +6,12 @@ import { PacerPreview } from './PacerPreview';
 import { PlanReview } from './PlanReview';
 import { ActivationFlow } from './PlanActivation';
 import CoachMemory from './CoachMemory';
+import ChatHistory from './ChatHistory';
 
 // Floating chat coach — a discreet bottom-right widget that answers training
-// questions using the same context engine as the daily insight. Conversation
-// lives in React state only (no persistence): it resets on reload or when the
-// panel is cleared. The client sends the full message array each turn; the
-// server is stateless.
+// questions using the same context engine as the daily insight. Completed
+// turns persist through the thread API so Mac and phone restore the same UI
+// state. The coach endpoints remain stateless and receive the full transcript.
 //
 // Two modes share the panel:
 //   'chat'     — the Sonnet analyst (default, unchanged).
@@ -36,10 +36,28 @@ const alreadyPushed = (msgs, spec) =>
 const toPayload = (msgs) =>
   msgs.map((m) => ({ role: m.role, content: m.apiContent ?? m.content }));
 
+const freshId = () => globalThis.crypto?.randomUUID?.() ||
+  `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
+
+// A browser may vanish while a Garmin write is in flight. Those cards restore
+// as blocked instead of becoming retry buttons that could double-book Garmin.
+const restoreMessages = (messages) => {
+  let interrupted = false;
+  const safe = messages.map((message) => {
+    if (!message.pushPending && !message.actionPending) return message;
+    interrupted = true;
+    const { pushPending, actionPending, ...rest } = message;
+    return { ...rest, restoreBlocked: true };
+  });
+  return { messages: safe, interrupted };
+};
+
 export default function ChatWidget({ appMode = false, active = true, seed = null }) {
   const [open, setOpen] = useState(appMode);
   const [mode, setMode] = useState('chat'); // 'chat' | 'planning'
   const [messages, setMessages] = useState([]); // [{role, content, spec?, preview?, previewError?, pushed?, plan?, savedPlan?}]
+  const [threadId, setThreadId] = useState(null);
+  const [threadMode, setThreadMode] = useState('chat');
   const [input, setInput] = useState('');
   const [pending, setPending] = useState(false);
   const [pushingIdx, setPushingIdx] = useState(null);
@@ -57,23 +75,89 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
   const [copyState, setCopyState] = useState('idle');
   const [fallbackText, setFallbackText] = useState(null);
   const [memoryOpen, setMemoryOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [restoreNote, setRestoreNote] = useState(null);
   const [seedPrompt, setSeedPrompt] = useState(null);
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
   const seededRef = useRef(null);
   const seedRequestRef = useRef(null);
+  const initializedRef = useRef(false);
+  const saveTimerRef = useRef(null);
+  const savedSnapshotRef = useRef(null);
 
   const planning = mode === 'planning';
 
+  const newThread = (nextMode = mode) => {
+    if (pending) return;
+    setThreadId(freshId());
+    setThreadMode(nextMode);
+    setMode(nextMode);
+    setMessages([]);
+    setInput('');
+    setError(null);
+    setRestoreNote(null);
+    setHistoryOpen(false);
+    savedSnapshotRef.current = null;
+  };
+
+  const openThread = async (id) => {
+    if (pending) return;
+    setError(null);
+    try {
+      const thread = await api.chatThread(id);
+      const restored = restoreMessages(thread.messages);
+      setThreadId(thread.id);
+      setThreadMode(thread.mode);
+      setMode(thread.mode);
+      setMessages(restored.messages);
+      setInput('');
+      setRestoreNote(restored.interrupted
+        ? 'A Garmin action was interrupted. Its confirmation is locked: refresh the calendar before deciding what to do next.'
+        : null);
+      setHistoryOpen(false);
+      // If an in-flight marker was converted to a permanent blocked card, let
+      // the normal debounce persist that safer replacement.
+      savedSnapshotRef.current = JSON.stringify(thread.messages);
+    } catch (e) {
+      setError(e.message || 'Could not restore conversation');
+    }
+  };
+
+  const restoreLatest = async (nextMode) => {
+    setMode(nextMode);
+    setMessages([]);
+    setRestoreNote(null);
+    try {
+      const threads = await api.chatThreads(nextMode);
+      if (threads[0]) await openThread(threads[0].id);
+      else newThread(nextMode);
+    } catch (e) {
+      newThread(nextMode);
+      setError(e.message || 'Could not load saved conversations');
+    }
+  };
+
+  const storeNow = async (nextMessages) => {
+    if (!threadId) throw new Error('Conversation is not ready to save');
+    await api.saveChatThread({ id: threadId, mode: threadMode, messages: nextMessages });
+    savedSnapshotRef.current = JSON.stringify(nextMessages);
+  };
+
   const startSeed = async (nextSeed) => {
     if (pending) return;
+    initializedRef.current = true;
     const opening = [{ role: 'user', content: nextSeed.message }];
     seedRequestRef.current = nextSeed.id;
     setSeedPrompt(null);
+    setThreadId(freshId());
+    setThreadMode('chat');
     setMode('chat');
     setMessages(opening);
     setInput('');
     setError(null);
+    setRestoreNote(null);
+    savedSnapshotRef.current = null;
     setPending(true);
     try {
       const { reply } = await api.chat(opening);
@@ -103,6 +187,17 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
     // inspected only when that event arrives.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seed]);
+
+  // Opening the coach restores the newest saved conversation for its current
+  // mode once per mount. Explicit mode switches use restoreLatest directly.
+  useEffect(() => {
+    if ((!open && !appMode) || (appMode && !active) || initializedRef.current) return;
+    initializedRef.current = true;
+    restoreLatest(mode);
+    // The first visible mount is the restore boundary; later mode changes are
+    // deliberate and routed through enterMode.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, appMode, active]);
 
   // Auto-grow the input with its content: reset to the natural (rows=3) height,
   // then fit scrollHeight. The max-h class caps it around 8 rows, after which
@@ -144,15 +239,30 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages, pending, open, seedPrompt]);
 
-  // Chat and planning threads can't share history (different system prompts),
-  // so entering a mode starts fresh — same spirit as the accepted
-  // "refresh wipes the conversation" limitation. Exiting manually also clears;
-  // nothing half-commits (pushes and the plan save are atomic and confirmed).
+  // Persist only stable, completed states. A plain trailing user message means
+  // the reply failed or is still absent, so it is not a completed turn.
+  useEffect(() => {
+    clearTimeout(saveTimerRef.current);
+    if (!threadId || !messages.length || pending || pushingIdx != null ||
+        savingIdx != null || applyingIdx != null) return undefined;
+    const last = messages[messages.length - 1];
+    if (last.role === 'user' && !last.system) return undefined;
+    const snapshot = JSON.stringify(messages);
+    if (snapshot === savedSnapshotRef.current) return undefined;
+    saveTimerRef.current = setTimeout(() => {
+      api.saveChatThread({ id: threadId, mode: threadMode, messages })
+        .then(() => { savedSnapshotRef.current = snapshot; })
+        .catch((e) => setError(e.message || 'Conversation could not be saved'));
+    }, 500);
+    return () => clearTimeout(saveTimerRef.current);
+  }, [threadId, threadMode, messages, pending, pushingIdx, savingIdx, applyingIdx]);
+
+  // Chat and planning threads cannot share model history. Switching restores
+  // the newest thread for that mode; History exposes older ones and New chat.
   const enterMode = (m) => {
     if (pending) return;
-    setMode(m);
-    setMessages([]);
     setError(null);
+    restoreLatest(m);
   };
 
   // Run one planning turn: send `nextMessages` to the coach, attach any inline
@@ -328,18 +438,30 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
     // Planning-only: a leftover Push button after the mode exits must not
     // fire a planning turn into a chat thread. Duplicate/pushed specs never
     // push twice (name+date identity).
-    if (!planning || !msg?.spec || msg.duplicate || pushingIdx != null || pending) return;
+    if (!planning || !msg?.spec || msg.duplicate || msg.restoreBlocked || pushingIdx != null || pending) return;
     if (alreadyPushed(messages, msg.spec)) {
       setError(`Already pushed "${msg.spec.name}" for ${msg.spec.date}.`);
       return;
     }
     setPushingIdx(i);
     setError(null);
+    const guarded = messages.map((m, j) => (j === i ? { ...m, pushPending: true } : m));
+    let guardStored = false;
     try {
+      await storeNow(guarded);
+      guardStored = true;
+      setMessages(guarded);
       const res = await api.pacerPush(msg.spec);
-      const advanced = messages.map((m, j) => (j === i ? { ...m, pushed: res } : m));
+      const advanced = guarded.map((m, j) => {
+        if (j !== i) return m;
+        const { pushPending, ...rest } = m;
+        return { ...rest, pushed: res };
+      });
       if (res.outcome_unknown) {
-        setError(res.error || 'Garmin may have accepted this workout. Retry to check and adopt it.');
+        setMessages(guarded.map((m, j) => j === i
+          ? { ...m, pushPending: false, restoreBlocked: true }
+          : m));
+        setError(res.error || 'Garmin may have accepted this workout. Refresh the calendar before taking another action.');
         return;
       }
       // Garmin took it but the hub failed to record it (persisted:false). Same
@@ -367,7 +489,14 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
       setMessages(next);
       await runPlanTurn(next);
     } catch (e) {
-      setError(e.message || 'Push failed');
+      if (guardStored) {
+        setMessages(guarded.map((m, j) => j === i
+          ? { ...m, pushPending: false, restoreBlocked: true }
+          : m));
+        setError('The Garmin result is uncertain. Refresh the calendar before taking another action.');
+      } else {
+        setError(`Conversation could not be secured, so nothing was pushed. ${e.message || ''}`.trim());
+      }
     } finally {
       setPushingIdx(null);
     }
@@ -381,16 +510,25 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
   // note so the coach reads the reconcile as done and never re-emits the edit.
   const applyEdit = async (i, force = false) => {
     const msg = messages[i];
-    if (!planning || !msg?.edit || msg.applied || applyingIdx != null || pending) return;
+    if (!planning || !msg?.edit || msg.applied || msg.restoreBlocked || applyingIdx != null || pending) return;
     setApplyingIdx(i);
     setError(null);
+    const guarded = messages.map((m, j) => (j === i ? { ...m, actionPending: true } : m));
+    let guardStored = false;
     try {
+      await storeNow(guarded);
+      guardStored = true;
+      setMessages(guarded);
       const e = msg.edit;
       let res;
       if (e.edit === 'move') {
         res = await api.moveSession(e.schedule_id, e.to_date, force);
         if (res.collision) {
-          setMessages(messages.map((m, j) => (j === i ? { ...m, collision: res.collision } : m)));
+          setMessages(guarded.map((m, j) => {
+            if (j !== i) return m;
+            const { actionPending, ...rest } = m;
+            return { ...rest, collision: res.collision };
+          }));
           return;
         }
       } else if (e.edit === 'delete') {
@@ -401,8 +539,11 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
         res = await api.replaceSession(e.schedule_id, e.spec);
       }
       if (res.outcome_unknown) {
+        setMessages(guarded.map((m, j) => j === i
+          ? { ...m, actionPending: false, restoreBlocked: true }
+          : m));
         setError(res.warning || res.error ||
-          'Garmin may have applied this change. Retry to check and adopt it before continuing.');
+          'Garmin may have applied this change. Refresh the calendar before continuing.');
         return;
       }
       const extra =
@@ -419,11 +560,22 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
               ? `[Draft discarded: "${res.name || res.discarded}" and its ${res.sessions} sessions are deleted. Nothing was on Garmin; the calendar is unchanged.]`
               : `[Updated: ${res.updated.name} on ${res.updated.date} — the revised session is on Garmin.${extra}]`;
       setMessages([
-        ...messages.map((m, j) => (j === i ? { ...m, applied: res } : m)),
+        ...guarded.map((m, j) => {
+          if (j !== i) return m;
+          const { actionPending, ...rest } = m;
+          return { ...rest, applied: res };
+        }),
         { role: 'user', system: true, content: note },
       ]);
     } catch (err) {
-      setError(err.message || 'Edit failed');
+      if (guardStored) {
+        setMessages(guarded.map((m, j) => j === i
+          ? { ...m, actionPending: false, restoreBlocked: true }
+          : m));
+        setError('The calendar result is uncertain. Refresh before taking another action.');
+      } else {
+        setError(`Conversation could not be secured, so nothing was changed. ${err.message || ''}`.trim());
+      }
     } finally {
       setApplyingIdx(null);
     }
@@ -460,30 +612,38 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
           : appMode ? '' : 'h-[500px] w-[360px]'
       } ${appMode ? '' : 'max-w-[calc(100vw-2.5rem)]'} ${planning ? 'border-acc' : 'border-line'}`}
     >
-      <header className="flex items-center justify-between border-b border-line px-4 py-3">
-        <div>
+      <header className="flex items-center justify-between gap-2 border-b border-line px-4 py-3">
+        <div className="min-w-0 shrink">
           <h2 className="font-display text-[0.9375rem] font-bold uppercase tracking-[0.1em] text-ink">
             Coach
           </h2>
           {planning ? (
-            <p className="mt-0.5 font-body text-nano uppercase tracking-[0.18em] text-acc">
+            <p className="mt-0.5 truncate whitespace-nowrap font-body text-nano uppercase tracking-[0.18em] text-acc">
               Planning mode
             </p>
           ) : (
-            <p className="mt-0.5 font-body text-nano uppercase tracking-[0.18em] text-ink-muted">
+            <p className="mt-0.5 truncate whitespace-nowrap font-body text-nano uppercase tracking-[0.18em] text-ink-muted">
               Asks the data, not the workout plan
             </p>
           )}
         </div>
-        <div className="flex items-center gap-1">
+        <div className="flex shrink-0 items-center gap-1">
           {planning ? (
             <>
               <button
                 onClick={() => setMemoryOpen(true)}
                 title="View what the coach remembers"
+                aria-label="Memory"
                 className="rounded-lg border border-line px-2 py-1 text-xs text-ink-secondary transition hover:bg-surface-2"
               >
-                Memory
+                <Icon name="brain" />
+              </button>
+              <button
+                onClick={() => setHistoryOpen(true)}
+                disabled={pending}
+                className="rounded-lg border border-line px-2 py-1 text-xs text-ink-secondary transition hover:bg-surface-2"
+              >
+                History
               </button>
               <button
                 onClick={() => enterMode('chat')}
@@ -498,9 +658,17 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
               <button
                 onClick={() => setMemoryOpen(true)}
                 title="View what the coach remembers"
+                aria-label="Memory"
                 className="rounded-lg border border-line px-2 py-1 text-xs text-ink-secondary transition hover:bg-surface-2"
               >
-                Memory
+                <Icon name="brain" />
+              </button>
+              <button
+                onClick={() => setHistoryOpen(true)}
+                disabled={pending}
+                className="rounded-lg border border-line px-2 py-1 text-xs text-ink-secondary transition hover:bg-surface-2"
+              >
+                History
               </button>
               <button
                 onClick={() => enterMode('planning')}
@@ -520,17 +688,8 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
                 {copyState === 'copied' ? 'Copied ✓'
                   : copyState === 'error' ? 'Failed'
                   : copyState === 'copying' ? '…'
-                  : <><Icon name="clipboard" /> Context</>}
+                  : <Icon name="clipboard" />}
               </button>
-              {messages.length > 0 && (
-                <button
-                  onClick={() => { setMessages([]); setError(null); }}
-                  aria-label="Clear conversation"
-                  className="rounded-lg border border-line px-2 py-1 text-xs text-ink-secondary transition hover:bg-surface-2"
-                >
-                  Clear
-                </button>
-              )}
             </>
           )}
           {!appMode && (
@@ -546,6 +705,11 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
       </header>
 
       <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
+        {restoreNote && (
+          <p className="rounded-xl border border-line bg-surface-2 p-3 text-xs text-ink-secondary">
+            {restoreNote}
+          </p>
+        )}
         {messages.length === 0 && (
           <p className="mt-2 text-center text-xs text-ink-muted">
             {planning
@@ -608,6 +772,10 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
                           : m.edit.edit === 'discard_plan' ? 'Draft discarded ✓'
                           : 'Updated ✓'}
                       </p>
+                    ) : m.restoreBlocked ? (
+                      <p className="text-xs text-sem-red">
+                        Confirmation unavailable after an interrupted action. Refresh the calendar first.
+                      </p>
                     ) : !planning ? (
                       <p className="text-xs text-ink-muted">Not applied — planning ended.</p>
                     ) : (
@@ -655,6 +823,10 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
                           <span className="font-mono">{m.pushed.workout_id}</span>
                         </p>
                       )
+                    ) : m.restoreBlocked ? (
+                      <p className="text-xs text-sem-red">
+                        Push unavailable after an interrupted request. Refresh the calendar first.
+                      </p>
                     ) : planning ? (
                       <button
                         onClick={() => push(i)}
@@ -762,6 +934,15 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
             <ActivationFlow variant="modal" expectPlanId={activateFor} />
           </div>
         </div>
+      )}
+      {historyOpen && (
+        <ChatHistory
+          currentId={threadId}
+          mode={threadMode}
+          onClose={() => setHistoryOpen(false)}
+          onNew={newThread}
+          onOpen={openThread}
+        />
       )}
       {memoryOpen && <CoachMemory appMode={appMode} onClose={() => setMemoryOpen(false)} />}
     </div>

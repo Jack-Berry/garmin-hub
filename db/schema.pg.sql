@@ -296,6 +296,20 @@ CREATE TABLE IF NOT EXISTS coach_notes (
   date_range_end               date
 );
 
+-- Saved coach conversations shared by the Mac dashboard and iPhone app.
+-- messages_json contains only client conversation/UI state, never credentials.
+CREATE TABLE IF NOT EXISTS chat_threads (
+  thread_id                    text PRIMARY KEY,
+  mode                         text NOT NULL CHECK (mode IN ('chat', 'planning')),
+  title                        text NOT NULL,
+  messages_json                jsonb NOT NULL,
+  created_at                   timestamptz NOT NULL DEFAULT now(),
+  updated_at                   timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_threads_updated_at
+  ON chat_threads (updated_at DESC);
+
 CREATE TABLE IF NOT EXISTS profile (
   id                           integer PRIMARY KEY CHECK (id = 1),
   shoes_json                   jsonb,
@@ -365,6 +379,8 @@ REVOKE CREATE ON SCHEMA public FROM PUBLIC;  -- PG14 default is too permissive
 GRANT USAGE ON SCHEMA public TO garminhub_ro, garminhub_rw;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO garminhub_ro;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO garminhub_rw;
+GRANT SELECT ON chat_threads TO garminhub_ro;
+GRANT SELECT, INSERT, UPDATE, DELETE ON chat_threads TO garminhub_rw;
 -- UPDATE on sequences permits only nextval/setval (no DDL) — the data-load
 -- ETL needs setval to reposition the coach_notes identity after loading ids.
 GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO garminhub_rw;
