@@ -44,6 +44,7 @@ build/
 .stage10b-evidence/
 .safety-net-evidence/
 .cache/
+/qa/
 
 # --- Env / tooling ---
 .DS_Store

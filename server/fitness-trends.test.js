@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { buildFitnessSeries, nextRace } = require('./fitness-trends');
+const { sectionTrainingLoad } = require('./context');
 
 const shift = (date, days) => {
   const value = new Date(`${date}T00:00:00Z`);
@@ -23,6 +24,16 @@ test('fitness output is byte stable for the same input', () => {
   const rows = [{ date: '2026-10-14', load: 42 }];
   assert.equal(JSON.stringify(buildFitnessSeries(rows, '2026-10-15', 30)), JSON.stringify(buildFitnessSeries(rows, '2026-10-15', 30)));
   assert.deepEqual(buildFitnessSeries([], '2026-10-15', 30), []);
+});
+
+test('coach training-load context keeps its compact legacy shape', async () => {
+  const db = { all: async () => [{ date: '2026-10-15', load: 100 }] };
+  const first = await sectionTrainingLoad(db, '2026-10-15');
+  const second = await sectionTrainingLoad(db, '2026-10-15');
+  assert.deepEqual(Object.keys(first), ['method', 'today', 'trend_8w']);
+  assert.equal(JSON.stringify(first).length, JSON.stringify(second).length);
+  assert.equal(JSON.stringify(first).length, 610);
+  assert.equal('series' in first, false);
 });
 
 test('countdown chooses the next valid future race and resolves goal and prediction', () => {

@@ -1,23 +1,26 @@
 import { useState } from 'react';
 import {
-  Area, AreaChart, CartesianGrid, Line, LineChart, ResponsiveContainer,
+  Area, CartesianGrid, ComposedChart, Line, LineChart, ResponsiveContainer,
   Tooltip, XAxis, YAxis,
 } from 'recharts';
 import { api } from '../api';
 import { useFetch } from '../useFetch';
-import { Section, StateWrap, AXIS, GRID, INK } from '../ui';
+import { Section, StateWrap, AXIS, GRID, INK, MUTED, SEM_AMBER } from '../ui';
 import { useAccentHex } from '../accent';
 
 const dateLabel = (value) => value?.slice(5) || '';
-const signed = (seconds) => {
-  const sign = seconds < 0 ? '-' : '';
+const duration = (seconds) => {
   const s = Math.abs(Math.round(seconds));
-  return `${sign}${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 };
 
 function FitnessChart() {
   const [windowDays, setWindowDays] = useState(84);
   const fitness = useFetch(() => api.fitness(windowDays), [windowDays]);
+  const accent = useAccentHex();
+  const data = fitness.data?.series || [];
+  const latestDot = (props) => props.index === data.length - 1
+    ? <circle cx={props.cx} cy={props.cy} r={3.5} fill={accent} stroke={accent} /> : null;
   return (
     <Section title="Fitness and fatigue" subtitle="Derived from Garmin training load">
       <StateWrap loading={fitness.loading} error={fitness.error} empty={fitness.data && !fitness.data.series?.length}>
@@ -33,16 +36,16 @@ function FitnessChart() {
         </div>
         <div className="h-56 min-w-0 sm:h-64">
           <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={fitness.data?.series || []} margin={{ top: 8, right: 4, bottom: 0, left: -18 }}>
-              <defs><linearGradient id="tsbFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#d5a83c" stopOpacity={0.28} /><stop offset="100%" stopColor="#d5a83c" stopOpacity={0.03} /></linearGradient></defs>
+            <ComposedChart data={data} margin={{ top: 8, right: 4, bottom: 0, left: -18 }}>
+              <defs><linearGradient id="tsbFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={SEM_AMBER} stopOpacity={0.28} /><stop offset="100%" stopColor={SEM_AMBER} stopOpacity={0.03} /></linearGradient></defs>
               <CartesianGrid strokeDasharray="3 3" stroke={GRID} vertical={false} />
               <XAxis dataKey="date" tickFormatter={dateLabel} tick={{ fontSize: 10, fill: AXIS }} tickLine={false} axisLine={false} minTickGap={22} />
-              <YAxis tick={{ fontSize: 10, fill: AXIS }} tickLine={false} axisLine={false} />
+              <YAxis domain={['dataMin', 'dataMax']} tick={{ fontSize: 10, fill: AXIS }} tickLine={false} axisLine={false} />
               <Tooltip labelFormatter={(v) => v} contentStyle={{ borderRadius: 8, border: 'none', fontSize: 12 }} />
-              <Area type="monotone" dataKey="tsb" stroke="#d5a83c" fill="url(#tsbFill)" strokeWidth={1.5} />
-              <Line type="monotone" dataKey="ctl" stroke={INK} dot={false} strokeWidth={2} />
-              <Line type="monotone" dataKey="atl" stroke="#b5b5bd" dot={false} strokeWidth={2} />
-            </AreaChart>
+              <Area type="monotone" dataKey="tsb" stroke={SEM_AMBER} fill="url(#tsbFill)" strokeWidth={1.5} dot={latestDot} isAnimationActive={false} />
+              <Line type="monotone" dataKey="ctl" stroke={INK} dot={latestDot} strokeWidth={2} isAnimationActive={false} />
+              <Line type="monotone" dataKey="atl" stroke={MUTED} dot={latestDot} strokeWidth={2} isAnimationActive={false} />
+            </ComposedChart>
           </ResponsiveContainer>
         </div>
       </StateWrap>
@@ -54,6 +57,7 @@ const predictionLabels = { '5k': '5K', '10k': '10K', half: 'Half', marathon: 'Ma
 function PredictionChart() {
   const [distance, setDistance] = useState('5k');
   const predictions = useFetch(() => api.predictionHistory(180));
+  const accent = useAccentHex();
   const rows = predictions.data?.series || [];
   const values = rows.map((row) => row[distance]).filter((v) => v != null);
   const change = values.length > 1 ? values.at(-1) - values[0] : null;
@@ -66,16 +70,16 @@ function PredictionChart() {
               <button key={key} onClick={() => setDistance(key)} className={`rounded-md px-2 py-1 font-body text-nano font-semibold uppercase tracking-[0.08em] ${distance === key ? 'bg-surface-3 text-ink' : 'text-ink-muted hover:text-ink'}`}>{label}</button>
             ))}
           </div>
-          {change != null && <span className={`font-mono text-nano ${change <= 0 ? 'text-acc' : 'text-ink-muted'}`}>{change <= 0 ? 'down' : 'up'} {signed(change)} since {rows.find((r) => r[distance] != null)?.date}</span>}
+          {change != null && <span className="font-mono text-nano text-ink-secondary">{change <= 0 ? 'down' : 'up'} {duration(change)} since {rows.find((r) => r[distance] != null)?.date}</span>}
         </div>
         <div className="h-56 min-w-0 sm:h-64">
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={rows} margin={{ top: 8, right: 4, bottom: 0, left: -10 }}>
               <CartesianGrid strokeDasharray="3 3" stroke={GRID} vertical={false} />
               <XAxis dataKey="date" tickFormatter={dateLabel} tick={{ fontSize: 10, fill: AXIS }} tickLine={false} axisLine={false} minTickGap={22} />
-              <YAxis reversed tickFormatter={(v) => signed(v)} tick={{ fontSize: 10, fill: AXIS }} tickLine={false} axisLine={false} />
-              <Tooltip labelFormatter={(v) => v} formatter={(v) => [signed(v), predictionLabels[distance]]} contentStyle={{ borderRadius: 8, border: 'none', fontSize: 12 }} />
-              <Line type="monotone" dataKey={distance} stroke={useAccentHex()} dot={false} connectNulls strokeWidth={2.5} />
+              <YAxis reversed tickFormatter={(v) => duration(v)} tick={{ fontSize: 10, fill: AXIS }} tickLine={false} axisLine={false} />
+              <Tooltip labelFormatter={(v) => v} formatter={(v) => [duration(v), predictionLabels[distance]]} contentStyle={{ borderRadius: 8, border: 'none', fontSize: 12 }} />
+              <Line type="monotone" dataKey={distance} stroke={INK} dot={(props) => props.index === rows.length - 1 ? <circle cx={props.cx} cy={props.cy} r={3.5} fill={accent} stroke={accent} /> : null} connectNulls strokeWidth={2.5} isAnimationActive={false} />
             </LineChart>
           </ResponsiveContainer>
         </div>
@@ -99,7 +103,7 @@ export function RaceCountdown() {
       <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
         <div><div className="font-body text-nano font-semibold uppercase tracking-[0.18em] text-ink-muted">Next race</div><div className="mt-1 font-display text-lg font-extrabold uppercase text-ink">{race.name}</div></div>
         <div className="font-mono text-xl font-semibold tabular-nums text-acc">{race.days_to_go === 0 ? 'Today' : `${race.days_to_go} days`}</div>
-        <div className="flex gap-4 font-mono text-sm text-ink-secondary"><span>Goal {race.goal?.display || 'Not set'}</span>{race.prediction && <span>Garmin {race.prediction.display}</span>}</div>
+        <div className="flex gap-4 font-mono text-sm text-ink-secondary"><span>Goal {race.goal?.display || 'not set'}</span>{race.prediction && <span>Garmin {race.prediction.display}</span>}</div>
       </div>
     </section>
   );

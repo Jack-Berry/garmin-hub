@@ -1269,7 +1269,7 @@ async function activityDetail(db, { date, activityId } = {}) {
 
 module.exports = {
   buildContext, buildPlanningContext, buildDayFocus, renderContextDump,
-  scheduledSummary, activityDetail, localDate,
+  scheduledSummary, activityDetail, localDate, shiftDate,
   // Section builders — composable by surface (Stage 10c) and reusable by the
   // 10d tools. Each takes the caller's local `today`; none computes its own.
   sectionProfile, sectionMemory, sectionWeeklyReview, sectionRecentRuns, sectionRecovery,

@@ -1,11 +1,9 @@
 const { computeTrainingLoad } = require('./training-load');
 const { resolveGoalPaces } = require('./goalpaces');
+const { localDate, shiftDate } = require('./context');
 
 const DAY_MS = 86400000;
-const shiftDate = (value, days) => {
-  const date = new Date(`${value}T00:00:00Z`);
-  return new Date(date.getTime() + days * DAY_MS).toISOString().slice(0, 10);
-};
+const clampDays = (value, fallback = 120) => Math.min(366, Math.max(1, Math.floor(Number(value) || fallback)));
 
 const validDate = (value) => {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value || '')) return false;
@@ -30,7 +28,7 @@ function buildFitnessSeries(rows, today, days = 120) {
   const firstData = loadRows.reduce((min, row) => (row.date < min ? row.date : min), loadRows[0].date);
   const windowStart = shiftDate(today, -(days - 1));
   const start = firstData > windowStart ? firstData : windowStart;
-  const calculated = computeTrainingLoad(loadRows, today, days, { warmupDays: 365 }).series;
+  const calculated = computeTrainingLoad(loadRows, today, days, { warmupDays: 365, includeSeries: true }).series;
   return calculated.filter((row) => row.date >= start);
 }
 
@@ -78,3 +76,49 @@ function nextRace(races, records, predictions, today) {
 }
 
 module.exports = { buildFitnessSeries, buildPredictionHistory, nextRace, fmtDuration, validDate };
+
+function createFitnessRouter({ db }) {
+  const express = require('express');
+  const router = express.Router();
+  const handler = (fn) => async (req, res) => {
+    try { await fn(req, res); } catch (error) { res.status(500).json({ error: error.message }); }
+  };
+
+  router.get('/fitness', handler(async (req, res) => {
+    const days = clampDays(req.query.days);
+    const today = localDate();
+    const from = shiftDate(today, -(days + 365 - 1));
+    const rows = await db.all(
+      `SELECT start_time_local::date AS date, SUM(activity_training_load) AS load
+       FROM activities
+       WHERE activity_training_load IS NOT NULL
+         AND start_time_local::date >= $1 AND start_time_local::date <= $2
+       GROUP BY start_time_local::date ORDER BY date`, [from, today]);
+    res.json({ days, method: 'derived from Garmin training load', series: buildFitnessSeries(rows, today, days) });
+  }));
+
+  router.get('/race-predictions/history', handler(async (req, res) => {
+    const days = clampDays(req.query.days, 180);
+    const today = localDate();
+    const from = shiftDate(today, -(days - 1));
+    const rows = await db.all(
+      `SELECT calendar_date, time_5k_s, time_10k_s, time_half_s, time_marathon_s
+       FROM race_predictions WHERE calendar_date >= $1 AND calendar_date <= $2
+       ORDER BY calendar_date`, [from, today]);
+    res.json({ days, series: buildPredictionHistory(rows, days) });
+  }));
+
+  router.get('/race-countdown', handler(async (req, res) => {
+    const today = localDate();
+    const profile = await db.get('SELECT races_json FROM profile WHERE id = 1');
+    const records = await db.all('SELECT label, value, value_kind FROM personal_records');
+    const predictions = await db.all(
+      `SELECT calendar_date, time_5k_s, time_10k_s, time_half_s, time_marathon_s
+       FROM race_predictions ORDER BY calendar_date DESC LIMIT 1`);
+    res.json(nextRace(Array.isArray(profile?.races_json) ? profile.races_json : [], records, predictions, today));
+  }));
+  return router;
+}
+
+module.exports.createFitnessRouter = createFitnessRouter;
+module.exports.clampDays = clampDays;
