@@ -16,6 +16,7 @@ import StatusChip from './StatusChip';
 import ProactiveCards from './ProactiveCards';
 import TrendsCharts from './trends/TrendsCharts';
 import ShoeMileage from './gear/ShoeMileage';
+import Calendar from './calendar/Calendar';
 
 // How stale the data may be before opening the dashboard pulls it itself.
 // 30 minutes: long enough that a reload, a second tab or a quick tab-switch
@@ -338,6 +339,7 @@ export default function App() {
           {/* Saved-plan activation (Stage 9c): push to Garmin + the guided
               cancel-Runna step. Renders only while there's choreography left. */}
           {(!appMode || tab === 'today') && <PlanActivation />}
+          {(!appMode || tab === 'today' || tab === 'activities') && <Calendar />}
           {/* Lower dashboard — a full-width Recovery band on top, then Recent
               activities (wide, table) beside Upcoming planned (narrow, list).
               The two columns top-align and collapse to a single column on
