@@ -16,10 +16,14 @@ const pace = (seconds) => {
 };
 const finite = (value) => value != null && Number.isFinite(Number(value));
 const sum = (values) => values.reduce((total, value) => total + Number(value || 0), 0);
+const word = (count, singular) => `${count} ${count === 1 ? singular : `${singular}s`}`;
 const clampWeeks = (value, fallback, max) => {
   const number = Number(value);
   return Number.isInteger(number) ? Math.min(max, Math.max(1, number)) : fallback;
 };
+const PARTIAL_DISTANCE_RATIO = 0.7;
+const HILLY_GAIN_PER_KM = 25;
+const NON_STEADY_NAME = /race|parkrun|interval|tempo|threshold|fartlek|reps?|speed|track|progression/i;
 
 const weekRows = (from, to) => {
   const first = mondayOf(from);
@@ -28,7 +32,18 @@ const weekRows = (from, to) => {
   return rows;
 };
 
-const longRunDrift = (laps) => {
+const longRunDrift = (run, laps) => {
+  const runKm = Number(run.distance_m || 0) / 1000;
+  const zones = [run.hr_zone1_s, run.hr_zone2_s, run.hr_zone3_s, run.hr_zone4_s, run.hr_zone5_s];
+  const recorded = sum(zones.filter(finite));
+  const easyShare = recorded > 0 ? sum(zones.slice(0, 2)) / recorded : 0;
+  const hilly = finite(run.elevation_gain_m) && runKm > 0
+    && Number(run.elevation_gain_m) / runKm > HILLY_GAIN_PER_KM;
+  const structured = new Set(laps.map((lap) => lap.intensity_type).filter(Boolean)).size > 1
+    || laps.some((lap) => /interval|recovery|rest|warm|cool/i.test(lap.intensity_type || ''));
+  if (runKm < 10 || easyShare < 0.7 || hilly || structured || NON_STEADY_NAME.test(run.name || '')) {
+    return null;
+  }
   const valid = laps.filter((lap) => finite(lap.distance_m) && Number(lap.distance_m) > 0
     && finite(lap.duration_s) && Number(lap.duration_s) > 0 && finite(lap.avg_hr) && Number(lap.avg_hr) > 0);
   const total = sum(valid.map((lap) => lap.distance_m));
@@ -41,9 +56,14 @@ const longRunDrift = (laps) => {
   }
   const efficiency = (part) => {
     const seconds = sum(part.map((lap) => lap.duration_s));
-    const metres = sum(part.map((lap) => lap.distance_m));
+    const speed = sum(part.map((lap) => {
+      const lapSpeed = finite(lap.avg_grade_adjusted_speed_mps)
+        ? Number(lap.avg_grade_adjusted_speed_mps)
+        : Number(lap.distance_m) / Number(lap.duration_s);
+      return lapSpeed * Number(lap.duration_s);
+    })) / seconds;
     const hr = sum(part.map((lap) => Number(lap.avg_hr) * Number(lap.duration_s))) / seconds;
-    return (metres / seconds) / hr;
+    return speed / hr;
   };
   if (!halves[0].length || !halves[1].length) return null;
   const first = efficiency(halves[0]);
@@ -58,13 +78,14 @@ async function trainingHistorySummary(db, input = {}, today) {
     `SELECT activity_id, start_time_local::date AS date, name, distance_m, duration_s,
             avg_hr, avg_speed_mps, avg_grade_adjusted_speed_mps,
             hr_zone1_s, hr_zone2_s, hr_zone3_s, hr_zone4_s, hr_zone5_s,
-            activity_training_load
+            activity_training_load, elevation_gain_m
      FROM activities
      WHERE activity_group = 'run' AND start_time_local::date >= $1
        AND start_time_local::date <= $2
      ORDER BY start_time_local`, [from, today]);
   const laps = activities.length ? await db.all(
-    `SELECT activity_id, lap_index, distance_m, duration_s, avg_hr
+    `SELECT activity_id, lap_index, distance_m, duration_s, avg_hr,
+            avg_grade_adjusted_speed_mps, intensity_type
      FROM laps WHERE activity_id = ANY($1::bigint[]) ORDER BY activity_id, lap_index`,
     [activities.map((row) => row.activity_id)]) : [];
   const races = await db.all(
@@ -114,7 +135,7 @@ async function trainingHistorySummary(db, input = {}, today) {
     comparisonBand == null
       ? 'Aerobic efficiency method: unavailable because no run had at least 70% of recorded HR-zone time in Z1+Z2.'
       : `Aerobic efficiency method: average grade-adjusted pace for easy runs with average HR ${comparisonBand}-${comparisonBand + 4} bpm; ordinary average speed is the fallback when GAP is absent.`,
-    'HR drift method: speed-to-HR efficiency change from the first versus second distance half of lap data on runs of at least 10 km; positive means efficiency fell.',
+    'Approximate HR drift method: grade-adjusted speed-to-HR efficiency change from the first versus second distance half of lap data on steady easy or long runs of at least 10 km; races, structured sessions, and runs over 25 m climbing per km are excluded; positive means efficiency fell.',
   ];
   for (const [week, runs] of [...grouped].sort((a, b) => a[0].localeCompare(b[0]))) {
     const distance = sum(runs.map((run) => run.distance_m)) / 1000;
@@ -134,19 +155,24 @@ async function trainingHistorySummary(db, input = {}, today) {
       const speed = Number(run.avg_grade_adjusted_speed_mps || run.avg_speed_mps || 0);
       return speed > 0 ? Number(run.distance_m) / speed : 0;
     }));
-    const drifts = runs.map((run) => longRunDrift(lapsByActivity.get(run.activity_id) || [])).filter(finite);
-    const efficiency = metres > 0 && gapSeconds > 0 ? `${pace(gapSeconds / (metres / 1000))}/km` : 'n/a';
+    const drifts = runs.map((run) => longRunDrift(run, lapsByActivity.get(run.activity_id) || [])).filter(finite);
+    const efficiency = comparable.length < 2
+      ? `insufficient (${word(comparable.length, 'qualifying run')})`
+      : metres > 0 && gapSeconds > 0
+        ? `${pace(gapSeconds / (metres / 1000))}/km (${word(comparable.length, 'run')})`
+        : `n/a (${word(comparable.length, 'run')})`;
     const drift = drifts.length ? `${(sum(drifts) / drifts.length).toFixed(1)}%` : 'n/a';
     const load = loadValues.length ? Math.round(sum(loadValues)) : 'n/a';
     const raceText = raceByWeek.get(week)?.join('; ') || 'none';
-    lines.push(`${week}: ${distance.toFixed(1)}km, ${runs.length} runs, longest ${longest.toFixed(1)}km; HR-zone min easy/steady/hard ${zoneMinutes([1, 2])}/${zoneMinutes([3])}/${zoneMinutes([4, 5])}; load ${load}; aerobic efficiency ${efficiency}; long-run drift ${drift}; races ${raceText}.`);
+    lines.push(`${week}: ${distance.toFixed(1)}km, ${word(runs.length, 'run')}, longest ${longest.toFixed(1)}km; HR-zone min easy/steady/hard ${zoneMinutes([1, 2])}/${zoneMinutes([3])}/${zoneMinutes([4, 5])}; load ${load}; aerobic efficiency ${efficiency}; long-run drift ${drift}; races ${raceText}.`);
   }
   return lines.join('\n');
 }
 
 async function planComplianceSummary(db, input = {}, today) {
   const weeks = clampWeeks(input.weeks, 4, 12);
-  const from = shiftDate(mondayOf(today), -(weeks - 1) * 7);
+  const currentMonday = mondayOf(today);
+  const from = shiftDate(currentMonday, -7 * (weeks - (today === currentMonday ? 0 : 1)));
   const to = shiftDate(today, -1);
   const rows = await db.all(
     `SELECT p.calendar_date, COALESCE(gh.title, p.title) AS title,
@@ -176,6 +202,7 @@ async function planComplianceSummary(db, input = {}, today) {
 
   // Matching is deliberately simple and auditable: same calendar day only,
   // then nearest planned distance, with each completed run used at most once.
+  // The 70% partial threshold mirrors planDayStatus in the web week strip.
   const results = [];
   for (const session of planned) {
     const candidates = byDate.get(session.calendar_date) || [];
@@ -191,7 +218,7 @@ async function planComplianceSummary(db, input = {}, today) {
     const plannedKm = finite(session.estimated_distance_m) ? Number(session.estimated_distance_m) / 1000 : null;
     const doneKm = match && finite(match.distance_m) ? Number(match.distance_m) / 1000 : null;
     const status = !match ? 'missed'
-      : plannedKm != null && doneKm < plannedKm * 0.8 ? 'partial'
+      : plannedKm != null && doneKm < plannedKm * PARTIAL_DISTANCE_RATIO ? 'partial'
         : 'completed';
     results.push({
       date: session.calendar_date, title: session.title || 'workout', source: session.source,
@@ -213,14 +240,14 @@ async function planComplianceSummary(db, input = {}, today) {
     if (row.status === 'completed') weekly.get(week).completed++;
   }
   const lines = [
-    `Plan compliance ${from} to ${to} (${weeks} weeks; today is excluded until complete):`,
-    'Match method: same calendar day, nearest planned distance, one completed run per planned session; under 80% of planned distance is partial.',
+    `Plan compliance ${from} to ${to} (${word(weeks, 'week')}; today is excluded until complete):`,
+    'Match method: same calendar day, nearest planned distance, one completed run per planned session; under 70% of planned distance is partial.',
   ];
   for (const row of results) {
-    const plannedKm = row.plannedKm == null ? 'n/a' : row.plannedKm.toFixed(1);
-    const doneKm = row.doneKm == null ? 'n/a' : row.doneKm.toFixed(1);
+    const plannedDistance = row.plannedKm == null ? 'unknown' : `${row.plannedKm.toFixed(1)}km`;
+    const doneDistance = row.doneKm == null ? 'unknown' : `${row.doneKm.toFixed(1)}km`;
     const source = row.status === 'extra' ? '' : ` [${row.source}]`;
-    lines.push(`${row.date} (${dowOf(row.date)}): ${row.status} - ${row.title}${source}; planned ${plannedKm}km, done ${doneKm}km.`);
+    lines.push(`${row.date} (${dowOf(row.date)}): ${row.status} - ${row.title}${source}; planned ${plannedDistance}, done ${doneDistance}.`);
   }
   for (const [week, counts] of [...weekly].sort((a, b) => a[0].localeCompare(b[0]))) {
     const pct = counts.planned ? Math.round(100 * counts.completed / counts.planned) : null;
@@ -230,6 +257,7 @@ async function planComplianceSummary(db, input = {}, today) {
 }
 
 module.exports = {
+  longRunDrift,
   trainingHistorySummary,
   planComplianceSummary,
 };

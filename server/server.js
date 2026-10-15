@@ -8,6 +8,7 @@ const { spawn } = require('child_process');
 const express = require('express');
 const { db, writeDb } = require('./db');
 const { buildContext, renderContextDump, localDate } = require('./context');
+const { parseTrainingBalance } = require('./training-balance');
 const {
   collapseRaceDuplicates,
   applyAppPlanPrecedence,
@@ -171,35 +172,8 @@ app.get('/api/training-balance', handler(async (req, res) => {
   const row = await db.get(
     `SELECT calendar_date, raw_json FROM recovery
      WHERE raw_json IS NOT NULL ORDER BY calendar_date DESC LIMIT 1`);
-  const ts = row && row.raw_json.training_status; // raw_json is jsonb: already an object
-  const first = (m) => (m ? Object.values(m)[0] : null);
-
-  const lb = first(ts?.mostRecentTrainingLoadBalance?.metricsTrainingLoadBalanceDTOMap);
-  const st = first(ts?.mostRecentTrainingStatus?.latestTrainingStatusData);
-  if (!lb && !st) return res.json(null);
-
-  const bar = (key, label, value, min, max) => ({
-    key,
-    label,
-    value: value != null ? Math.round(value) : null,
-    target_min: min ?? null,
-    target_max: max ?? null,
-  });
-  const acwr = st?.acuteTrainingLoadDTO;
-
-  res.json({
-    date: row.calendar_date,
-    load_focus: lb ? {
-      feedback: lb.trainingBalanceFeedbackPhrase || null,
-      bars: [
-        bar('low_aerobic', 'Low Aerobic', lb.monthlyLoadAerobicLow, lb.monthlyLoadAerobicLowTargetMin, lb.monthlyLoadAerobicLowTargetMax),
-        bar('high_aerobic', 'High Aerobic', lb.monthlyLoadAerobicHigh, lb.monthlyLoadAerobicHighTargetMin, lb.monthlyLoadAerobicHighTargetMax),
-        bar('anaerobic', 'Anaerobic', lb.monthlyLoadAnaerobic, lb.monthlyLoadAnaerobicTargetMin, lb.monthlyLoadAnaerobicTargetMax),
-      ],
-    } : null,
-    training_status: st ? { phrase: st.trainingStatusFeedbackPhrase || null, code: st.trainingStatus ?? null } : null,
-    acwr: acwr ? { ratio: acwr.dailyAcuteChronicWorkloadRatio ?? null, status: acwr.acwrStatus || null } : null,
-  });
+  const parsed = parseTrainingBalance(row?.raw_json);
+  res.json(parsed ? { date: row.calendar_date, ...parsed } : null);
 }));
 
 // Weekly mileage aggregate: totals per ISO week (Monday start), last ~12 weeks.

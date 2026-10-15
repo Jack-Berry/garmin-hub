@@ -11,6 +11,7 @@ const {
 const { computeZones } = require('./zones');
 const { resolveGoalPaces } = require('./goalpaces');
 const { computeTrainingLoad } = require('./training-load');
+const { parseTrainingBalance } = require('./training-balance');
 // Guard bounds — the SAME file the enforcer (ingest/pacer_cli.py) and the
 // builder's negative-split shape load, so the advisory copy can't drift.
 const GUARD_BOUNDS = require('../ingest/guard_bounds.json');
@@ -202,7 +203,7 @@ async function sectionProfile(db) {
       .filter((r) => r && (r.name || r.date))
       .map((r) => {
         const parts = [r.name || 'race'];
-        if (r.date) parts.push(`on ${r.date}`);
+        if (r.date) parts.push(`on ${r.date} (${dowOf(r.date)})`);
         parts.push(r.goal_time ? `goal ${r.goal_time}` : 'no goal time (just running it)');
         return parts.join(' — ');
       }),
@@ -295,7 +296,8 @@ const RECOVERY_COLS = `calendar_date, hrv_last_night, hrv_status,
             resting_hr, sleep_score, readiness_score, readiness_level,
             readiness_context, readiness_wake_score, readiness_wake_level,
             acute_load, acwr_factor_pct, recovery_time_minutes,
-            recovery_time_factor_pct, training_status, bb_charged, bb_drained`;
+            recovery_time_factor_pct, training_status, bb_charged, bb_drained,
+            raw_json`;
 
 // Which reading `readiness_score` actually is. Garmin re-reads readiness after
 // a workout, so on any day with a run the stored score is the POST-exercise
@@ -309,32 +311,37 @@ const READINESS_WHEN = {
 
 // One recovery row -> one snapshot. An absent row yields a snapshot of nulls
 // (not null) — that's the long-standing shape of `recovery.latest`.
-const recoverySnapshot = (r = {}) => ({
-  date: r.calendar_date,
-  hrv: r.hrv_last_night,
-  hrv_status: r.hrv_status,
-  hrv_baseline: [r.hrv_baseline_balanced_low, r.hrv_baseline_balanced_upper],
-  resting_hr: r.resting_hr,
-  sleep_score: r.sleep_score,
-  readiness_score: r.readiness_score,
-  readiness_level: r.readiness_level,
-  // When that score was taken, and the day's pre-training baseline beside it.
-  // Both null on rows ingested before this was captured — unknown, not "wake".
-  readiness_measured: READINESS_WHEN[r.readiness_context] || null,
-  readiness_on_waking: r.readiness_wake_score ?? null,
-  readiness_level_on_waking: r.readiness_wake_level ?? null,
-  acute_load: r.acute_load ?? null,
-  acwr_factor_pct: r.acwr_factor_pct ?? null,
-  recovery_time_minutes: r.recovery_time_minutes ?? null,
-  recovery_time_factor_pct: r.recovery_time_factor_pct ?? null,
-  training_status: r.training_status ?? null,
-  body_battery: r.bb_charged == null && r.bb_drained == null ? null : {
-    charged: r.bb_charged ?? null,
-    drained: r.bb_drained ?? null,
-    net: r.bb_charged != null && r.bb_drained != null
-      ? r.bb_charged - r.bb_drained : null,
-  },
-});
+const recoverySnapshot = (r = {}) => {
+  const balance = parseTrainingBalance(r.raw_json);
+  return {
+    date: r.calendar_date,
+    hrv: r.hrv_last_night,
+    hrv_status: r.hrv_status,
+    hrv_baseline: [r.hrv_baseline_balanced_low, r.hrv_baseline_balanced_upper],
+    resting_hr: r.resting_hr,
+    sleep_score: r.sleep_score,
+    readiness_score: r.readiness_score,
+    readiness_level: r.readiness_level,
+    // When that score was taken, and the day's pre-training baseline beside it.
+    // Both null on rows ingested before this was captured, unknown rather than "wake".
+    readiness_measured: READINESS_WHEN[r.readiness_context] || null,
+    readiness_on_waking: r.readiness_wake_score ?? null,
+    readiness_level_on_waking: r.readiness_wake_level ?? null,
+    acute_load: r.acute_load ?? null,
+    acwr: balance?.acwr || null,
+    // Garmin readiness factor score, normally 52 to 100. This is not ACWR.
+    acwr_readiness_factor_score: r.acwr_factor_pct ?? null,
+    recovery_time_minutes: r.recovery_time_minutes ?? null,
+    recovery_time_factor_pct: r.recovery_time_factor_pct ?? null,
+    training_status: r.training_status ?? null,
+    body_battery: r.bb_charged == null && r.bb_drained == null ? null : {
+      charged: r.bb_charged ?? null,
+      drained: r.bb_drained ?? null,
+      net: r.bb_charged != null && r.bb_drained != null
+        ? r.bb_charged - r.bb_drained : null,
+    },
+  };
+};
 
 // Recovery for ONE day (`asOf`, default today): that day's snapshot plus the
 // trailing-window trend averages. Note `latest` is the newest row at or before
@@ -351,6 +358,8 @@ async function sectionRecovery(db, asOf) {
     const vals = recRows.map((r) => r[key]).filter((v) => v != null);
     return vals.length ? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length) : null;
   };
+  const ratios = recRows.map((r) => parseTrainingBalance(r.raw_json)?.acwr?.ratio)
+    .filter((value) => value != null);
 
   return {
     latest: recoverySnapshot(recRows[0]),
@@ -361,7 +370,10 @@ async function sectionRecovery(db, asOf) {
       readiness_score: avg('readiness_score'),
       readiness_on_waking: avg('readiness_wake_score'),
       acute_load: avg('acute_load'),
-      acwr_factor_pct: avg('acwr_factor_pct'),
+      acwr_ratio: ratios.length
+        ? +(ratios.reduce((total, value) => total + value, 0) / ratios.length).toFixed(2)
+        : null,
+      acwr_readiness_factor_score: avg('acwr_factor_pct'),
       recovery_time_minutes: avg('recovery_time_minutes'),
       recovery_time_factor_pct: avg('recovery_time_factor_pct'),
       body_battery_charged: avg('bb_charged'),
@@ -432,13 +444,15 @@ async function sectionUpcoming(db, today) {
 // exponentially weighted averages. The pure calculation lives separately so
 // its recurrence is directly unit tested.
 async function sectionTrainingLoad(db, today) {
+  const warmupDays = 365;
   const rows = await db.all(
-    `SELECT start_time_local::date AS date, activity_training_load AS load
+    `SELECT start_time_local::date AS date, SUM(activity_training_load) AS load
      FROM activities
      WHERE activity_training_load IS NOT NULL AND start_time_local::date >= $1
        AND start_time_local::date <= $2
-     ORDER BY start_time_local`, [shiftDate(today, -119), today]);
-  return computeTrainingLoad(rows, today, 120);
+     GROUP BY start_time_local::date ORDER BY date`,
+    [shiftDate(today, -(warmupDays - 1)), today]);
+  return computeTrainingLoad(rows, today, warmupDays);
 }
 
 // Weekly mileage (runs only), newest first, with real Monday labels. The
@@ -560,6 +574,7 @@ async function buildContext(db) {
     // timestamp here busts the prompt cache every request. The coach still
     // needs "today" to resolve relative dates ("Saturday").
     today,
+    today_day: dowOf(today),
     window_days: WINDOW_DAYS,
     profile,
     coach_memory,
@@ -691,8 +706,8 @@ async function buildDayFocus(db, date) {
       ? { kind: 'missed', date, day: dowOf(date), planned, routine }
       : { kind: 'planned', date, day: dowOf(date), planned, routine };
   }
-  if (routine) return { kind: 'routine', date, routine };
-  return { kind: 'rest', date };
+  if (routine) return { kind: 'routine', date, day: dowOf(date), routine };
+  return { kind: 'rest', date, day: dowOf(date) };
 }
 
 // Priming prompt that tops the copy-context dump — frames the role for whichever
@@ -760,7 +775,12 @@ async function renderContextDump(db) {
     `sleep ${A.sleep_score ?? '—'}, readiness ${A.readiness_score ?? '—'}`
   );
   out.push(
-    `Load: acute ${L.acute_load ?? 'null'}, ACWR factor ${L.acwr_factor_pct ?? 'null'}%, ` +
+    `14-day load avg: acute ${A.acute_load ?? 'null'}, ACWR ratio ${A.acwr_ratio ?? 'null'}, ` +
+    `Garmin ACWR readiness factor score ${A.acwr_readiness_factor_score ?? 'null'}`
+  );
+  out.push(
+    `Load: acute ${L.acute_load ?? 'null'}, ACWR ${L.acwr ? JSON.stringify(L.acwr) : 'null'}, ` +
+    `Garmin ACWR readiness factor score ${L.acwr_readiness_factor_score ?? 'null'}, ` +
     `recovery time ${L.recovery_time_minutes ?? 'null'} min, status ${L.training_status || 'null'}, ` +
     `body battery ${L.body_battery ? JSON.stringify(L.body_battery) : 'null'}`
   );
@@ -835,6 +855,7 @@ async function buildPlanningContext(db, recentPushes = []) {
   const goal_paces = resolveGoalPaces(races, records).map((g) => ({
     name: g.name,
     date: g.date,
+    day: g.date ? dowOf(g.date) : null,
     distance: g.distance ? g.distance.key : null,
     goal_time: g.goalTimeSec != null ? hms(g.goalTimeSec) : null,
     goal_pace: g.goalPace ? g.goalPace.pace : null,

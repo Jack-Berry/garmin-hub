@@ -2,7 +2,8 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const {
   buildContext, buildDayFocus, deriveSignals, sectionProfile,
-  sectionRecentRuns, sectionRecovery, sectionUpcoming, sectionWeeklyMileage,
+  sectionRecentRuns, sectionRecovery, sectionTrainingLoad, sectionUpcoming,
+  sectionWeeklyMileage,
 } = require('./context');
 
 const baseRecovery = (latest) => ({
@@ -95,7 +96,7 @@ test('profile context skips a malformed race date with a warning', async () => {
   };
   const profile = await sectionProfile(db);
   assert.equal(profile.races.length, 1);
-  assert.match(profile.races[0], /^Good race.*2026-11-01.*20:00$/);
+  assert.match(profile.races[0], /^Good race.*2026-11-01 \(Sun\).*20:00$/);
   assert.match(profile.warnings[0], /Bad race \(2026-99-99\)/);
 });
 
@@ -120,10 +121,51 @@ test('recent runs and planned entries carry explicit weekday labels', async () =
 test('missing recovery load fields stay null rather than becoming zero', async () => {
   const recovery = await sectionRecovery({ all: async () => [{}] }, '2026-10-14');
   assert.equal(recovery.latest.acute_load, null);
-  assert.equal(recovery.latest.acwr_factor_pct, null);
+  assert.equal(recovery.latest.acwr, null);
+  assert.equal(recovery.latest.acwr_readiness_factor_score, null);
   assert.equal(recovery.latest.recovery_time_minutes, null);
   assert.equal(recovery.latest.body_battery, null);
   assert.equal(recovery.avg_14d.acute_load, null);
+});
+
+test('recovery exposes real ACWR separately from the Garmin readiness factor score', async () => {
+  const row = {
+    calendar_date: '2026-10-14', acwr_factor_pct: 86,
+    raw_json: { training_status: { mostRecentTrainingStatus: { latestTrainingStatusData: {
+      device: { acuteTrainingLoadDTO: {
+        dailyAcuteChronicWorkloadRatio: 1.21, acwrStatus: 'OPTIMAL',
+      } },
+    } } } },
+  };
+  const recovery = await sectionRecovery({ all: async () => [row] }, '2026-10-14');
+  assert.deepEqual(recovery.latest.acwr, { ratio: 1.21, status: 'OPTIMAL' });
+  assert.equal(recovery.latest.acwr_readiness_factor_score, 86);
+  assert.equal(recovery.avg_14d.acwr_ratio, 1.21);
+});
+
+test('training load uses a 365-day warm-up', async () => {
+  let params;
+  await sectionTrainingLoad({ all: async (_sql, values) => { params = values; return []; } },
+    '2026-10-14');
+  assert.deepEqual(params, ['2025-10-15', '2026-10-14']);
+});
+
+test('routine and rest focus entries carry weekdays', async () => {
+  const restDb = {
+    all: async () => [],
+    get: async (sql) => sql.includes('SELECT routines_json') ? { routines_json: [] } : undefined,
+  };
+  assert.equal((await buildDayFocus(restDb, '2026-10-18')).day, 'Sun');
+
+  const routineDb = {
+    all: async () => [],
+    get: async (sql) => sql.includes('SELECT routines_json')
+      ? { routines_json: [{ activity: 'Football', day: 'Sun', intensity: 8 }] }
+      : undefined,
+  };
+  const routine = await buildDayFocus(routineDb, '2026-10-18');
+  assert.equal(routine.kind, 'routine');
+  assert.equal(routine.day, 'Sun');
 });
 
 test('context is byte-stable across two builds on the same day', async () => {
@@ -147,4 +189,5 @@ test('context is byte-stable across two builds on the same day', async () => {
   const first = JSON.stringify(await buildContext(db));
   const second = JSON.stringify(await buildContext(db));
   assert.equal(second, first);
+  assert.match(JSON.parse(first).today_day, /^(Sun|Mon|Tue|Wed|Thu|Fri|Sat)$/);
 });
