@@ -10,11 +10,23 @@ from dotenv import load_dotenv
 import psycopg
 
 from ingest import (
-    DEFAULT_DSN, ENV_PATH, WEATHER_RETRY_DAYS, call_with_rate_limit_retry,
-    dumps, login, weather_row,
+    DEFAULT_DSN, ENV_PATH, WEATHER_RETRY_DAYS, _is_rate_limit,
+    call_with_rate_limit_retry, dumps, login, weather_row,
 )
 
 CALL_DELAY_S = 2.0
+
+
+def is_activity_failure(error):
+    """True only for a failure tied to this one activity (not found, or a
+    payload we cannot parse). Rate limits, expired sessions and network or
+    database errors stop the backfill instead, so a rerun can resume without
+    any run being wrongly marked as having no weather."""
+    if _is_rate_limit(error) or "auth" in type(error).__name__.lower():
+        return False
+    status = getattr(error, "status_code", None) or getattr(
+        getattr(error, "response", None), "status_code", None)
+    return status == 404 or "404" in str(error) or isinstance(error, (ValueError, TypeError))
 
 
 def pending_work(conn):
@@ -41,9 +53,17 @@ def run_backfill(g, conn, limit, sleep=time.sleep):
     for uuid in gear:
         if calls >= limit:
             break
-        activities = call_with_rate_limit_retry(
-            lambda uuid=uuid: g.get_gear_activities(uuid),
-            f"gear activities {uuid}", sleep)
+        try:
+            activities = call_with_rate_limit_retry(
+                lambda uuid=uuid: g.get_gear_activities(uuid),
+                f"gear activities {uuid}", sleep)
+        except Exception as error:
+            calls += 1
+            print(f"  gear activities {uuid}: skipped after error: {error}")
+            if _is_rate_limit(error):
+                return calls
+            sleep(CALL_DELAY_S)
+            continue
         calls += 1
         for activity in activities if isinstance(activities, list) else []:
             aid = activity.get("activityId")
@@ -77,6 +97,9 @@ def run_backfill(g, conn, limit, sleep=time.sleep):
         except Exception as error:
             calls += 1
             conn.rollback()
+            if not is_activity_failure(error):
+                print(f"  weather {aid}: stopping, rerun later: {error}")
+                break
             conn.execute(
                 "UPDATE activities SET weather_raw_json=%s WHERE activity_id=%s "
                 "AND weather_raw_json IS NULL",

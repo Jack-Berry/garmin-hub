@@ -232,6 +232,41 @@ class GearWeatherTests(unittest.TestCase):
         self.assertEqual(len(updates), 2)
         self.assertIn("backfill_error", updates[0][1][0])
 
+    def test_backfill_stops_on_rate_limit_without_marking(self):
+        old = date(2020, 1, 1)
+
+        class BackfillConn(Conn):
+            def execute(self, sql, params=None):
+                self.executed.append((sql, params))
+                if "SELECT gear_uuid" in sql:
+                    return Result(rows=[])
+                if "SELECT activity_id, start_time_local::date" in sql:
+                    return Result(rows=[(1, old), (2, old)])
+                return Result()
+
+        class LimitedGarmin:
+            def get_activity_weather(self, aid):
+                raise RuntimeError("429 Too Many Requests")
+
+        conn = BackfillConn()
+        backfill.run_backfill(LimitedGarmin(), conn, 5, sleep=lambda _s: None)
+        self.assertFalse([sql for sql, _ in conn.executed if "UPDATE activities SET" in sql])
+
+    def test_gear_garmin_failure_is_a_warning_and_retired_totals_are_kept(self):
+        class FailingGarmin:
+            def get_gear(self, owner_id):
+                raise RuntimeError("500 Server Error")
+
+        summary = new_summary()
+        summary["_owner_id"] = 143177116
+        summary["_changed_run_ids"] = [123]
+        ingest_gear(FailingGarmin(), Conn(), summary, sleep=lambda _s: None)
+        self.assertEqual(len(summary["warnings"]), 1)
+        self.assertEqual(summary["errors"], [])
+        retired = gear_row({**GEAR, "gearStatusName": "retired"})
+        self.assertNotIn("garmin_total_distance_m", retired)
+        self.assertNotIn("raw_json", retired)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -611,13 +611,14 @@ def call_with_rate_limit_retry(call, label, sleep=time.sleep,
 # Pull 3 - Gear assignment and activity weather
 # =========================================================================
 def gear_row(item, stats=None):
-    stats = stats or {}
-    combined = {**item, **stats}
+    """stats is None when they were not fetched (retired gear): the stored
+    Garmin total and raw stats are then left as they are, not wiped."""
+    combined = {**item, **(stats or {})}
     uuid = pick(combined, "uuid", "gearUuid", "gearUUID")
     if not uuid:
         return None
     status = pick(combined, "gearStatusName", "status")
-    return {
+    row = {
         "gear_uuid": str(uuid),
         "display_name": pick(combined, "displayName", "gearName", "name"),
         "make_name": pick(combined, "gearMakeName", "makeName"),
@@ -625,9 +626,11 @@ def gear_row(item, stats=None):
         "status": status,
         "date_begin": pick(combined, "dateBegin"),
         "retired": str(status or "").lower() not in ("", "active"),
-        "garmin_total_distance_m": pick(combined, "totalDistance", "totalDistanceMeters"),
-        "raw_json": dumps({"gear": item, "stats": stats}),
     }
+    if stats is not None:
+        row["garmin_total_distance_m"] = pick(combined, "totalDistance", "totalDistanceMeters")
+        row["raw_json"] = dumps({"gear": item, "stats": stats})
+    return row
 
 
 def weather_row(payload):
@@ -667,20 +670,42 @@ def weather_row(payload):
 
 
 def ingest_gear(g, conn, summary, sleep=time.sleep):
+    """Best effort, like weather: a Garmin failure here is a warning, so it can
+    never fail the ingest exit code that gates the brief and debriefs. Database
+    errors still raise and roll the section back."""
     changed_ids = summary["_changed_run_ids"]
     if not changed_ids:
         return
+    try:
+        _ingest_gear(g, conn, summary, changed_ids, sleep)
+    except GarminCallFailed as failure:
+        summary["warnings"].append(f"gear {failure}: {failure.__cause__}")
+
+
+class GarminCallFailed(Exception):
+    """A Garmin API call failed; distinguishes it from a database error."""
+
+
+def _garmin(call, label, sleep):
+    try:
+        return call_with_rate_limit_retry(call, label, sleep)
+    except Exception as error:
+        raise GarminCallFailed(label) from error
+
+
+def _ingest_gear(g, conn, summary, changed_ids, sleep):
     owner_id = summary.get("_owner_id")
     if not isinstance(owner_id, int):
-        profile = call_with_rate_limit_retry(g.get_user_profile, "user profile", sleep)
+        profile = _garmin(g.get_user_profile, "user profile", sleep)
         user_data = profile.get("userData", {}) if isinstance(profile, dict) else {}
         owner_id = first(pick(user_data, "id", "userProfileId", "userProfilePk"),
                          pick(profile or {}, "id", "userProfileId", "userProfilePk"))
         if not (isinstance(owner_id, (int, float)) or str(owner_id or "").isdigit()):
-            raise RuntimeError("numeric Garmin user profile id unavailable")
+            raise GarminCallFailed("user profile") from RuntimeError(
+                "numeric Garmin user profile id unavailable")
         owner_id = int(owner_id)
         sleep(GEAR_DELAY_S)
-    items = as_list(call_with_rate_limit_retry(
+    items = as_list(_garmin(
         lambda: g.get_gear(owner_id), "gear list", sleep), "gear", "gearStats")
     sleep(GEAR_DELAY_S)
     for item in items:
@@ -688,9 +713,9 @@ def ingest_gear(g, conn, summary, sleep=time.sleep):
         if not uuid:
             continue
         status = str(pick(item, "gearStatusName", "status") or "").lower()
-        stats = {}
+        stats = None
         if status in ("", "active"):
-            stats = call_with_rate_limit_retry(
+            stats = _garmin(
                 lambda uuid=uuid: g.get_gear_stats(uuid), f"gear stats {uuid}", sleep)
             sleep(GEAR_DELAY_S)
         row = gear_row(item, stats)
@@ -698,7 +723,7 @@ def ingest_gear(g, conn, summary, sleep=time.sleep):
         summary["gear"][result] += 1
 
     for aid in changed_ids:
-        linked = as_list(call_with_rate_limit_retry(
+        linked = as_list(_garmin(
             lambda aid=aid: g.get_activity_gear(aid), f"activity gear {aid}", sleep),
             "gear", "gearStats")
         uuid = pick(linked[0], "uuid", "gearUuid", "gearUUID") if linked else None
