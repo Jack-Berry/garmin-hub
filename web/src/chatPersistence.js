@@ -51,3 +51,16 @@ export function actionRefreshReason(thread, index, baseRevision) {
   if (!message) return 'changed';
   return ACTION_FLAGS.some((flag) => message[flag]) ? 'already handled' : null;
 }
+
+// Coming back to the app after this long starts a fresh chat.
+export const FRESH_CHAT_AFTER_MS = 30 * 60 * 1000;
+
+const lastUserText = (messages) =>
+  [...messages].reverse().find((m) => m.role === 'user' && !m.system)?.content;
+
+// The athlete's last message when the saved copy does not end with it, so a
+// turn lost to another device's newer save can go back in the input box.
+export function unsavedUserText(local, saved = []) {
+  const text = lastUserText(local);
+  return text && text !== lastUserText(saved) ? text : null;
+}

@@ -8,7 +8,8 @@ import { ActivationFlow } from './PlanActivation';
 import CoachMemory from './CoachMemory';
 import ChatHistory from './ChatHistory';
 import {
-  actionRefreshReason, compactMessages, restoredMode, restoreMessages,
+  actionRefreshReason, compactMessages, FRESH_CHAT_AFTER_MS, restoredMode,
+  restoreMessages, unsavedUserText,
 } from './chatPersistence';
 
 // Floating chat coach — a discreet bottom-right widget that answers training
@@ -85,6 +86,8 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
   const messagesRef = useRef([]);
   const loadTokenRef = useRef(0);
   const saveInFlightRef = useRef(null);
+  const hiddenAtRef = useRef(null);
+  const syncingRef = useRef(false);
 
   const planning = mode === 'planning';
   const actionBusy = pushingIdx != null || savingIdx != null || applyingIdx != null;
@@ -159,44 +162,34 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
     }
   };
 
-  const restoreLatest = async (nextMode) => {
-    const token = ++loadTokenRef.current;
-    setThreadLoading(true);
-    setMode(nextMode);
-    setMessages([]);
-    setRestoreNote(null);
-    try {
-      const threads = await api.chatThreads(nextMode);
-      if (token !== loadTokenRef.current) return;
-      if (threads[0]) {
-        const thread = await api.chatThread(threads[0].id);
-        applyLoadedThread(thread, token);
-      } else {
-        resetThread(nextMode);
-      }
-    } catch (e) {
-      if (token === loadTokenRef.current) {
-        resetThread(nextMode);
-        setError(e.message || 'Could not load saved conversations');
-      }
-    } finally {
-      if (token === loadTokenRef.current) setThreadLoading(false);
-    }
+  // A thread deleted elsewhere starts a fresh chat rather than locking input.
+  const restartDeleted = (unsentText = null) => {
+    resetThread('chat');
+    if (unsentText) setInput(unsentText);
+    setError(`This conversation was deleted on another device, so a new chat was started.${
+      unsentText ? ' Your last message is back in the box.' : ''}`);
   };
 
-  const loadConflict = async (id) => {
+  // `unsent` is the local copy that failed to save: its last message goes back
+  // in the input box instead of being lost.
+  const loadConflict = async (id, unsent = []) => {
     const token = ++loadTokenRef.current;
     setThreadLoading(true);
     try {
       const thread = await api.chatThread(id);
-      applyLoadedThread(thread, token, 'This conversation changed on another device. The newer version is shown.');
-      setError('This conversation changed on another device. Your stale copy was not saved.');
+      const text = unsavedUserText(unsent, thread.messages);
+      if (!applyLoadedThread(thread, token, 'This conversation changed on another device. The newer version is shown.')) return;
+      if (text) setInput(text);
+      setError(text
+        ? 'This conversation changed on another device. Your last message is back in the box to send again.'
+        : 'This conversation changed on another device. Your stale copy was not saved.');
     } catch (e) {
-      if (token === loadTokenRef.current) {
+      if (token !== loadTokenRef.current) return;
+      if (e.status === 404) {
+        restartDeleted(unsavedUserText(unsent));
+      } else {
         setThreadConflict(true);
-        setError(e.status === 404
-          ? 'This conversation was deleted on another device. Start a new chat to continue.'
-          : e.message || 'Could not refresh the changed conversation');
+        setError(e.message || 'Could not refresh the changed conversation');
       }
     } finally {
       if (token === loadTokenRef.current) setThreadLoading(false);
@@ -223,7 +216,7 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
         return saved;
       } catch (e) {
         if (threadIdRef.current !== expectedId) return { dropped: true };
-        if (e.status === 409) await loadConflict(expectedId);
+        if (e.status === 409) await loadConflict(expectedId, nextMessages);
         if (e.status === 413) {
           setThreadFull(true);
           setError('This conversation is full. Start a new one.');
@@ -327,16 +320,66 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seed]);
 
-  // Opening the coach restores the newest saved conversation for its current
-  // mode once per mount. Explicit mode switches use restoreLatest directly.
+  // Opening the coach after the app loads starts a fresh chat. Saved chats
+  // are continued from History.
   useEffect(() => {
     if ((!open && !appMode) || (appMode && !active) || initializedRef.current) return;
     initializedRef.current = true;
-    restoreLatest(mode);
-    // The first visible mount is the restore boundary; later mode changes are
+    resetThread(mode);
+    // The first visible mount is the start boundary; later mode changes are
     // deliberate and routed through enterMode.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, appMode, active]);
+
+  // Re-read the open chat when the athlete comes back, so a turn sent from
+  // another device shows up before they type. Skipped while this device has
+  // unsaved work: that save meets the conflict path instead.
+  const syncOpenThread = async () => {
+    const id = threadIdRef.current;
+    if (!id || !createdRef.current || syncingRef.current) return;
+    syncingRef.current = true;
+    try {
+      await saveInFlightRef.current?.catch(() => {});
+      const unchanged = () => threadIdRef.current === id &&
+        JSON.stringify(messagesRef.current) === savedSnapshotRef.current;
+      if (!unchanged()) return;
+      const thread = await api.chatThread(id);
+      if (!unchanged() || thread.revision === revisionRef.current) return;
+      const typed = inputRef.current?.value || '';
+      if (applyLoadedThread(thread, ++loadTokenRef.current, 'Updated from your other device.')) setInput(typed);
+    } catch (e) {
+      if (e.status === 404 && threadIdRef.current === id) restartDeleted();
+    } finally {
+      syncingRef.current = false;
+    }
+  };
+
+  // A long absence starts a fresh chat (the old one stays in History). A
+  // window refocus without hiding, such as a desktop window switch, only syncs.
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.hidden) {
+        hiddenAtRef.current = Date.now();
+        return;
+      }
+      const away = hiddenAtRef.current == null ? 0 : Date.now() - hiddenAtRef.current;
+      hiddenAtRef.current = null;
+      if (!initializedRef.current || navigationBusy) return;
+      if (away >= FRESH_CHAT_AFTER_MS) resetThread('chat');
+      else syncOpenThread();
+    };
+    const onFocus = () => {
+      if (initializedRef.current && !navigationBusy && !document.hidden) syncOpenThread();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('focus', onFocus);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('focus', onFocus);
+    };
+    // Handlers read refs; navigationBusy is the only render value they need.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navigationBusy]);
 
   // Auto-grow the input with its content: reset to the natural (rows=3) height,
   // then fit scrollHeight. The max-h class caps it around 8 rows, after which
@@ -837,23 +880,32 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
           </h2>
         </div>
         <div className="flex shrink-0 items-center gap-1">
+          <button
+            onClick={() => setMemoryOpen(true)}
+            title="View what the coach remembers"
+            aria-label="Memory"
+            className="rounded-lg border border-line px-2 py-1 text-xs text-ink-secondary transition hover:bg-surface-2"
+          >
+            <Icon name="brain" />
+          </button>
+          <button
+            onClick={() => newThread()}
+            disabled={navigationBusy || !messages.length}
+            title="Start a new chat"
+            aria-label="New chat"
+            className="rounded-lg border border-line px-2 py-1 text-xs text-ink-secondary transition hover:bg-surface-2 disabled:opacity-50"
+          >
+            <Icon name="message-plus" />
+          </button>
+          <button
+            onClick={() => setHistoryOpen(true)}
+            disabled={navigationBusy}
+            className="rounded-lg border border-line px-2 py-1 text-xs text-ink-secondary transition hover:bg-surface-2 disabled:opacity-50"
+          >
+            History
+          </button>
           {planning ? (
             <>
-              <button
-                onClick={() => setMemoryOpen(true)}
-                title="View what the coach remembers"
-                aria-label="Memory"
-                className="rounded-lg border border-line px-2 py-1 text-xs text-ink-secondary transition hover:bg-surface-2"
-              >
-                <Icon name="brain" />
-              </button>
-              <button
-                onClick={() => setHistoryOpen(true)}
-                disabled={navigationBusy}
-                className="rounded-lg border border-line px-2 py-1 text-xs text-ink-secondary transition hover:bg-surface-2 disabled:opacity-50"
-              >
-                History
-              </button>
               <button
                 onClick={() => enterMode('chat')}
                 disabled={navigationBusy}
@@ -864,21 +916,6 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
             </>
           ) : (
             <>
-              <button
-                onClick={() => setMemoryOpen(true)}
-                title="View what the coach remembers"
-                aria-label="Memory"
-                className="rounded-lg border border-line px-2 py-1 text-xs text-ink-secondary transition hover:bg-surface-2"
-              >
-                <Icon name="brain" />
-              </button>
-              <button
-                onClick={() => setHistoryOpen(true)}
-                disabled={navigationBusy}
-                className="rounded-lg border border-line px-2 py-1 text-xs text-ink-secondary transition hover:bg-surface-2 disabled:opacity-50"
-              >
-                History
-              </button>
               <button
                 onClick={() => enterMode('planning')}
                 disabled={navigationBusy}
