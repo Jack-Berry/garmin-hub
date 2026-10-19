@@ -8,8 +8,8 @@ import { ActivationFlow } from './PlanActivation';
 import CoachMemory from './CoachMemory';
 import ChatHistory from './ChatHistory';
 import {
-  actionRefreshReason, compactMessages, FRESH_CHAT_AFTER_MS, restoredMode,
-  restoreMessages, unsavedUserText,
+  actionRefreshReason, compactMessages, FRESH_CHAT_AFTER_MS, joinableThread,
+  LIVE_SYNC_MS, restoredMode, restoreMessages, unsavedUserText,
 } from './chatPersistence';
 
 // Floating chat coach — a discreet bottom-right widget that answers training
@@ -88,6 +88,9 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
   const saveInFlightRef = useRef(null);
   const hiddenAtRef = useRef(null);
   const syncingRef = useRef(false);
+  // True only for an automatic fresh chat (launch, long absence), which may
+  // join a chat in use on another device. A chosen New chat never does.
+  const followRef = useRef(false);
 
   const planning = mode === 'planning';
   const actionBusy = pushingIdx != null || savingIdx != null || applyingIdx != null;
@@ -99,6 +102,7 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
 
   const resetThread = (nextMode) => {
     loadTokenRef.current++;
+    followRef.current = false;
     const id = freshId();
     threadIdRef.current = id;
     threadModeRef.current = nextMode;
@@ -117,6 +121,11 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
     setThreadFull(false);
     setThreadConflict(false);
     savedSnapshotRef.current = null;
+  };
+
+  const startFresh = () => {
+    resetThread('chat');
+    followRef.current = true;
   };
 
   const newThread = (nextMode = mode) => {
@@ -164,7 +173,7 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
 
   // A thread deleted elsewhere starts a fresh chat rather than locking input.
   const restartDeleted = (unsentText = null) => {
-    resetThread('chat');
+    startFresh();
     if (unsentText) setInput(unsentText);
     setError(`This conversation was deleted on another device, so a new chat was started.${
       unsentText ? ' Your last message is back in the box.' : ''}`);
@@ -273,6 +282,7 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
     seedRequestRef.current = nextSeed.id;
     setSeedPrompt(null);
     loadTokenRef.current++;
+    followRef.current = false;
     threadIdRef.current = seedThreadId;
     threadModeRef.current = 'chat';
     messagesRef.current = opening;
@@ -325,7 +335,8 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
   useEffect(() => {
     if ((!open && !appMode) || (appMode && !active) || initializedRef.current) return;
     initializedRef.current = true;
-    resetThread(mode);
+    startFresh();
+    liveSync();
     // The first visible mount is the start boundary; later mode changes are
     // deliberate and routed through enterMode.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -343,6 +354,8 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
       const unchanged = () => threadIdRef.current === id &&
         JSON.stringify(messagesRef.current) === savedSnapshotRef.current;
       if (!unchanged()) return;
+      const { revision } = await api.chatThreadRevision(id);
+      if (revision === revisionRef.current) return;
       const thread = await api.chatThread(id);
       if (!unchanged() || thread.revision === revisionRef.current) return;
       const typed = inputRef.current?.value || '';
@@ -353,6 +366,28 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
       syncingRef.current = false;
     }
   };
+
+  // An untouched automatic fresh chat joins the chat another device used in
+  // the last 30 minutes, so a handoff needs no trip to History.
+  const followActiveThread = async () => {
+    const id = threadIdRef.current;
+    const untouched = () => followRef.current && threadIdRef.current === id &&
+      !messagesRef.current.length && !inputRef.current?.value;
+    if (!untouched() || syncingRef.current) return;
+    syncingRef.current = true;
+    try {
+      const latest = joinableThread(await api.latestChatThread(), id);
+      if (!latest || !untouched()) return;
+      const thread = await api.chatThread(latest.id);
+      if (untouched()) applyLoadedThread(thread, ++loadTokenRef.current);
+    } catch {
+      // A missed poll is retried on the next tick.
+    } finally {
+      syncingRef.current = false;
+    }
+  };
+
+  const liveSync = () => (createdRef.current ? syncOpenThread() : followActiveThread());
 
   // A long absence starts a fresh chat (the old one stays in History). A
   // window refocus without hiding, such as a desktop window switch, only syncs.
@@ -365,11 +400,11 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
       const away = hiddenAtRef.current == null ? 0 : Date.now() - hiddenAtRef.current;
       hiddenAtRef.current = null;
       if (!initializedRef.current || navigationBusy) return;
-      if (away >= FRESH_CHAT_AFTER_MS) resetThread('chat');
-      else syncOpenThread();
+      if (away >= FRESH_CHAT_AFTER_MS) startFresh();
+      liveSync();
     };
     const onFocus = () => {
-      if (initializedRef.current && !navigationBusy && !document.hidden) syncOpenThread();
+      if (initializedRef.current && !navigationBusy && !document.hidden) liveSync();
     };
     document.addEventListener('visibilitychange', onVisibility);
     window.addEventListener('focus', onFocus);
@@ -380,6 +415,16 @@ export default function ChatWidget({ appMode = false, active = true, seed = null
     // Handlers read refs; navigationBusy is the only render value they need.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [navigationBusy]);
+
+  // While the coach is on screen, follow turns sent from another device.
+  const onScreen = appMode ? active : open;
+  useEffect(() => {
+    if (!onScreen || !threadId || navigationBusy) return undefined;
+    const timer = setInterval(() => { if (!document.hidden) liveSync(); }, LIVE_SYNC_MS);
+    return () => clearInterval(timer);
+    // liveSync reads refs only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onScreen, threadId, navigationBusy]);
 
   // Auto-grow the input with its content: reset to the natural (rows=3) height,
   // then fit scrollHeight. The max-h class caps it around 8 rows, after which

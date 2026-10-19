@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  actionRefreshReason, compactMessages, restoredMode, restoreMessages, unsavedUserText,
+  actionRefreshReason, compactMessages, joinableThread, restoredMode, restoreMessages, unsavedUserText,
 } from './chatPersistence.js';
 
 test('compacts plan preview segments while preserving review summaries and action state', () => {
@@ -51,4 +51,12 @@ test('unsaved user text is the last local message the saved copy lacks', () => {
   assert.equal(unsavedUserText(saved, saved), null);
   assert.equal(unsavedUserText([...saved, { role: 'user', content: 'x', system: true }], saved), null);
   assert.equal(unsavedUserText(local), 'pasted');
+});
+
+test('a fresh chat joins only a recently used thread from elsewhere', () => {
+  const latest = { id: 'phone', age_s: 120 };
+  assert.equal(joinableThread(latest, 'laptop'), latest);
+  assert.equal(joinableThread(latest, 'phone'), null);
+  assert.equal(joinableThread({ id: 'phone', age_s: 1800 }, 'laptop'), null);
+  assert.equal(joinableThread(null, 'laptop'), null);
 });

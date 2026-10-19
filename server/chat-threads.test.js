@@ -24,6 +24,10 @@ function fakePools() {
       },
       get: async (sql, params) => {
         calls.reads.push({ sql, params });
+        if (/LIMIT 1/.test(sql)) {
+          const newest = [...rows.values()].sort((a, b) => b.updated_at.localeCompare(a.updated_at))[0];
+          return newest && { id: newest.id, mode: newest.mode, revision: newest.revision, age_s: 5 };
+        }
         const row = rows.get(params[0]);
         return row && { ...row };
       },
@@ -156,5 +160,17 @@ test('stale, deleted and mode-changing updates return 409 without writing', asyn
     assert.equal((await request(`${f.url}/shared`, 'DELETE')).status, 200);
     assert.equal((await request(f.url, 'POST', { ...initial, base: 1 })).status, 409,
       'deleted row resurrection');
+  } finally { await f.close(); }
+});
+
+test('live sync reads the newest thread and a thread revision', async () => {
+  const f = await fixture();
+  try {
+    assert.equal(await (await request(`${f.url}/latest`)).json(), null);
+    await request(f.url, 'POST', { id: 'a', mode: 'chat', messages: [] });
+    await request(f.url, 'POST', { id: 'a', mode: 'chat', messages: [], base: 1 });
+    assert.deepEqual(await (await request(`${f.url}/a/revision`)).json(), { revision: 2 });
+    assert.equal((await request(`${f.url}/missing/revision`)).status, 404);
+    assert.ok(f.calls.reads.every(({ sql }) => /SELECT/.test(sql)));
   } finally { await f.close(); }
 });
