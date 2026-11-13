@@ -170,6 +170,30 @@ def upsert(conn, table, pk_cols, row):
     return "inserted" if cur.fetchone()[0] else "updated"
 
 
+def remove_overlapping_apple_activities(conn, garmin_activity_id):
+    """Remove Apple copies after Garmin lands, in the caller's transaction."""
+    rows = conn.execute(
+        "SELECT apple.activity_id FROM activities apple "
+        "JOIN activities garmin ON garmin.activity_id=%s AND garmin.source='garmin' "
+        "WHERE apple.source='apple_health' "
+        "AND activity_windows_overlap("
+        "apple.start_time_local, apple.duration_s, garmin.start_time_local, "
+        "garmin.start_time_local + garmin.duration_s * interval '1 second') "
+        "FOR UPDATE OF apple",
+        (garmin_activity_id,),
+    ).fetchall()
+    activity_ids = [row[0] for row in rows]
+    if not activity_ids:
+        return 0
+    conn.execute("DELETE FROM laps WHERE activity_id = ANY(%s)", (activity_ids,))
+    deleted = conn.execute(
+        "DELETE FROM activities WHERE source='apple_health' "
+        "AND activity_id = ANY(%s) RETURNING activity_id",
+        (activity_ids,),
+    ).fetchall()
+    return len(deleted)
+
+
 def prompt_mfa():
     """Interactive MFA. Garmin calls this only when a code is required."""
     return input("Enter Garmin MFA / 2FA code: ").strip()
@@ -327,6 +351,7 @@ def ingest_activities(g, conn, summary):
 
         result = upsert(conn, "activities", ["activity_id"], row)
         summary["activities"][result] += 1
+        remove_overlapping_apple_activities(conn, aid)
 
         if not unchanged:
             ingest_laps(g, conn, aid, summary)

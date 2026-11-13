@@ -81,6 +81,16 @@ test('Garmin overlap skips without writing', async () => {
   assert.equal(store.activities.size, 0);
 });
 
+test('Garmin-first overlap uses the shared half-open database rule', async () => {
+  let query = '';
+  const store = memoryStore({ overlap: true });
+  store.db.get = async (sql) => { query = sql; return { activity_id: '123' }; };
+  await syncWorkouts(store, [workout()]);
+  assert.match(query, /activity_windows_overlap\(/);
+  assert.match(query, /source = 'garmin'/);
+  assert.match(query, /AT TIME ZONE 'Europe\/London'/);
+});
+
 test('lap rows are written and reported', async () => {
   const store = memoryStore();
   const result = await syncWorkouts(store, [workout()]);
@@ -116,5 +126,7 @@ test('schema source and id sign guard keeps ingest away from Apple rows', () => 
   for (const sql of [schema, migration]) {
     assert.match(sql, /source = 'garmin' AND activity_id > 0/);
     assert.match(sql, /source = 'apple_health' AND activity_id < 0/);
+    assert.match(sql, /activity_start < candidate_end/);
+    assert.match(sql, /activity_start \+ activity_duration_s \* interval '1 second' > candidate_start/);
   }
 });

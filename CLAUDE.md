@@ -50,6 +50,7 @@ Migrated from SQLite (July 2026) — key facts:
   - `activity_type` — raw Garmin `activityType.typeKey` (e.g. `running`, `treadmill_running`).
   - `activity_group` — derived coarse bucket for filtering: any `*running*` → `run`, `soccer`/`football` → `football`, any `*walking*` → `walk`, else `other`. Set by ingest.
   - `source` - `garmin` or `apple_health`. Garmin ingest only upserts its own positive ids; Apple workouts use deterministic negative 60-bit ids and are written by the API.
+    When Garmin later ingests an overlapping activity, it removes the Apple copy and its laps in the same activities transaction, so Garmin wins regardless of arrival order.
   - `gear_uuid` and the typed weather columns are populated after the activity upsert. `weather_raw_json` is the fidelity copy; a non-NULL value is also the no-refetch marker.
 - **`gear`** - one row per Garmin gear item (PK `gear_uuid`). Garmin's display name, make/model, lifecycle, start date and total distance are source-of-truth fields; activity sums are only a UI check. Profile shoes link by normalised exact name for display and optional mileage alerts, never as ownership truth.
 - **`laps`** — splits per activity (PK `activity_id` + `lap_index`). Per-lap metrics incl. `intensity_type` (active vs recovery) for matching executed intervals to planned ones.

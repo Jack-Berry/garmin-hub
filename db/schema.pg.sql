@@ -122,6 +122,20 @@ CREATE TABLE IF NOT EXISTS activities (
 CREATE INDEX IF NOT EXISTS idx_activities_start_time_local
   ON activities (start_time_local);
 
+CREATE OR REPLACE FUNCTION activity_windows_overlap(
+  activity_start timestamp, activity_duration_s double precision,
+  candidate_start timestamp, candidate_end timestamp
+) RETURNS boolean
+LANGUAGE sql IMMUTABLE PARALLEL SAFE
+AS $$
+  SELECT activity_start IS NOT NULL
+     AND activity_duration_s IS NOT NULL
+     AND candidate_start IS NOT NULL
+     AND candidate_end IS NOT NULL
+     AND activity_start < candidate_end
+     AND activity_start + activity_duration_s * interval '1 second' > candidate_start
+$$;
+
 CREATE TABLE IF NOT EXISTS gear (
   gear_uuid                    text PRIMARY KEY,
   display_name                 text,

@@ -66,9 +66,10 @@ function validateBatch(body) {
 
 const overlapSql = `SELECT activity_id::text AS activity_id FROM activities
   WHERE source = 'garmin'
-    AND start_time_local < ($2::timestamptz AT TIME ZONE 'Europe/London')
-    AND start_time_local + duration_s * interval '1 second'
-      > ($1::timestamptz AT TIME ZONE 'Europe/London')
+    AND activity_windows_overlap(
+      start_time_local, duration_s,
+      $1::timestamptz AT TIME ZONE 'Europe/London',
+      $2::timestamptz AT TIME ZONE 'Europe/London')
   LIMIT 1`;
 
 const upsertSql = `INSERT INTO activities (
