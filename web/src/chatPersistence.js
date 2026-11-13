@@ -51,3 +51,23 @@ export function actionRefreshReason(thread, index, baseRevision) {
   if (!message) return 'changed';
   return ACTION_FLAGS.some((flag) => message[flag]) ? 'already handled' : null;
 }
+
+// Coming back to the app after this long starts a fresh chat, unless another
+// device used a chat within the same window, which is then joined instead.
+export const FRESH_CHAT_AFTER_MS = 30 * 60 * 1000;
+// How often an on-screen coach checks for turns sent from another device.
+export const LIVE_SYNC_MS = 3000;
+
+// A fresh chat joins the newest thread when another device used it recently.
+export const joinableThread = (latest, currentId) =>
+  latest && latest.id !== currentId && latest.age_s * 1000 < FRESH_CHAT_AFTER_MS ? latest : null;
+
+const lastUserText = (messages) =>
+  [...messages].reverse().find((m) => m.role === 'user' && !m.system)?.content;
+
+// The athlete's last message when the saved copy does not end with it, so a
+// turn lost to another device's newer save can go back in the input box.
+export function unsavedUserText(local, saved = []) {
+  const text = lastUserText(local);
+  return text && text !== lastUserText(saved) ? text : null;
+}

@@ -60,6 +60,23 @@ function createChatThreadsRouter({ db, writeDb }) {
     res.json(rows);
   }));
 
+  // Cheap reads for live sync: devices poll these every few seconds while the
+  // coach is on screen and fetch a full thread only when its revision moves.
+  router.get('/latest', handler(async (req, res) => {
+    const row = await db.get(
+      `SELECT thread_id AS id, mode, revision,
+              EXTRACT(EPOCH FROM now() - updated_at)::int AS age_s
+       FROM chat_threads ORDER BY updated_at DESC LIMIT 1`);
+    res.json(row || null);
+  }));
+
+  router.get('/:id/revision', handler(async (req, res) => {
+    const row = await db.get(
+      'SELECT revision FROM chat_threads WHERE thread_id = $1', [req.params.id]);
+    if (!row) throw fail(404, 'thread not found');
+    res.json({ revision: row.revision });
+  }));
+
   router.get('/:id', handler(async (req, res) => {
     const row = await db.get(
       `SELECT thread_id AS id, mode, title, messages_json AS messages, revision,
