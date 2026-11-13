@@ -3,6 +3,7 @@ import { api } from '../api';
 import { useFetch } from '../useFetch';
 import { Section, StateWrap, PageMore, Icon } from '../ui';
 import { km, duration, pace, shortDate } from '../format';
+import ActivitySourceLabel from '../ActivitySourceLabel';
 
 const SHOWN = ['run', 'football'];
 const ACT_ICON = { run: 'run', football: 'ball-football' };
@@ -32,6 +33,7 @@ export default function RecentActivities({ onSelect }) {
                         <span className="flex min-w-0 items-center gap-2">
                           <Icon name={ACT_ICON[a.activity_group] || 'run'} className="shrink-0 text-base text-ink-muted" />
                           <span className="truncate font-body text-sm font-medium text-ink">{a.name}</span>
+                          <ActivitySourceLabel source={a.source} />
                         </span>
                         <span className="shrink-0 font-mono text-[11px] text-ink-muted">{shortDate(a.start_time_local)}</span>
                       </div>
@@ -68,6 +70,7 @@ export default function RecentActivities({ onSelect }) {
                               className="shrink-0 text-base text-ink-muted"
                             />
                             <span className="truncate font-body text-ink">{a.name}</span>
+                            <ActivitySourceLabel source={a.source} />
                           </span>
                         </td>
                         <td className="px-2 py-2 whitespace-nowrap font-mono tabular-nums text-ink-secondary">{km(a.distance_m)}</td>

@@ -92,7 +92,8 @@ This coaching app is updated by the athlete and their developer. You do not reme
 
 - 2026-10-14: moved to Claude 5.5 models (Sonnet 5.5 for chat, day insights and the daily brief; Opus 5.5 for detailed reports and planning) with adaptive thinking. New honesty rules: verify claims against the data, lead with your own assessment, disagree plainly, state confidence, and name risks.
 - 2026-10-15: shared coaching principles (easy and hard balance, progression, taper, illness, back-to-back quality, exact dates). New evidence: training history and plan compliance tools, CTL, ATL and TSB, the real acute to chronic load ratio, and a 7-day recovery trend. Calibrated to agree clearly when the evidence supports the athlete. Post-run debriefs, a Sunday weekly review that you later see as your own earlier view, deterministic risk warnings, and saved chats shared between Mac and phone.
-- 2026-10-15, later: per-run temperature and dew point with a heat-adjusted pace estimate, shoe mileage from Garmin gear, and fitness, race prediction and month calendar views in the app.`;
+- 2026-10-15, later: per-run temperature and dew point with a heat-adjusted pace estimate, shoe mileage from Garmin gear, and fitness, race prediction and month calendar views in the app.
+- 2026-11-13: Apple Watch workouts are now identified in recent training and activity detail. They include HealthKit splits and heart rate but do not include Garmin training load, training effect or running dynamics.`;
 
 // Static framing for the chat coach — the interactive sibling of the daily
 // insight. Same analyst-not-generator role; conversational rather than essay.

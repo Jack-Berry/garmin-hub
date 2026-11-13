@@ -25,7 +25,34 @@ targets:
         INFOPLIST_KEY_CFBundleDisplayName: Garmin Hub
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UILaunchScreen_BackgroundColor: LaunchBackground
+        INFOPLIST_KEY_NSHealthShareUsageDescription: Garmin Hub reads Apple Watch workouts to keep your training history complete.
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: UIInterfaceOrientationPortrait
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         SUPPORTS_MACCATALYST: NO
         TARGETED_DEVICE_FAMILY: "1"
+    attributes:
+      SystemCapabilities:
+        com.apple.HealthKit:
+          enabled: 1
+  GarminHubTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests
+    dependencies:
+      - target: GarminHub
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.beriscope.garminhub.tests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Garmin Hub.app/Garmin Hub"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+schemes:
+  GarminHub:
+    build:
+      targets:
+        GarminHub: all
+        GarminHubTests: [test]
+    test:
+      targets:
+        - GarminHubTests

@@ -142,6 +142,26 @@ test('activity detail tolerates missing weather columns', async () => {
   assert.match(detail, /5km in 25:00/);
 });
 
+test('coach context identifies Apple Watch activities and missing Garmin metrics', async () => {
+  const row = {
+    activity_id: '-816190287298885765', source: 'apple_health', date: '2026-10-12',
+    start_time_local: '2026-10-12 08:00:00', name: 'Apple Watch running',
+    activity_type: 'running', activity_group: 'run', distance_m: 5000,
+    duration_s: 1500, avg_hr: 150, max_hr: 170,
+  };
+  const db = {
+    all: async (sql) => {
+      if (sql.includes('FROM activities')) return [row];
+      return [];
+    },
+  };
+  const recent = await sectionRecentRuns(db, '2026-10-14');
+  assert.equal(recent[0].source, 'apple_health');
+  const detail = await activityDetail(db, { activityId: row.activity_id });
+  assert.match(detail, /apple_health, id -816190287298885765/);
+  assert.match(detail, /Garmin training load, training effect and running dynamics are unavailable/);
+});
+
 test('recent runs and planned entries carry explicit weekday labels', async () => {
   const recentDb = {
     all: async (sql) => sql.includes('FROM activities') ? [{

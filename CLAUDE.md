@@ -49,6 +49,7 @@ Migrated from SQLite (July 2026) — key facts:
 - **`activities`** — one row per completed activity (PK `activity_id`). Run metrics, HR + zones, cadence, power + zones, running dynamics, training load/effect, VO2max, full elevation, calories, geo lat/long for weather backfill, fastest splits. Logic-bearing columns:
   - `activity_type` — raw Garmin `activityType.typeKey` (e.g. `running`, `treadmill_running`).
   - `activity_group` — derived coarse bucket for filtering: any `*running*` → `run`, `soccer`/`football` → `football`, any `*walking*` → `walk`, else `other`. Set by ingest.
+  - `source` - `garmin` or `apple_health`. Garmin ingest only upserts its own positive ids; Apple workouts use deterministic negative 60-bit ids and are written by the API.
   - `gear_uuid` and the typed weather columns are populated after the activity upsert. `weather_raw_json` is the fidelity copy; a non-NULL value is also the no-refetch marker.
 - **`gear`** - one row per Garmin gear item (PK `gear_uuid`). Garmin's display name, make/model, lifecycle, start date and total distance are source-of-truth fields; activity sums are only a UI check. Profile shoes link by normalised exact name for display and optional mileage alerts, never as ownership truth.
 - **`laps`** — splits per activity (PK `activity_id` + `lap_index`). Per-lap metrics incl. `intensity_type` (active vs recovery) for matching executed intervals to planned ones.
@@ -98,6 +99,7 @@ Garmin's own `race` boolean is unreliable — it's `false` even for workouts tit
 
 - `POST /api/planned/:schedule_id/race-override` — body `{ override }` where override is `1` (force race), `0` (force not-race), or `null` (revert to auto). Writes **only** `is_race_override`.
 - `POST /api/profile` — replaces the single `profile` row (shoes/races/injuries/routines/notes/runna_ical_url). `GET /api/profile` returns parsed arrays.
+- `POST /api/health/workouts` - accepts capped HealthKit workout batches from the iPhone shell. It skips windows already covered by Garmin and atomically upserts Apple activities plus their laps through the write pool.
 - `POST /api/coach/daily` — generates the glance brief and inserts a `daily` row into `coach_notes`.
 - `POST /api/plan/save` — persists a reviewed adapted plan (Stage 9b/9c): re-runs the Python guard on the exact specs being written, then ONE atomic statement (CTE chain: delete prior plan rows on the new plan's date span → prune parents left with no sessions → insert the `plans` parent → multi-row session insert) writing `source='app'` rows sharing a fresh `plan_id`. DB write only — no Garmin. One-off pushed sessions (`plan_id` NULL) are never deleted by a re-save; a span whose plan rows are already partly pushed to Garmin is **refused (409)** — replacing a live plan is re-adaptation (9d), which owns unscheduling.
 - `POST /api/plan/:plan_id/push-next` — activation core: pushes the oldest future pending session to Garmin, records the returned `workout_id`, and returns progress. Once none remain, activation retires an already-finished incumbent as `completed` or an overlapping unfinished incumbent as `archived`, then marks the incoming plan `active`; an unfinished non-overlapping incumbent remains active and the incoming plan becomes `queued`. Retirement is written before the incoming flip. The client loops sequentially under the shared plan lock; Garmin-succeeded-but-record-failed returns `recorded:false` so a blind retry cannot double-book.
@@ -232,6 +234,10 @@ daily `com.garminhub.offsite` pull, which retains private local snapshots for
 The iPhone project is generated from `ios/project.yml`. Its `hub://dashboard`
 scheme proxies the dashboard, assets, and API to the droplet with the Keychain
 API key on every request. External links leave the shell and receive no key.
+After the API key is configured, the shell requests read-only HealthKit access
+and syncs Apple Watch workouts with a persisted anchored query. Active app
+transitions and HealthKit background delivery use the same idempotent endpoint;
+the anchor advances only after the server accepts the batch.
 
 ### Batch 7A charts
 

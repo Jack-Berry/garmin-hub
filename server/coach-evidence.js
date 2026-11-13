@@ -75,7 +75,7 @@ async function trainingHistorySummary(db, input = {}, today) {
   const weeks = clampWeeks(input.weeks, 12, 52);
   const from = shiftDate(mondayOf(today), -(weeks - 1) * 7);
   const activities = await db.all(
-    `SELECT activity_id, start_time_local::date AS date, name, distance_m, duration_s,
+    `SELECT activity_id::text AS activity_id, source, start_time_local::date AS date, name, distance_m, duration_s,
             avg_hr, avg_speed_mps, avg_grade_adjusted_speed_mps,
             hr_zone1_s, hr_zone2_s, hr_zone3_s, hr_zone4_s, hr_zone5_s,
             activity_training_load, elevation_gain_m
@@ -84,7 +84,7 @@ async function trainingHistorySummary(db, input = {}, today) {
        AND start_time_local::date <= $2
      ORDER BY start_time_local`, [from, today]);
   const laps = activities.length ? await db.all(
-    `SELECT activity_id, lap_index, distance_m, duration_s, avg_hr,
+    `SELECT activity_id::text AS activity_id, lap_index, distance_m, duration_s, avg_hr,
             avg_grade_adjusted_speed_mps, intensity_type
      FROM laps WHERE activity_id = ANY($1::bigint[]) ORDER BY activity_id, lap_index`,
     [activities.map((row) => row.activity_id)]) : [];
@@ -189,7 +189,7 @@ async function planComplianceSummary(db, input = {}, today) {
      ORDER BY p.calendar_date, p.schedule_id`, [from, to, today]);
   const planned = collapseRaceDuplicates(applyAppPlanPrecedence(rows, from));
   const runs = await db.all(
-    `SELECT activity_id, start_time_local::date AS date, name, distance_m
+    `SELECT activity_id::text AS activity_id, source, start_time_local::date AS date, name, distance_m
      FROM activities
      WHERE activity_group = 'run' AND start_time_local::date >= $1
        AND start_time_local::date <= $2

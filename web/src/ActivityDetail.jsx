@@ -8,6 +8,7 @@ import { AXIS, GRID, INK, Badge, Icon, StateWrap, btnPrimary } from './ui';
 import { duration, km, pace, paceFromMps, shortDate } from './format';
 import { matchIntervals, planMatchesActivity } from './activityMatch';
 import DebriefCard from './DebriefCard';
+import ActivitySourceLabel from './ActivitySourceLabel';
 
 const has = (value) => value != null && value !== '';
 const number = (value, digits = 0) => has(value) ? Number(value).toFixed(digits) : '-';
@@ -229,8 +230,8 @@ function DetailBody({ data, plannedState, debriefState, dayActivities, onAskCoac
         <Metric label="Time" value={duration(activity.duration_s)} />
         {!football && <Metric label="Average pace" value={pace(activity.distance_m, activity.duration_s)} />}
         <Metric label="Average HR" value={has(activity.avg_hr) ? `${Math.round(activity.avg_hr)} bpm` : null} />
-        <Metric label="Training effect" value={effect || null} />
-        <Metric label="Load" value={has(activity.activity_training_load) ? number(activity.activity_training_load) : null} />
+        <Metric label="Training effect" value={effect || '—'} />
+        <Metric label="Load" value={has(activity.activity_training_load) ? number(activity.activity_training_load) : '—'} />
       </div>
       <div className="space-y-6 px-4 py-5 sm:px-6">
         {has(activity.temperature_c) && (
@@ -286,7 +287,10 @@ export default function ActivityDetail({ activity, dayActivities, onClose, onAsk
       <div role="dialog" aria-modal="true" aria-label={`Activity detail for ${activity.name}`} className="mobile-sheet my-auto flex h-full max-h-none w-full max-w-5xl flex-col overflow-hidden bg-surface-1 shadow-2xl sm:h-auto sm:max-h-[90vh] sm:rounded-2xl sm:border sm:border-line" onClick={(event) => event.stopPropagation()}>
         <header className="flex shrink-0 items-start justify-between gap-3 border-b border-line px-4 py-4 sm:px-6">
           <div className="min-w-0">
-            <p className="font-body text-nano font-semibold uppercase tracking-[0.18em] text-ink-muted">{shortDate(activity.start_time_local)}</p>
+            <div className="flex flex-wrap items-center gap-2">
+              <p className="font-body text-nano font-semibold uppercase tracking-[0.18em] text-ink-muted">{shortDate(activity.start_time_local)}</p>
+              <ActivitySourceLabel source={activity.source} />
+            </div>
             <h2 className="mt-1 truncate font-display text-lg font-extrabold uppercase tracking-[0.03em] text-ink">{activity.name || 'Activity'}</h2>
           </div>
           <button onClick={onClose} aria-label="Close activity detail" className="shrink-0 rounded-lg border border-line px-2.5 py-1 text-sm text-ink-secondary transition hover:bg-surface-2">✕</button>

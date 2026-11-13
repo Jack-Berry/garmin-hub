@@ -29,6 +29,25 @@ const wrap = (pool) => ({
   all: async (sql, params) => (await pool.query(sql, params)).rows,
   get: async (sql, params) => (await pool.query(sql, params)).rows[0],
   run: (sql, params) => pool.query(sql, params),
+  transaction: async (work) => {
+    const client = await pool.connect();
+    const tx = {
+      all: async (sql, params) => (await client.query(sql, params)).rows,
+      get: async (sql, params) => (await client.query(sql, params)).rows[0],
+      run: (sql, params) => client.query(sql, params),
+    };
+    try {
+      await client.query('BEGIN');
+      const result = await work(tx);
+      await client.query('COMMIT');
+      return result;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  },
   end: () => pool.end(),
 });
 

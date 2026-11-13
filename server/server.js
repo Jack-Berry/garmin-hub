@@ -25,6 +25,7 @@ const { planFinished } = require('./plan-date');
 const { createProactiveRouter } = require('./proactive-coach');
 const { createChatThreadsRouter } = require('./chat-threads');
 const { createFitnessRouter } = require('./fitness-trends');
+const { createHealthWorkoutsRouter } = require('./health-workouts');
 const { addHeatAdjustment, createGearRouter } = require('./gear');
 const { createNotifyService, createNotifyRouter } = require('./notify');
 
@@ -56,6 +57,7 @@ app.use('/api/coach', createProactiveRouter({ db, writeDb, notifier }));
 app.use('/api/notifications', createNotifyRouter(notifier));
 app.use('/api/chat-threads', createChatThreadsRouter({ db, writeDb }));
 app.use('/api', createFitnessRouter({ db }));
+app.use('/api', createHealthWorkoutsRouter({ db, writeDb }));
 app.use('/api/gear', createGearRouter({ db }));
 
 // Curated column lists, derived once from the schema (everything but raw_json).
@@ -70,6 +72,8 @@ const cols = async (table) =>
 
 let ACTIVITY_COLS = [];
 let LAP_COLS = [];
+const exactIdColumns = (columns) => columns.map((column) =>
+  column === 'activity_id' ? 'activity_id::text AS activity_id' : column).join(', ');
 
 // Wrap a handler so any thrown/rejected error becomes a 500 with a message.
 const handler = (fn) => async (req, res) => {
@@ -100,22 +104,25 @@ app.get('/api/activities', handler(async (req, res) => {
   const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
   params.push(limit);
   const rows = await db.all(
-    `SELECT ${ACTIVITY_COLS.join(', ')} FROM activities
+    `SELECT ${exactIdColumns(ACTIVITY_COLS)} FROM activities
      ${clause} ORDER BY start_time_local DESC LIMIT $${params.length}`, params);
   res.json(rows);
 }));
 
 // Single activity with its laps. ?raw=1 includes raw_json.
 app.get('/api/activities/:id', handler(async (req, res) => {
-  const id = Number(req.params.id);
+  const id = /^-?\d+$/.test(req.params.id) ? req.params.id : null;
+  if (!id) return res.status(400).json({ error: 'invalid activity id' });
   const includeRaw = req.query.raw === '1';
-  const select = includeRaw ? '*' : ACTIVITY_COLS.join(', ');
+  const select = includeRaw
+    ? `${exactIdColumns(ACTIVITY_COLS)}, raw_json, weather_raw_json`
+    : exactIdColumns(ACTIVITY_COLS);
   const activity = await db.get(
-    `SELECT ${select} FROM activities WHERE activity_id = $1`, [id]);
+    `SELECT ${select} FROM activities WHERE activity_id = $1::bigint`, [id]);
   if (!activity) return res.status(404).json({ error: 'activity not found' });
-  const lapSelect = includeRaw ? '*' : LAP_COLS.join(', ');
+  const lapSelect = includeRaw ? `${exactIdColumns(LAP_COLS)}, raw_json` : exactIdColumns(LAP_COLS);
   const laps = await db.all(
-    `SELECT ${lapSelect} FROM laps WHERE activity_id = $1 ORDER BY lap_index`, [id]);
+    `SELECT ${lapSelect} FROM laps WHERE activity_id = $1::bigint ORDER BY lap_index`, [id]);
   res.json({ ...addHeatAdjustment(activity), laps });
 }));
 

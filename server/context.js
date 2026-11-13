@@ -274,7 +274,7 @@ async function sectionWeeklyReview(db) {
 // Recent runs over the window (runs only), each with a work-rep summary when
 // the session was structured.
 async function sectionRecentRuns(db, today) {
-  const runColumns = `activity_id, start_time_local::date AS date, distance_m, duration_s, avg_hr,
+  const runColumns = `activity_id::text AS activity_id, source, start_time_local::date AS date, distance_m, duration_s, avg_hr,
             hr_zone1_s, hr_zone2_s, hr_zone3_s, hr_zone4_s, hr_zone5_s,
             activity_training_load, training_effect_label, aerobic_training_effect,
             elevation_gain_m, avg_grade_adjusted_speed_mps`;
@@ -298,7 +298,7 @@ async function sectionRecentRuns(db, today) {
   // All laps for the whole run set in ONE query (the old per-run lookup was a
   // fine prepared-statement loop under SQLite but an N+1 of awaits under pg).
   const lapRows = runRows.length ? await db.all(
-    `SELECT activity_id, distance_m, duration_s, intensity_type
+    `SELECT activity_id::text AS activity_id, distance_m, duration_s, intensity_type
      FROM laps WHERE activity_id = ANY($1::bigint[])
      ORDER BY activity_id, lap_index`,
     [runRows.map((r) => r.activity_id)]) : [];
@@ -315,6 +315,7 @@ async function sectionRecentRuns(db, today) {
     const run = {
       date: r.date,
       day: dowOf(r.date),
+      source: r.source || 'garmin',
       km,
       pace: pace(r.duration_s / km),
       grade_adjusted_pace: r.avg_grade_adjusted_speed_mps
@@ -662,7 +663,7 @@ async function buildDayFocus(db, date) {
   // ALL runs on the date, oldest first — a double day is two sessions, and
   // silently analysing one of them was a lie by omission.
   const actRows = await db.all(
-    `SELECT activity_id, name, start_time_local::date AS date, distance_m, duration_s,
+    `SELECT activity_id::text AS activity_id, source, name, start_time_local::date AS date, distance_m, duration_s,
             avg_hr, max_hr, hr_zone1_s, hr_zone2_s, hr_zone3_s, hr_zone4_s, hr_zone5_s,
             avg_cadence_spm, avg_power, aerobic_training_effect, anaerobic_training_effect,
             training_effect_label, activity_training_load, elevation_gain_m,
@@ -729,7 +730,7 @@ async function buildDayFocus(db, date) {
     const recovery = await sectionAlignedRecovery(db, date, today);
 
     const lapRows = await db.all(
-      `SELECT activity_id, distance_m, duration_s, intensity_type FROM laps
+      `SELECT activity_id::text AS activity_id, distance_m, duration_s, intensity_type FROM laps
        WHERE activity_id = ANY($1::bigint[]) ORDER BY activity_id, lap_index`,
       [actRows.map((a) => a.activity_id)]);
 
@@ -738,6 +739,7 @@ async function buildDayFocus(db, date) {
       const run = {
         date: a.date,
         day: dowOf(a.date),
+        source: a.source || 'garmin',
         name: a.name,
         km,
         pace: pace(a.duration_s / km),
@@ -1106,7 +1108,7 @@ async function scheduledSummary(db, from, to) {
 // only when a question needs it — per-lap HR, cadence, power and running
 // dynamics, the data that answers HR drift across reps, pacing execution and
 // running economy.
-const ACTIVITY_BASE_COLS = `activity_id, start_time_local, start_time_local::date AS date, name, activity_type,
+const ACTIVITY_BASE_COLS = `activity_id::text AS activity_id, source, start_time_local, start_time_local::date AS date, name, activity_type,
        activity_group, distance_m, duration_s, avg_hr, max_hr,
        hr_zone1_s, hr_zone2_s, hr_zone3_s, hr_zone4_s, hr_zone5_s,
        avg_cadence_spm, avg_power, norm_power, avg_ground_contact_ms,
@@ -1167,13 +1169,16 @@ const activityHeader = (a) => {
   const zoneMin = zoneMinutes(
     [a.hr_zone1_s, a.hr_zone2_s, a.hr_zone3_s, a.hr_zone4_s, a.hr_zone5_s]);
   const lines = [
-    `${a.date} — ${a.name || 'activity'}  [${a.activity_type || a.activity_group}, id ${a.activity_id}]`,
+    `${a.date} - ${a.name || 'activity'}  [${a.activity_type || a.activity_group}, ${a.source || 'garmin'}, id ${a.activity_id}]`,
     `  ${km}km in ${hms(a.duration_s)}${km ? `, avg ${pace(a.duration_s / km)}/km` : ''}` +
       `, HR ${num(a.avg_hr)} avg / ${num(a.max_hr)} max` +
       (a.activity_training_load != null ? `, load ${num(a.activity_training_load)}` : '') +
       (a.training_effect_label ? `, effect ${a.training_effect_label}` : '') +
       `, aerobic TE ${dec(a.aerobic_training_effect)} / anaerobic TE ${dec(a.anaerobic_training_effect)}`,
   ];
+  if (a.source === 'apple_health') {
+    lines.push('  Apple Watch source: Garmin training load, training effect and running dynamics are unavailable.');
+  }
   if (zoneMin) {
     lines.push(`  HR minutes by zone 1-5: ${zoneMin.map((m) => (m == null ? '—' : m)).join(' / ')}`);
   }
@@ -1284,7 +1289,7 @@ async function activityDetail(db, { date, activityId } = {}) {
   }
 
   const lapRows = await db.all(
-    `SELECT activity_id, lap_index, distance_m, duration_s, avg_hr, max_hr,
+    `SELECT activity_id::text AS activity_id, lap_index, distance_m, duration_s, avg_hr, max_hr,
             avg_cadence_spm, avg_power, ground_contact_ms, stride_length_cm,
             vertical_ratio, intensity_type
      FROM laps WHERE activity_id = ANY($1::bigint[]) ORDER BY activity_id, lap_index`,

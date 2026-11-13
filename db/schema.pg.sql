@@ -104,6 +104,10 @@ CREATE TABLE IF NOT EXISTS activities (
   -- Appended by SQLite migration (live column order preserved)
   activity_type                text,    -- Garmin activityType.typeKey
   activity_group               text,    -- derived bucket: run/football/walk/other
+  source                       text NOT NULL DEFAULT 'garmin'
+                               CONSTRAINT activities_source_check
+                               CHECK ((source = 'garmin' AND activity_id > 0)
+                                   OR (source = 'apple_health' AND activity_id < 0)),
 
   -- Garmin gear and recorded activity weather
   gear_uuid                    text,

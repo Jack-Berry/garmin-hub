@@ -183,7 +183,7 @@ function createProactiveRouter(options) {
   };
   router.post('/debriefs/pending', handle(async (req, res) => res.json(await service.pendingDebriefs())));
   router.get('/debriefs/:activityId', handle(async (req, res) => {
-    if (!/^\d+$/.test(req.params.activityId)) return res.status(400).json({ error: 'bad activity id' });
+    if (!/^-?\d+$/.test(req.params.activityId)) return res.status(400).json({ error: 'bad activity id' });
     const row = await options.db.get(
       `SELECT id, created_at, content, model, date_range_start, date_range_end
        FROM coach_notes WHERE CASE WHEN note_type = 'debrief'
