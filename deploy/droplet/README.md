@@ -247,6 +247,8 @@ delete the current volume until its backup has been copied and verified.
 
 Before each update, run `jobs.sh backup`. Pull the selected revision, then:
 
+Apple Watch sync deploy order: apply `db/migrate_apple_health_activities.sql` to the live database before deploying this code, because ingest calls the new overlap function.
+
 ```sh
 docker compose --project-name garmin-hub --env-file deploy/droplet/.env \
   -f deploy/droplet/compose.yml up -d --build
