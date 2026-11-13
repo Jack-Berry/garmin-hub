@@ -2,6 +2,10 @@ const crypto = require('crypto');
 
 const MAX_BATCH = 50;
 const MAX_SPLITS = 500;
+// Garmin history starts 23 May 2026. Older Watch workouts would add years of
+// unrelated history, and very short ones are accidental starts.
+const HISTORY_START = Date.parse('2026-05-23T00:00:00+01:00');
+const MIN_DURATION_S = 180;
 const ACTIVITY_TYPES = new Map([
   [24, ['hiking', 'walk']],
   [37, ['running', 'run']],
@@ -104,6 +108,11 @@ const insertLapsSql = `INSERT INTO laps (
 async function syncWorkouts({ db, writeDb }, workouts) {
   const result = { imported: [], skipped: [] };
   for (const workout of workouts) {
+    const duration = workout.duration ?? ((Date.parse(workout.end) - Date.parse(workout.start)) / 1000);
+    if (Date.parse(workout.start) < HISTORY_START || duration < MIN_DURATION_S) {
+      result.skipped.push({ uuid: workout.uuid, reason: duration < MIN_DURATION_S ? 'too_short' : 'before_history' });
+      continue;
+    }
     const activityId = healthActivityId(workout.uuid);
     const overlap = await db.get(overlapSql, [workout.start, workout.end]);
     if (overlap) {
@@ -112,7 +121,6 @@ async function syncWorkouts({ db, writeDb }, workouts) {
     }
     const mapped = mapActivityType(workout.activityType);
     const distance = workout.distance ?? null;
-    const duration = workout.duration ?? ((Date.parse(workout.end) - Date.parse(workout.start)) / 1000);
     const splits = workout.splits.map((split, index) => ({
       lap_index: index + 1,
       distance_m: split.distance,
@@ -157,6 +165,6 @@ function createHealthWorkoutsRouter({ db, writeDb }) {
 }
 
 module.exports = {
-  MAX_BATCH, createHealthWorkoutsRouter, healthActivityId, mapActivityType,
+  HISTORY_START, MIN_DURATION_S, MAX_BATCH, createHealthWorkoutsRouter, healthActivityId, mapActivityType,
   syncWorkouts, validateBatch,
 };

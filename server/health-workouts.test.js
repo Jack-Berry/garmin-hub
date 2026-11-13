@@ -81,6 +81,17 @@ test('Garmin overlap skips without writing', async () => {
   assert.equal(store.activities.size, 0);
 });
 
+test('pre-Garmin-history and very short workouts skip without writing', async () => {
+  const store = memoryStore();
+  const old = workout({ start: '2026-05-22T22:59:00Z', end: '2026-05-22T23:30:00Z' });
+  const short = workout({ duration: 179, end: '2026-11-13T07:02:59Z' });
+  const kept = workout({ start: '2026-05-22T23:00:00Z', end: '2026-05-22T23:03:00Z', duration: 180 });
+  const result = await syncWorkouts(store, [old, short, kept]);
+  assert.deepEqual(result.skipped.map((item) => item.reason), ['before_history', 'too_short']);
+  assert.equal(result.imported.length, 1);
+  assert.equal(store.activities.size, 1);
+});
+
 test('Garmin-first overlap uses the shared half-open database rule', async () => {
   let query = '';
   const store = memoryStore({ overlap: true });
